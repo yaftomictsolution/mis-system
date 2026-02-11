@@ -1,33 +1,13 @@
-# Frontend (mis-front)
+# Frontend
 mis-front/node_modules/
 mis-front/.next/
-mis-front/out/
 mis-front/.env*
-mis-front/.DS_Store
 
-# Backend (mis-backend)
+# Backend
 mis-backend/vendor/
 mis-backend/node_modules/
 mis-backend/.env
-mis-backend/.env.backup
-mis-backend/.phpunit.result.cache
-mis-backend/Homestead.json
-mis-backend/Homestead.yaml
-mis-backend/npm-debug.log
-mis-backend/yarn-error.log
-mis-backend/storage/*.key
-mis-backend/public/hot
-mis-backend/public/storage
 
-# OS Files
+# OS
 .DS_Store
 Thumbs.db
-*.swp
-*.swo
-*~
-
-# IDE
-.vscode/
-.idea/
-*.sublime-project
-*.sublime-workspace
