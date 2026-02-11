@@ -1,0 +1,13 @@
+# Node / Next.js
+mis-front/node_modules
+mis-front/.next
+mis-front/.env*
+
+# Laravel
+mis-backend/vendor
+mis-backend/.env
+mis-backend/storage/*.key
+
+# OS
+.DS_Store
+Thumbs.db
