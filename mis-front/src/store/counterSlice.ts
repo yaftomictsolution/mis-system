@@ -4,18 +4,18 @@ interface CounterState {
   value: number
 }
 
-const initialState: CounterState = {
-  value: 0,
-}
+
 
 const counterSlice = createSlice({
   name: 'counter',
-  initialState,
+  initialState:{
+    value:0
+  },
   reducers: {
-    increment: (state) => {
+    increment: (state,action) => {
       state.value += 1
     },
-    decrement: (state) => {
+    decrement: (state,action) => {
       state.value -= 1
     },
   },

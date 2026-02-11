@@ -12,8 +12,9 @@ export default function Home() {
         <div className="min-h-screen flex items-center justify-center bg-gray-100">
           <div className="w-full max-w-md bg-white rounded-xl shadow-lg p-8">
             <h2 className="text-2xl font-bold text-center text-gray-800 mb-6">
-              Department Management System
+             {count}
             </h2>
+            
             <form className="space-y-4">
               <div>
                 <label className="text-sm text-gray-600">Email</label>
