@@ -1,8 +1,45 @@
-'use client'
+"use client";
 
-import { Provider } from 'react-redux'
-import { store } from '../src/store/store'
+import { Provider } from "react-redux";
+import { store } from "@/store/store";
+import { useEffect } from "react";
+import { hydrateAuth } from "@/store/auth/authSlice";
+import { ThemeProvider } from './context/ThemeContext'
+import CacheOnVisit from '@/pwa/CacheOnVisit';
+import DebugRegister from '@/pwa/debugRegister';
 
-export function Providers({ children }: { children: React.ReactNode }) {
-  return <Provider store={store}>{children}</Provider>
+function Bootstrap() {
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    const userRaw = localStorage.getItem("user");
+    let user = null;
+
+    if (userRaw) {
+      try {
+        user = JSON.parse(userRaw);
+      } catch {
+        user = null;
+      }
+    }
+
+    store.dispatch(
+      hydrateAuth({
+        token: token || null,
+        user,
+      })
+    );
+  }, []);
+
+  return null;
+}
+
+export default function Providers({ children }: { children: React.ReactNode }) {
+  return (
+    <Provider store={store}>
+      <DebugRegister />
+      <CacheOnVisit />
+      <Bootstrap />
+      <ThemeProvider>{children}</ThemeProvider>
+    </Provider>
+  );
 }
