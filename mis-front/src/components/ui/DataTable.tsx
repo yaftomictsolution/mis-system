@@ -21,6 +21,7 @@ interface DataTableProps<T extends Record<string, unknown>> {
   searchable?: boolean
   searchKeys?: (keyof T | string)[]
   pageSize?: number
+  loading?: boolean
 }
 
 export function DataTable<T extends Record<string, unknown>>({
@@ -32,6 +33,7 @@ export function DataTable<T extends Record<string, unknown>>({
   searchable = true,
   searchKeys,
   pageSize = 10,
+  loading = false,
 }: DataTableProps<T>) {
   const [searchTerm, setSearchTerm] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
@@ -82,6 +84,15 @@ export function DataTable<T extends Record<string, unknown>>({
               className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-[#0a0a0f] border border-slate-200 dark:border-[#2a2a3e] rounded-lg text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
             />
           </div>
+        </div>
+      )}
+      {loading && (
+        <div className="h-1 w-full overflow-hidden bg-slate-200 dark:bg-[#1a1a2e]">
+          <motion.div
+            className="h-full w-1/3 rounded-full bg-blue-600 dark:bg-blue-500"
+            animate={{ x: ["-120%", "320%"] }}
+            transition={{ duration: 1, ease: "linear", repeat: Infinity }}
+          />
         </div>
       )}
       <div className="overflow-x-auto">
@@ -151,7 +162,7 @@ export function DataTable<T extends Record<string, unknown>>({
                 </motion.tr>
               ))}
             </AnimatePresence>
-            {paginatedData.length === 0 && (
+            {!loading && paginatedData.length === 0 && (
               <tr>
                 <td colSpan={columns.length + 1} className="px-6 py-12 text-center text-slate-500 dark:text-slate-400">
                   No records found
@@ -163,8 +174,12 @@ export function DataTable<T extends Record<string, unknown>>({
       </div>
       <div className="p-4 border-t border-slate-200 dark:border-[#2a2a3e] flex items-center justify-between bg-slate-50 dark:bg-[#0a0a0f]">
         <span className="text-sm text-slate-500 dark:text-slate-400">
-          Showing {Math.min((safeCurrentPage - 1) * itemsPerPage + 1, filteredData.length)} to{' '}
-          {Math.min(safeCurrentPage * itemsPerPage, filteredData.length)} of {filteredData.length} entries
+          {loading
+            ? "Loading data..."
+            : `Showing ${Math.min((safeCurrentPage - 1) * itemsPerPage + 1, filteredData.length)} to ${Math.min(
+                safeCurrentPage * itemsPerPage,
+                filteredData.length
+              )} of ${filteredData.length} entries`}
         </span>
         <div className="flex gap-2">
           <button

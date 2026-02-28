@@ -1,5 +1,6 @@
 import { db, type CustomerRow } from "@/db/localDB";
 import { api } from "@/lib/api";
+import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { enqueueSync } from "@/sync/queue";
 
 const RETENTION_DAYS = 180;
@@ -11,228 +12,8 @@ const MAX_LOCAL_TEXT = 4000;
 const CURSOR_KEY = "customers_sync_cursor";
 const CLEANUP_KEY = "customers_last_cleanup_ms";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-type UnknownRecord = Record<string, unknown>;
 
-function online() {
-  return typeof navigator !== "undefined" && navigator.onLine;
-}
-
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === "object" && value !== null;
-}
-
-function readLocalNumber(key: string): number | null {
-  if (typeof window === "undefined") return null;
-  const raw = window.localStorage.getItem(key);
-  if (!raw) return null;
-
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function writeLocalNumber(key: string, value: number) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(key, String(value));
-}
-
-function readLocalString(key: string): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(key);
-}
-
-function writeLocalString(key: string, value: string) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(key, value);
-}
-
-function toTimestamp(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  const parsed = Date.parse(String(value ?? ""));
-  return Number.isFinite(parsed) ? parsed : Date.now();
-}
-
-function normalizeNullableText(value: unknown, maxLength = 255): string | null {
-  if (typeof value !== "string") return null;
-
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  return trimmed.slice(0, maxLength);
-}
-
-function normalizePhone(value: unknown): string {
-  if (typeof value !== "string") return "";
-  return value.trim().slice(0, 50);
-}
-
-function normalizeEmail(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim().toLowerCase();
-  return trimmed ? trimmed.slice(0, 255) : null;
-}
-
-function sanitizeCustomer(input: unknown): CustomerRow {
-  const record = isRecord(input) ? input : {};
-
-  return {
-    uuid: String(record.uuid ?? ""),
-    name: String(record.name ?? "").trim().slice(0, 255),
-    fname: normalizeNullableText(record.fname, 255),
-    gname: normalizeNullableText(record.gname, 255),
-    phone: normalizePhone(record.phone),
-    phone1: normalizeNullableText(record.phone1, 50),
-    email: normalizeEmail(record.email),
-    status: normalizeNullableText(record.status, 50),
-    // Prevent very large text/blob-like values from growing IndexedDB too much.
-    address: normalizeNullableText(record.address, MAX_LOCAL_TEXT),
-    updated_at: toTimestamp(record.updated_at ?? record.server_updated_at),
-  };
-}
-
-function validateCustomerRow(row: CustomerRow) {
-  
-  // console.log("Validating customer row:", row);
-  // return false;
-  if (!row.name) {
-    throw new Error("Full name is required.");
-  }
-
-  if (!row.phone) {
-    throw new Error("Primary phone is required.");
-  }
-
-  if (row.email && !EMAIL_REGEX.test(row.email)) {
-    throw new Error("Email format is invalid.");
-  }
-}
-
-async function assertNoLocalDuplicate(row: CustomerRow, ignoreUuid?: string) {
-  const phoneMatch = await db.customers.where("phone").equals(row.phone).first();
-  if (phoneMatch && phoneMatch.uuid !== ignoreUuid) {
-    throw new Error("This phone number already exists.");
-  }
-
-  if (row.email) {
-    const emailMatch = await db.customers
-      .filter((item) => (item.email ?? "").toLowerCase() === row.email!.toLowerCase() && item.uuid !== ignoreUuid)
-      .first();
-
-    if (emailMatch) {
-      throw new Error("This email already exists.");
-    }
-  }
-}
-
-function getApiErrorStatus(error: unknown): number | undefined {
-  if (!isRecord(error)) return undefined;
-  const response = error.response;
-  if (!isRecord(response)) return undefined;
-  const status = response.status;
-  return typeof status === "number" ? status : undefined;
-}
-
-function getApiErrorData(error: unknown): UnknownRecord | null {
-  if (!isRecord(error)) return null;
-  const response = error.response;
-  if (!isRecord(response)) return null;
-  const data = response.data;
-  return isRecord(data) ? data : null;
-}
-
-function parseApiErrorMessage(error: unknown): string {
-  const data = getApiErrorData(error);
-  const message = data?.message;
-  if (typeof message === "string" && message.trim()) {
-    return message;
-  }
-
-  const errors = data?.errors;
-  if (isRecord(errors)) {
-    for (const key of Object.keys(errors)) {
-      const value = errors[key];
-      if (Array.isArray(value) && typeof value[0] === "string") {
-        return value[0];
-      }
-    }
-  }
-
-  return "Validation failed on server.";
-}
-
-function isValidationStatus(status?: number): boolean {
-  return status === 409 || status === 422;
-}
-
-async function removeLatestQueuedOp(uuid: string, action: "create" | "update") {
-  const items = await db.sync_queue.where("uuid").equals(uuid).toArray();
-  const target = items
-    .filter((item) => item.entity === "customers" && item.action === action)
-    .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))[0];
-
-  if (target?.id !== undefined) {
-    await db.sync_queue.delete(target.id);
-  }
-}
-
-function customerMatchesQuery(row: CustomerRow, query: string): boolean {
-  const q = query.toLowerCase();
-  return (
-    row.name.toLowerCase().includes(q) ||
-    (row.fname ?? "").toLowerCase().includes(q) ||
-    (row.gname ?? "").toLowerCase().includes(q) ||
-    row.phone.toLowerCase().includes(q) ||
-    (row.phone1 ?? "").toLowerCase().includes(q) ||
-    (row.email ?? "").toLowerCase().includes(q)
-  );
-}
-
-function parseCustomersApiPayload(payload: unknown): {
-  list: UnknownRecord[];
-  hasMore: boolean;
-  serverTime: string;
-} {
-  if (Array.isArray(payload)) {
-    return {
-      list: payload.filter(isRecord),
-      hasMore: false,
-      serverTime: new Date().toISOString(),
-    };
-  }
-
-  const payloadRecord = isRecord(payload) ? payload : {};
-  const directData = payloadRecord.data;
-  if (Array.isArray(directData)) {
-    const meta = isRecord(payloadRecord.meta) ? payloadRecord.meta : {};
-    return {
-      list: directData.filter(isRecord),
-      hasMore: Boolean(meta.has_more),
-      serverTime: String(meta.server_time ?? new Date().toISOString()),
-    };
-  }
-
-  const nestedContainer = isRecord(directData) ? directData : {};
-  const nestedData = nestedContainer.data;
-  if (Array.isArray(nestedData)) {
-    const meta = isRecord(payloadRecord.meta) ? payloadRecord.meta : {};
-    const current = Number(nestedContainer.current_page ?? 1);
-    const last = Number(nestedContainer.last_page ?? 1);
-
-    return {
-      list: nestedData.filter(isRecord),
-      hasMore: current < last,
-      serverTime: String(meta.server_time ?? new Date().toISOString()),
-    };
-  }
-
-  return {
-    list: [],
-    hasMore: false,
-    serverTime: new Date().toISOString(),
-  };
-}
+type Obj = Record<string, unknown>;
 
 export type CustomersLocalQuery = {
   page?: number;
@@ -248,212 +29,372 @@ export type CustomersLocalPage = {
   hasMore: boolean;
 };
 
+const isOnline = () => typeof navigator !== "undefined" && navigator.onLine;
+const obj = (v: unknown): Obj => (typeof v === "object" && v !== null ? (v as Obj) : {});
+const nowIso = () => new Date().toISOString();
+
+function getLs(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(key);
+}
+
+function setLs(key: string, value: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(key, value);
+}
+
+function getLsNum(key: string): number | null {
+  const raw = getLs(key);
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toTs(v: unknown): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const d = Date.parse(String(v ?? ""));
+  return Number.isFinite(d) ? d : Date.now();
+}
+
+function trimOrNull(v: unknown, max = 255): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t ? t.slice(0, max) : null;
+}
+
+function toPhone(v: unknown): string {
+  if (typeof v !== "string") return "";
+  return v.trim().slice(0, 50);
+}
+
+function toEmail(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim().toLowerCase();
+  return t ? t.slice(0, 255) : null;
+}
+
+function sanitizeCustomer(input: unknown): CustomerRow {
+  const r = obj(input);
+
+  return {
+    uuid: String(r.uuid ?? ""),
+    name: String(r.name ?? "").trim().slice(0, 255),
+    fname: trimOrNull(r.fname, 255),
+    gname: trimOrNull(r.gname, 255),
+    phone: toPhone(r.phone),
+    phone1: trimOrNull(r.phone1, 50),
+    email: toEmail(r.email),
+    status: trimOrNull(r.status, 50),
+    address: trimOrNull(r.address, MAX_LOCAL_TEXT),
+    updated_at: toTs(r.updated_at ?? r.server_updated_at),
+  };
+}
+
+function isDeletedRecord(input: unknown): boolean {
+  const r = obj(input);
+  return r.deleted_at !== null && r.deleted_at !== undefined && String(r.deleted_at).trim() !== "";
+}
+
+function validateCustomer(row: CustomerRow): void {
+  if (!row.name) throw new Error("Full name is required.");
+  if (!row.phone) throw new Error("Primary phone is required.");
+  if (row.email && !EMAIL_REGEX.test(row.email)) {
+    throw new Error("Email format is invalid.");
+  }
+}
+
+async function assertNoDuplicate(row: CustomerRow, ignoreUuid?: string): Promise<void> {
+  const phone = await db.customers.where("phone").equals(row.phone).first();
+  if (phone && phone.uuid !== ignoreUuid) {
+    throw new Error("This phone number already exists.");
+  }
+
+  if (!row.email) return;
+
+  const email = row.email.toLowerCase();
+  const emailDup = await db.customers
+    .filter((item) => (item.email ?? "").toLowerCase() === email && item.uuid !== ignoreUuid)
+    .first();
+
+  if (emailDup) {
+    throw new Error("This email already exists.");
+  }
+}
+
+function getApiStatus(error: unknown): number | undefined {
+  return (error as { response?: { status?: number } }).response?.status;
+}
+
+function getApiErrorMessage(error: unknown): string {
+  const data = (error as { response?: { data?: { message?: unknown; errors?: unknown } } }).response?.data;
+
+  if (typeof data?.message === "string" && data.message.trim()) {
+    return data.message;
+  }
+
+  if (data?.errors && typeof data.errors === "object") {
+    for (const key of Object.keys(data.errors)) {
+      const v = (data.errors as Obj)[key];
+      if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+    }
+  }
+
+  return "Validation failed on server.";
+}
+
+const isValidationError = (status?: number) => status === 409 || status === 422;
+
+async function removeLatestQueueItem(uuid: string, action: "create" | "update"): Promise<void> {
+  const items = await db.sync_queue.where("uuid").equals(uuid).toArray();
+  const target = items
+    .filter((i) => i.entity === "customers" && i.action === action)
+    .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))[0];
+
+  if (target?.id !== undefined) {
+    await db.sync_queue.delete(target.id);
+  }
+}
+
+async function removeQueuedOpsForEntityUuids(entity: string, uuids: string[]): Promise<void> {
+  const unique = [...new Set(uuids.filter(Boolean))];
+  if (!unique.length) return;
+
+  const ids: number[] = [];
+  for (const uuid of unique) {
+    const items = await db.sync_queue.where("uuid").equals(uuid).toArray();
+    for (const item of items) {
+      if (item.entity === entity && item.id !== undefined) {
+        ids.push(item.id);
+      }
+    }
+  }
+
+  if (ids.length) {
+    await db.sync_queue.bulkDelete(ids);
+  }
+}
+
+function matchesSearch(row: CustomerRow, q: string): boolean {
+  return [row.name, row.fname, row.gname, row.phone, row.phone1, row.email]
+    .some((v) => (v ?? "").toLowerCase().includes(q));
+}
+
+function parseCustomersPayload(payload: unknown): { list: Obj[]; hasMore: boolean; serverTime: string } {
+  if (Array.isArray(payload)) {
+    return { list: payload.map(obj), hasMore: false, serverTime: nowIso() };
+  }
+
+  const root = obj(payload);
+  const meta = obj(root.meta);
+  const topData = root.data;
+
+  if (Array.isArray(topData)) {
+    return {
+      list: topData.map(obj),
+      hasMore: Boolean(meta.has_more),
+      serverTime: String(meta.server_time ?? nowIso()),
+    };
+  }
+
+  const paged = obj(topData);
+  const nested = paged.data;
+  if (Array.isArray(nested)) {
+    const current = Number(paged.current_page ?? 1);
+    const last = Number(paged.last_page ?? 1);
+
+    return {
+      list: nested.map(obj),
+      hasMore: current < last,
+      serverTime: String(meta.server_time ?? nowIso()),
+    };
+  }
+
+  return { list: [], hasMore: false, serverTime: nowIso() };
+}
+
 export async function customersListLocal(query: CustomersLocalQuery = {}): Promise<CustomersLocalPage> {
   await customersRetentionCleanupIfDue();
 
   const page = Math.max(1, query.page ?? 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, query.pageSize ?? DEFAULT_PAGE_SIZE));
   const offset = (page - 1) * pageSize;
-  const search = (query.q ?? "").trim().toLowerCase();
+  const q = (query.q ?? "").trim().toLowerCase();
 
-  if (!search) {
+  if (!q) {
     const total = await db.customers.count();
     const items = await db.customers.orderBy("updated_at").reverse().offset(offset).limit(pageSize).toArray();
-    return {
-      items,
-      page,
-      pageSize,
-      total,
-      hasMore: offset + items.length < total,
-    };
+    return { items, page, pageSize, total, hasMore: offset + items.length < total };
   }
 
-  const collection = db.customers.orderBy("updated_at").reverse().filter((row) => customerMatchesQuery(row, search));
-  const total = await collection.count();
-  const items = await collection.offset(offset).limit(pageSize).toArray();
+  const c = db.customers.orderBy("updated_at").reverse().filter((row) => matchesSearch(row, q));
+  const total = await c.count();
+  const items = await c.offset(offset).limit(pageSize).toArray();
 
-  return {
-    items,
-    page,
-    pageSize,
-    total,
-    hasMore: offset + items.length < total,
-  };
+  return { items, page, pageSize, total, hasMore: offset + items.length < total };
 }
 
-export async function customerGetLocal(uuid: string) {
+export async function customerGetLocal(uuid: string): Promise<CustomerRow | undefined> {
   return db.customers.get(uuid);
 }
 
-export async function customersPullToLocal() {
-  if (!online()) return { pulled: 0 };
+export async function customersPullToLocal(): Promise<{ pulled: number }> {
+  if (!isOnline()) return { pulled: 0 };
 
-  const since = readLocalString(CURSOR_KEY);
+  const since = getLs(CURSOR_KEY);
   let page = 1;
   let pulled = 0;
-  let serverTime = new Date().toISOString();
+  let serverTime = nowIso();
 
   while (true) {
-    const params: Record<string, string | number> = {
-      offline: 1,
-      page,
-      per_page: PULL_PAGE_SIZE,
-    };
+    const params: Record<string, string | number> = { offline: 1, page, per_page: PULL_PAGE_SIZE };
+    if (since && page === 1) params.since = since;
 
-    if (since && page === 1) {
-      params.since = since;
+    const res = await api.get("/api/customers", { params });
+    const parsed = parseCustomersPayload(res.data);
+
+    const deletedUuids = parsed.list
+      .filter((item) => isDeletedRecord(item))
+      .map((item) => String(obj(item).uuid ?? ""))
+      .filter(Boolean);
+
+    if (deletedUuids.length) {
+      await db.customers.bulkDelete([...new Set(deletedUuids)]);
+      await removeQueuedOpsForEntityUuids("customers", deletedUuids);
     }
 
-    const response = await api.get("/api/customers", { params });
-    const parsed = parseCustomersApiPayload(response.data);
-
     const rows = parsed.list
+      .filter((item) => !isDeletedRecord(item))
       .map(sanitizeCustomer)
-      .filter((row) => row.uuid && row.name && row.phone);
+      .filter((r) => r.uuid && r.name && r.phone);
 
-    serverTime = parsed.serverTime;
-
-    if (rows.length > 0) {
+    if (rows.length) {
       await db.customers.bulkPut(rows);
       pulled += rows.length;
     }
 
-    if (!parsed.hasMore || rows.length === 0) {
-      break;
-    }
-
+    serverTime = parsed.serverTime;
+    if (!parsed.hasMore) break;
     page += 1;
   }
 
-  writeLocalString(CURSOR_KEY, serverTime);
+  setLs(CURSOR_KEY, serverTime);
   await customersRetentionCleanupIfDue();
 
   return { pulled };
 }
 
-export async function customerCreate(payload: unknown) {
-
-  
+export async function customerCreate(payload: unknown): Promise<CustomerRow> {
   const uuid = crypto.randomUUID();
-  const payloadRecord = isRecord(payload) ? payload : {};
-  const row = sanitizeCustomer({
-    ...payloadRecord,
-    uuid,
-    updated_at: Date.now(),
-  });
-  validateCustomerRow(row);
+  const row = sanitizeCustomer({ ...obj(payload), uuid, updated_at: Date.now() });
 
-  await assertNoLocalDuplicate(row);
+  validateCustomer(row);
+  await assertNoDuplicate(row);
 
-  await db.customers.put(row);
 
-  await enqueueSync({
-    entity: "customers",
-    uuid,
-    action: "create",
-    payload: row,
-  });
+  if (!isOnline()) {
 
-  if (online()) {
-    try {
-      const response = await api.post("/api/customers", row);
-      const saved = sanitizeCustomer(response.data?.data ?? row);
-      await db.customers.put(saved);
-    } catch (error: unknown) {
-      const status = getApiErrorStatus(error);
-      if (isValidationStatus(status)) {
-        await db.customers.delete(uuid);
-        await removeLatestQueuedOp(uuid, "create");
-        throw new Error(parseApiErrorMessage(error));
-      }
-    }
+    await db.customers.put(row);
+    await enqueueSync({ entity: "customers", uuid, action: "create", payload: row });
+    notifySuccess("Customer saved offline. It will sync when online.");
+    return row;
   }
-  return row;
+
+  try {
+    const res = await api.post("/api/customers", row);
+    const saved = sanitizeCustomer(obj(res.data).data ?? row);
+    await db.customers.put(saved);
+    notifySuccess("Customer created successfully.");
+    return saved;
+  } catch (error: unknown) {
+
+    if (isValidationError(getApiStatus(error))) {
+      await db.customers.delete(uuid);
+      await removeLatestQueueItem(uuid, "create");
+      const message = getApiErrorMessage(error);
+      notifyError(message);
+      throw new Error(message);
+    }
+    await db.customers.put(row);
+    await enqueueSync({ entity: "customers", uuid, action: "create", payload: row });
+    notifyInfo("Customer saved locally. Server sync will retry later.");
+    return row;
+  }
 }
 
-export async function customerUpdate(uuid: string, patch: unknown) {
-
+export async function customerUpdate(uuid: string, patch: unknown): Promise<CustomerRow> {
   const existing = await db.customers.get(uuid);
   if (!existing) throw new Error("Customer not found locally");
-  const patchRecord = isRecord(patch) ? patch : {};
 
-  const updated = sanitizeCustomer({
-    ...existing,
-    ...patchRecord,
-    uuid,
-    updated_at: Date.now(),
-  });
+  const updated = sanitizeCustomer({ ...existing, ...obj(patch), uuid, updated_at: Date.now() });
 
-  validateCustomerRow(updated);
-  await assertNoLocalDuplicate(updated, uuid);
+  validateCustomer(updated);
+  await assertNoDuplicate(updated, uuid);
 
   await db.customers.put(updated);
+  await enqueueSync({ entity: "customers", uuid, action: "update", payload: updated });
 
-  await enqueueSync({
-    entity: "customers",
-    uuid,
-    action: "update",
-    payload: updated,
-  });
+  if (!isOnline()) {
+    notifySuccess("Customer updated offline. It will sync when online.");
+    return updated;
+  }
 
-  if (online()) {
-    try {
-      const response = await api.put(`/api/customers/${uuid}`, updated);
-      const saved = sanitizeCustomer(response.data?.data ?? updated);
-      await db.customers.put(saved);
-    } catch (error: unknown) {
-      const status = getApiErrorStatus(error);
-      if (isValidationStatus(status)) {
-        await db.customers.put(existing);
-        await removeLatestQueuedOp(uuid, "update");
-        throw new Error(parseApiErrorMessage(error));
-      }
+  try {
+    const res = await api.put(`/api/customers/${uuid}`, updated);
+    const saved = sanitizeCustomer(obj(res.data).data ?? updated);
+    await db.customers.put(saved);
+    notifySuccess("Customer updated successfully.");
+    return saved;
+  } catch (error: unknown) {
+    if (isValidationError(getApiStatus(error))) {
+      await db.customers.put(existing);
+      await removeLatestQueueItem(uuid, "update");
+      const message = getApiErrorMessage(error);
+      notifyError(message);
+      throw new Error(message);
     }
+    notifyInfo("Customer updated locally. Server sync will retry later.");
+    return updated;
   }
-
-  return updated;
 }
 
-export async function customerDelete(uuid: string) {
+export async function customerDelete(uuid: string): Promise<void> {
   await db.customers.delete(uuid);
+  await enqueueSync({ entity: "customers", uuid, action: "delete", payload: {} });
 
-  await enqueueSync({
-    entity: "customers",
-    uuid,
-    action: "delete",
-    payload: {},
-  });
-
-  if (online()) {
-    try {
-      await api.delete(`/api/customers/${uuid}`);
-    } catch {}
+  if (!isOnline()) {
+    notifySuccess("Customer deleted offline. It will sync when online.");
+    return;
+  }
+  try {
+    await api.delete(`/api/customers/${uuid}`);
+    notifySuccess("Customer deleted successfully.");
+  } catch {
+    notifyInfo("Customer deleted locally. Server sync will retry later.");
   }
 }
 
-export async function customersRetentionCleanup() {
+export async function customersRetentionCleanup(): Promise<number> {
   const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
   const pending = await db.sync_queue.where("entity").equals("customers").toArray();
-  const protectedUuids = new Set(pending.map((item) => item.uuid));
-  const oldRows = await db.customers.where("updated_at").below(cutoff).toArray();
-  const removableUuids = oldRows.filter((row) => !protectedUuids.has(row.uuid)).map((row) => row.uuid);
+  const locked = new Set(pending.map((i) => i.uuid));
 
-  if (removableUuids.length > 0) {
-    await db.customers.bulkDelete(removableUuids);
+  const oldRows = await db.customers.where("updated_at").below(cutoff).toArray();
+  const removable = oldRows.filter((r) => !locked.has(r.uuid)).map((r) => r.uuid);
+
+  if (removable.length) {
+    await db.customers.bulkDelete(removable);
   }
 
-  return removableUuids.length;
+  return removable.length;
 }
 
-export async function customersRetentionCleanupIfDue() {
+export async function customersRetentionCleanupIfDue(): Promise<number> {
   const now = Date.now();
-  const last = readLocalNumber(CLEANUP_KEY);
+  const last = getLsNum(CLEANUP_KEY);
 
-  if (last !== null && now - last < CLEANUP_INTERVAL_MS) {
-    return 0;
-  }
+  if (last !== null && now - last < CLEANUP_INTERVAL_MS) return 0;
 
   const removed = await customersRetentionCleanup();
-  writeLocalNumber(CLEANUP_KEY, now);
+  setLs(CLEANUP_KEY, String(now));
   return removed;
 }

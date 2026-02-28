@@ -7,6 +7,7 @@ import { hydrateAuth } from "@/store/auth/authSlice";
 import { ThemeProvider } from './context/ThemeContext'
 import CacheOnVisit from '@/pwa/CacheOnVisit';
 import DebugRegister from '@/pwa/debugRegister';
+import ToastHost from "@/components/ui/ToastHost";
 
 function Bootstrap() {
   useEffect(() => {
@@ -39,7 +40,10 @@ export default function Providers({ children }: { children: React.ReactNode }) {
       <DebugRegister />
       <CacheOnVisit />
       <Bootstrap />
-      <ThemeProvider>{children}</ThemeProvider>
+      <ThemeProvider>
+        {children}
+        <ToastHost />
+      </ThemeProvider>
     </Provider>
   );
 }
