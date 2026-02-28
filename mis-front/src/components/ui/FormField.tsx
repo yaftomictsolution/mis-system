@@ -7,7 +7,7 @@ interface Option {
 
 interface FormFieldProps {
   label: string
-  type?: 'text' | 'email' | 'number' | 'select' | 'textarea' | 'date'
+  type?: 'text' | 'email' | 'number' | 'select' | 'textarea' | 'date' | 'password'
   value: string | number
   onChange: (value: string | number) => void
   error?: string

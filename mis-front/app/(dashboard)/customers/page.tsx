@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
 import RequirePermission from "@/components/auth/RequirePermission";
@@ -53,40 +52,41 @@ export default function CustomersPage() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+
+
   const loadLocal = useCallback(async () => {
-    setLoading(true);
-    try {
-      const local = await customersListLocal({
-        page: 1,
-        pageSize: LOCAL_LIST_PAGE_SIZE,
-      });
-      setData(local.items.map(toCustomerItem));
-    } finally {
-      setLoading(false);
-    }
+    const local = await customersListLocal({
+      page: 1,
+      pageSize: LOCAL_LIST_PAGE_SIZE,
+    });
+    setData(local.items.map(toCustomerItem));
   }, []);
 
   const refresh = useCallback(async () => {
-    await loadLocal();
+    setLoading(true);
     try {
-      await customersPullToLocal();
-    } catch {}
-    await loadLocal();
+      await loadLocal();
+      try {
+        await customersPullToLocal();
+      } catch {}
+      await loadLocal();
+    } finally {
+      setLoading(false);
+    }
   }, [loadLocal]);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    const onSyncComplete = () => {
+    useEffect(() => {
       void refresh();
-    };
+    }, [refresh]);
 
-    window.addEventListener("sync:complete", onSyncComplete as EventListener);
-    return () => {
-      window.removeEventListener("sync:complete", onSyncComplete as EventListener);
-    };
+    useEffect(() => {
+      const onSyncComplete = () => {
+        void refresh();
+      };
+      window.addEventListener("sync:complete", onSyncComplete as EventListener);
+      return () => {
+        window.removeEventListener("sync:complete", onSyncComplete as EventListener);
+      };
   }, [refresh]);
 
   const columns = useMemo<Column<CustomerItem>[]>(
@@ -129,12 +129,6 @@ export default function CustomersPage() {
     []
   );
 
-  const openCreate = () => {
-    setFormError(null);
-    setCurrent({ status: "Active" });
-    setIsModalOpen(true);
-  };
-
   const handleSave = useCallback(async () => {
     if (saving) return;
 
@@ -159,13 +153,11 @@ export default function CustomersPage() {
         status: normalizeStatus(current.status),
         address: (current.address ?? "").trim() || null,
       };
-
       if (current.uuid) {
         await customerUpdate(current.uuid, payload);
       } else {
         await customerCreate(payload);
       }
-
       setIsModalOpen(false);
       setCurrent({});
       await refresh();
@@ -199,6 +191,7 @@ export default function CustomersPage() {
         <DataTable
           columns={columns}
           data={data}
+          loading={loading}
           onEdit={(item) => {
             setFormError(null);
             setCurrent(item);

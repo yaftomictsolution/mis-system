@@ -3,6 +3,9 @@ import { api } from "@/lib/api";
 import { setSyncing } from "./syncStatus";
 
 let syncInProgress = false;
+const isNonRetryableSyncError = (status?: number) => status === 409 || status === 422;
+const getApiStatus = (error: unknown): number | undefined =>
+  (error as { response?: { status?: number } }).response?.status;
 
 export async function runSyncOnce() {
   if (syncInProgress) {
@@ -30,10 +33,17 @@ export async function runSyncOnce() {
         if (item.id !== undefined) {
           await db.sync_queue.delete(item.id);
         }
-
         syncedAny = true;
         console.log("Synced", item.entity, item.uuid);
       } catch (error) {
+        const status = getApiStatus(error);
+        if (isNonRetryableSyncError(status)) {
+          if (item.id !== undefined) {
+            await db.sync_queue.delete(item.id);
+          }
+          console.warn("Dropped non-retryable sync item", item.entity, item.uuid, status);
+          continue;
+        }
         console.error("Sync failed", item, error);
         break;
       }

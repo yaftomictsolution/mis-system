@@ -13,6 +13,7 @@ const EMPTY_STORAGE: StorageStats = {
   percent: 0,
   nearLimit: false,
   critical: false,
+  estimatedFromIndexedDb: false,
 };
 
 export function useSyncWidget() {
@@ -26,9 +27,20 @@ export function useSyncWidget() {
     setQueueCount(count);
   }
 
-  async function refreshStorage() {
-    const stats = await getStorageStats();
-    setStorage(stats);
+  async function refreshStorage(options?: { aggressive?: boolean }) {
+    const aggressive = Boolean(options?.aggressive);
+    const attempts = aggressive ? 4 : 1;
+    let best = await getStorageStats();
+
+    for (let i = 1; i < attempts; i++) {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      const next = await getStorageStats();
+      if (next.usage > best.usage) {
+        best = next;
+      }
+    }
+
+    setStorage(best);
   }
 
   useEffect(() => {

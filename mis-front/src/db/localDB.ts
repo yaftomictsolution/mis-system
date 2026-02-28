@@ -25,6 +25,15 @@ export type SessionRow = {
   expires_at: string;
 };
 
+export type RoleRow = {
+
+  uuid: string;
+  name: string;
+  guard_name?: string | null;
+  permissions?: string[];
+  updated_at: number;
+};
+
 export type CustomerRow = {
 
   uuid: string;
@@ -39,12 +48,24 @@ export type CustomerRow = {
   updated_at: number;
 };
 
+export type UserRow = {
+
+  uuid: string;
+  name: string;
+  password: string;
+  roles?: string[];
+  email?: string | null;
+  updated_at: number;
+};
+
 export class LocalDB extends Dexie {
   sync_queue!: Table<SyncQueueRow, number>;
   session!: Table<SessionRow, number>;
   api_cache!: Table<ApiCacheRow, string>;
   customers!: Table<CustomerRow, string>;
-
+  roles!: Table<RoleRow, string>;
+  users!: Table<UserRow, string>;
+  
   constructor() {
     super("mis_local_db");
 
@@ -59,6 +80,8 @@ export class LocalDB extends Dexie {
       session: "++id, expires_at",
       api_cache: "&key, updated_at",
       customers: "&uuid, updated_at, phone, name",
+      roles: "&uuid, updated_at, name",
+      users: "&uuid, updated_at, name,phone",
     });
   }
 }
