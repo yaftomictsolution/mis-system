@@ -25,7 +25,12 @@ class AuthSeed extends Seeder
         ];
 
         foreach ($roles as $r) {
-            Role::firstOrCreate(['name' => $r]);
+          
+             Role::firstOrCreate(
+                ['name' => $r],
+                ['uuid' => (string) Str::uuid()]
+            );
+
         }
 
         $permissions = [

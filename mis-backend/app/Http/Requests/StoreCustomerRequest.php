@@ -19,7 +19,7 @@ class StoreCustomerRequest extends FormRequest
 
         $existing = null;
         if ($uuid) {
-            $existing = Customer::where('uuid', $uuid)->first();
+            $existing = Customer::withTrashed()->where('uuid', $uuid)->first();
         }
 
         return [
@@ -34,6 +34,7 @@ class StoreCustomerRequest extends FormRequest
                 'string',
                 'max:50',
                 Rule::unique('customers', 'phone')
+                    ->whereNull('deleted_at')
                     ->ignore($existing?->id),
             ],
 
@@ -44,6 +45,7 @@ class StoreCustomerRequest extends FormRequest
                 'email',
                 'max:255',
                 Rule::unique('customers', 'email')
+                    ->whereNull('deleted_at')
                     ->ignore($existing?->id),
             ],
 
