@@ -1,6 +1,7 @@
 import { db, type UserRow } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { enqueueSync } from "@/sync/queue";
 
 const RETENTION_DAYS = 180;
@@ -185,8 +186,9 @@ function lsSet(key: string, value: string): void {
   window.localStorage.setItem(key, value);
 }
 export async function userRoleRetentionCleanup(): Promise<number> {
-  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  const pending = await db.sync_queue.where("entity").equals("roles").toArray();
+  const retentionDays = getOfflineModuleRetentionDays("users", RETENTION_DAYS);
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const pending = await db.sync_queue.where("entity").equals("users").toArray();
   const protectedUuids = new Set(pending.map((i) => i.uuid));
 
   const oldRows = await db.users.where("updated_at").below(cutoff).toArray();
@@ -411,7 +413,13 @@ export async function userCreate(payload: unknown): Promise<UserRow> {
 
   if (!isOnline()) {
     await db.users.put(row);
-    await enqueueSync({ entity: "users", uuid, action: "create", payload: toUserApiPayload(row) });
+    await enqueueSync({
+      entity: "users",
+      uuid,
+      localKey: uuid,
+      action: "create",
+      payload: toUserApiPayload(row),
+    });
     notifySuccess("User saved offline. It will sync when online.");
     return row;
   }
@@ -430,7 +438,13 @@ export async function userCreate(payload: unknown): Promise<UserRow> {
       throw new Error(message);
     }
     await db.users.put(row);
-    await enqueueSync({ entity: "users", uuid, action: "create", payload: toUserApiPayload(row) });
+    await enqueueSync({
+      entity: "users",
+      uuid,
+      localKey: uuid,
+      action: "create",
+      payload: toUserApiPayload(row),
+    });
     notifyInfo("User saved locally. Server sync will retry later.");
     return row;
   }
@@ -448,7 +462,14 @@ export async function userUpdate(uuid: string, patch: unknown): Promise<UserRow>
 
   if (!isOnline()) {
     await db.users.put(updated);
-    await enqueueSync({ entity: "users", uuid, action: "update", payload: toUserApiPayload(updated) });
+    await enqueueSync({
+      entity: "users",
+      uuid,
+      localKey: uuid,
+      action: "update",
+      payload: toUserApiPayload(updated),
+      rollbackSnapshot: existing,
+    });
     notifySuccess("User updated offline. It will sync when online.");
     return updated;
   }
@@ -466,15 +487,32 @@ export async function userUpdate(uuid: string, patch: unknown): Promise<UserRow>
       throw new Error(message);
     }
     await db.users.put(updated);
-    await enqueueSync({ entity: "users", uuid, action: "update", payload: toUserApiPayload(updated) });
+    await enqueueSync({
+      entity: "users",
+      uuid,
+      localKey: uuid,
+      action: "update",
+      payload: toUserApiPayload(updated),
+      rollbackSnapshot: existing,
+    });
     notifyInfo("User updated locally. Server sync will retry later.");
     return updated;
   }
 }
 
 export async function userDelete(uuid: string): Promise<void> {
+  const existing = await db.users.get(uuid);
+  if (!existing) throw new Error("User not found locally");
+
   await db.users.delete(uuid);
-  await enqueueSync({ entity: "users", uuid, action: "delete", payload: {} });
+  await enqueueSync({
+    entity: "users",
+    uuid,
+    localKey: uuid,
+    action: "delete",
+    payload: {},
+    rollbackSnapshot: existing,
+  });
 
   if (!isOnline()) {
     notifySuccess("User deleted offline. It will sync when online.");

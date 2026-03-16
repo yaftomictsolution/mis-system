@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
+import Link from "next/link";
 import RequirePermission from "@/components/auth/RequirePermission";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Modal } from "@/components/ui/modal";
@@ -17,12 +18,14 @@ import {
   customersPullToLocal,
   customerUpdate,
 } from "@/modules/customers/customers.repo";
+import { resolveOfflineImageSrc } from "@/lib/imageThumb";
 
 const LOCAL_LIST_PAGE_SIZE = 200;
 const TABLE_PAGE_SIZE = 10;
 
 type CustomerStatus = "Active" | "VIP" | "Inactive";
 type CustomerItem = CustomerRow & { status: CustomerStatus };
+
 const STATUS_COLORS: Record<CustomerStatus, "blue" | "purple" | "slate"> = {
   Active: "blue",
   VIP: "purple",
@@ -49,6 +52,7 @@ export default function CustomersPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [current, setCurrent] = useState<Partial<CustomerItem>>({});
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -92,8 +96,8 @@ export default function CustomersPage() {
   const columns = useMemo<Column<CustomerItem>[]>(
     () => [
       {
-        key: "name",
-        label: "Customer",
+        key: "customer_image_url",
+        label: "Image",
         render: (item) => {
           const initials = (item.name || "")
             .split(" ")
@@ -101,19 +105,30 @@ export default function CustomersPage() {
             .map((n) => n[0]?.toUpperCase())
             .join("")
             .slice(0, 2);
+          const imageSrc = resolveOfflineImageSrc(item);
 
-          return (
-            <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-600 dark:bg-[#2a2a3e] dark:text-slate-300">
-                {initials || "--"}
-              </div>
-              <div>
-                <div className="font-medium">{item.name}</div>
-                <div className="text-xs text-slate-500">{item.email || "-"}</div>
-              </div>
+          return imageSrc ? (
+            <img
+              src={imageSrc}
+              alt={item.name}
+              className="h-12 w-12 rounded-xl border border-slate-200 object-cover shadow-sm dark:border-[#2a2a3e]"
+            />
+          ) : (
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-200 text-xs font-bold text-slate-600 dark:bg-[#2a2a3e] dark:text-slate-300">
+              {initials || "--"}
             </div>
           );
         },
+      },
+      {
+        key: "name",
+        label: "Customer",
+        render: (item) => (
+          <div>
+            <div className="font-medium">{item.name}</div>
+            <div className="text-xs text-slate-500">{item.email || "-"}</div>
+          </div>
+        ),
       },
       {
         key: "phone",
@@ -124,6 +139,18 @@ export default function CustomersPage() {
         key: "status",
         label: "Status",
         render: (item) => <Badge color={STATUS_COLORS[item.status]}>{item.status}</Badge>,
+      },
+      {
+        key: "activity",
+        label: "Activity",
+        render: (item) => (
+          <Link
+            href={`/customers/${item.uuid}/activity`}
+            className="inline-flex items-center rounded-lg border border-blue-200 px-3 py-1 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-50"
+          >
+            View / Print
+          </Link>
+        ),
       },
     ],
     []
@@ -138,7 +165,6 @@ export default function CustomersPage() {
       setFormError("Full name and phone number are required.");
       return;
     }
-
     setSaving(true);
     setFormError(null);
 
@@ -152,6 +178,7 @@ export default function CustomersPage() {
         email: (current.email ?? "").trim() || null,
         status: normalizeStatus(current.status),
         address: (current.address ?? "").trim() || null,
+        attachment: attachmentFile,
       };
       if (current.uuid) {
         await customerUpdate(current.uuid, payload);
@@ -160,13 +187,14 @@ export default function CustomersPage() {
       }
       setIsModalOpen(false);
       setCurrent({});
+      setAttachmentFile(null);
       await refresh();
     } catch (error: unknown) {
       setFormError(error instanceof Error ? error.message : "Save failed.");
     } finally {
       setSaving(false);
     }
-  }, [current, refresh, saving]);
+  }, [attachmentFile, current, refresh, saving]);
 
   const handleDelete = useCallback(async () => {
     if (!current.uuid) return;
@@ -183,18 +211,27 @@ export default function CustomersPage() {
     <RequirePermission permission="customers.view">
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
       <PageHeader title="Customers" subtitle="Manage client relationships and profiles">
-        <button type="button" onClick={() => { setCurrent({}); setIsModalOpen(true) }} className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-lg shadow-blue-500/20">
+        <button
+          type="button"
+          onClick={() => {
+            setCurrent({});
+            setAttachmentFile(null);
+            setIsModalOpen(true);
+          }}
+          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-lg shadow-blue-500/20"
+        >
           <Plus size={18} /> Add Customer
         </button>
       </PageHeader>
 
         <DataTable
           columns={columns}
-          data={data}
+          data={data} 
           loading={loading}
           onEdit={(item) => {
             setFormError(null);
             setCurrent(item);
+            setAttachmentFile(null);
             setIsModalOpen(true);
           }}
           onDelete={(item) => {
@@ -210,8 +247,10 @@ export default function CustomersPage() {
           onClose={() => {
             setIsModalOpen(false);
             setFormError(null);
+            setAttachmentFile(null);
           }}
           title={current.uuid ? "Edit Customer" : "Add New Customer"}
+          size="lg"
         >
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <FormField
@@ -247,6 +286,20 @@ export default function CustomersPage() {
               value={current.email ?? ""}
               onChange={(val) => setCurrent({ ...current, email: val as string })}
             />
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Attachment</label>
+              <input
+                type="file"
+                accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                onChange={(event) => {
+                  setAttachmentFile(event.target.files?.[0] ?? null);
+                }}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
+              />
+              {attachmentFile && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">{attachmentFile.name}</p>
+              )}
+            </div>
             <FormField
               label="Status"
               type="select"
@@ -277,6 +330,7 @@ export default function CustomersPage() {
               onClick={() => {
                 setIsModalOpen(false);
                 setFormError(null);
+                setAttachmentFile(null);
               }}
               className="rounded-lg px-4 py-2 text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-[#1a1a2e]"
             >

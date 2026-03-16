@@ -56,10 +56,14 @@ export function useSyncWidget() {
       refreshQueue();
       refreshStorage();
     };
+    const onQueueChanged = () => {
+      void refreshQueue();
+    };
 
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
     window.addEventListener("sync:complete", onSyncComplete as EventListener);
+    window.addEventListener("sync:queue:changed", onQueueChanged as EventListener);
 
     const unsub = subscribeSyncing((value) => setSyncingState(value));
     const queueInterval = window.setInterval(refreshQueue, 1500);
@@ -69,6 +73,7 @@ export function useSyncWidget() {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("sync:complete", onSyncComplete as EventListener);
+      window.removeEventListener("sync:queue:changed", onQueueChanged as EventListener);
       unsub();
       window.clearTimeout(initTimer);
       window.clearInterval(queueInterval);
