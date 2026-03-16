@@ -51,6 +51,7 @@ class StoreCustomerRequest extends FormRequest
 
             'address' => ['nullable', 'string'],
             'status' => ['nullable', 'string'],
+            'attachment' => ['nullable', 'file', 'max:10240', 'mimes:pdf,jpg,jpeg,png,doc,docx'],
         ];
     }
 }

@@ -35,4 +35,23 @@ return [
         ],
     ],
 
+    'crm_sms' => [
+        'provider' => env('CRM_SMS_PROVIDER', 'textbelt'),
+        'gateway_url' => env('CRM_SMS_GATEWAY_URL'),
+        'api_key' => env('CRM_SMS_API_KEY'),
+        'sender' => env('CRM_SMS_SENDER', 'MIS'),
+        'textbelt_key' => env('CRM_SMS_TEXTBELT_KEY', 'textbelt'),
+        'twilio' => [
+            'account_sid' => env('CRM_SMS_TWILIO_ACCOUNT_SID'),
+            'auth_token' => env('CRM_SMS_TWILIO_AUTH_TOKEN'),
+            'from' => env('CRM_SMS_TWILIO_FROM'),
+            'messaging_service_sid' => env('CRM_SMS_TWILIO_MESSAGING_SERVICE_SID'),
+        ],
+        'infobip' => [
+            'base_url' => env('CRM_SMS_INFOBIP_BASE_URL'),
+            'api_key' => env('CRM_SMS_INFOBIP_API_KEY'),
+            'sender' => env('CRM_SMS_INFOBIP_SENDER', 'ServiceSMS'),
+        ],
+    ],
+
 ];

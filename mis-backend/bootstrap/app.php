@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Foundation\Application;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 
@@ -13,6 +14,15 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         //
+    })
+    ->withSchedule(function (Schedule $schedule): void {
+        $days = max(1, (int) env('CRM_REMINDER_DAYS_BEFORE_DUE', 10));
+        $time = (string) env('CRM_REMINDER_DAILY_AT', '09:00');
+
+        $schedule
+            ->command("crm:send-installment-reminders --days={$days}")
+            ->dailyAt($time)
+            ->withoutOverlapping();
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
