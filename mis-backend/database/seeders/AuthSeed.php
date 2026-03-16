@@ -26,7 +26,7 @@ class AuthSeed extends Seeder
 
         foreach ($roles as $r) {
           
-             Role::firstOrCreate(
+             Role:: (
                 ['name' => $r],
                 ['uuid' => (string) Str::uuid()]
             );
@@ -34,6 +34,8 @@ class AuthSeed extends Seeder
         }
 
         $permissions = [
+            'users.view', 'users.create', 'users.update',
+             'roles.view','roles.create','roles.update',
             'apartments.view', 'apartments.create', 'apartments.update',
             'customers.view', 'customers.create', 'customers.update',
             'sales.create', 'sales.approve', 'sales.cancel',
@@ -50,20 +52,20 @@ class AuthSeed extends Seeder
         }
 
         // Admin has all permissions
-        $adminRole = Role::where('name', 'Admin')->first();
-        $adminRole->syncPermissions(Permission::all());
+        // $adminRole = Role::where('name', 'Admin')->first();
+        // $adminRole->syncPermissions(Permission::all());
 
-        $admin = User::firstOrCreate(
-            ['email' => 'admin@example.com'],
-            [
-                'uuid' => (string) Str::uuid(),
-                'name' => 'System Admin',
-                'phone' => '000000000',
-                'password' => Hash::make('password123'),
-                'status' => 'active',
-            ]
-        );
+        // $admin = User::firstOrCreate(
+        //     ['email' => 'admin@example.com'],
+        //     [
+        //         'uuid' => (string) Str::uuid(),
+        //         'name' => 'System Admin',
+        //         'phone' => '000000000',
+        //         'password' => Hash::make('password123'),
+        //         'status' => 'active',
+        //     ]
+        // );
 
-        $admin->assignRole('Admin');
+        // $admin->assignRole('Admin');
     }
 }

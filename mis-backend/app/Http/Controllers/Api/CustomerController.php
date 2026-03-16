@@ -3,17 +3,20 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreCustomerRequest;
 use App\Models\Customer;
+use App\Models\Document;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use App\Http\Requests\StoreCustomerRequest;
 
 class CustomerController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-       
         $validated = $request->validate([
             'q' => ['nullable', 'string', 'max:255'],
             'since' => ['nullable', 'date'],
@@ -22,15 +25,13 @@ class CustomerController extends Controller
             'per_page' => ['nullable', 'integer', 'min:1', 'max:200'],
         ]);
 
-        $offline = $request->boolean('offline');   // ✅ real boolean
-        $since   = $validated['since'] ?? null;
-
+        $offline = $request->boolean('offline');
+        $since = $validated['since'] ?? null;
         $includeDeleted = $offline || !is_null($since);
-
-        // $includeDeleted = ! empty($validated['offline']) || ! empty($validated['since']);
 
         $query = Customer::query()
             ->select([
+                'id',
                 'uuid',
                 'name',
                 'fname',
@@ -42,6 +43,9 @@ class CustomerController extends Controller
                 'address',
                 'updated_at',
                 'deleted_at',
+            ])
+            ->with([
+                'documents:id,module,document_type,reference_id,file_path,expiry_date,created_at',
             ])
             ->orderByDesc('updated_at');
 
@@ -62,8 +66,7 @@ class CustomerController extends Controller
             });
         }
 
-        if (! empty($validated['since'])) {
-            $since = $validated['since'];
+        if (!empty($validated['since'])) {
             $query->where(function ($builder) use ($since) {
                 $builder
                     ->where('updated_at', '>', $since)
@@ -71,7 +74,7 @@ class CustomerController extends Controller
             });
         }
 
-        if (! empty($validated['offline'])) {
+        if ($offline) {
             $windowStart = now()->subMonths(6);
             $query->where(function ($builder) use ($windowStart) {
                 $builder
@@ -91,6 +94,7 @@ class CustomerController extends Controller
             ->map(fn (Customer $customer) => $this->customerPayload($customer))
             ->values()
             ->all();
+
         return response()->json([
             'data' => $items,
             'meta' => [
@@ -106,26 +110,10 @@ class CustomerController extends Controller
     public function store(StoreCustomerRequest $request): JsonResponse
     {
         $data = $request->validated();
-
         $incomingUuid = (string) ($data['uuid'] ?? '');
-        $phone = trim((string) ($data['phone'] ?? ''));
         $email = trim((string) ($data['email'] ?? ''));
 
         $matches = collect();
-
-        // if ($incomingUuid !== '') {
-        //     $matchByUuid = Customer::withTrashed()->where('uuid', $incomingUuid)->first();
-        //     if ($matchByUuid) {
-        //         $matches->push($matchByUuid);
-        //     }
-        // }
-
-        // if ($phone !== '') {
-        //     $matchByPhone = Customer::withTrashed()->where('phone', $phone)->first();
-        //     if ($matchByPhone) {
-        //         $matches->push($matchByPhone);
-        //     }
-        // }
 
         if ($email !== '') {
             $matchByEmail = Customer::withTrashed()->where('email', $email)->first();
@@ -145,7 +133,7 @@ class CustomerController extends Controller
         $created = false;
         $restored = false;
 
-        if (! $customer) {
+        if (!$customer) {
             $customer = new Customer();
             $customer->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
             $created = true;
@@ -153,7 +141,6 @@ class CustomerController extends Controller
             $customer->restore();
             $restored = true;
         } elseif ($incomingUuid !== '' && $customer->uuid === $incomingUuid) {
-            // Idempotent create retry with the same UUID.
         } else {
             return response()->json([
                 'message' => 'Customer already exists.',
@@ -161,13 +148,16 @@ class CustomerController extends Controller
             ], 409);
         }
 
-        $updateData = $data;
-        unset($updateData['uuid']);
-        $customer->fill($updateData);
-        $customer->save();
+        DB::transaction(function () use ($customer, $data, $request): void {
+            $updateData = $data;
+            unset($updateData['uuid'], $updateData['attachment']);
+            $customer->fill($updateData);
+            $customer->save();
+            $this->storeAttachment($customer, $request);
+        });
 
         return response()->json([
-            'data' => $this->customerPayload($customer->fresh()),
+            'data' => $this->customerPayload($customer->fresh(['documents'])),
             'restored' => $restored,
         ], $created ? 201 : 200);
     }
@@ -178,20 +168,44 @@ class CustomerController extends Controller
         if ($customer->trashed()) {
             $customer->restore();
         }
+
         $data = $request->validated();
 
-        $customer->update($data);
+        DB::transaction(function () use ($customer, $data, $request): void {
+            $updateData = $data;
+            unset($updateData['attachment']);
+            $customer->update($updateData);
+            $this->storeAttachment($customer, $request);
+        });
 
         return response()->json([
-            'data' => $this->customerPayload($customer->fresh()),
+            'data' => $this->customerPayload($customer->fresh(['documents'])),
         ]);
     }
 
     public function destroy(string $uuid): JsonResponse
     {
         $customer = Customer::withTrashed()->where('uuid', $uuid)->first();
-        if ($customer && ! $customer->trashed()) {
-            $customer->delete();
+        if ($customer && !$customer->trashed()) {
+            DB::transaction(function () use ($customer): void {
+                $documents = Document::query()
+                    ->where('module', 'customer')
+                    ->where('reference_id', $customer->id)
+                    ->get();
+
+                foreach ($documents as $document) {
+                    if (trim((string) $document->file_path) !== '') {
+                        Storage::disk('public')->delete($document->file_path);
+                    }
+                }
+
+                Document::query()
+                    ->where('module', 'customer')
+                    ->where('reference_id', $customer->id)
+                    ->delete();
+
+                $customer->delete();
+            });
         }
 
         return response()->json([
@@ -199,9 +213,33 @@ class CustomerController extends Controller
         ]);
     }
 
+    public function storeAttachmentOnly(Request $request, string $uuid): JsonResponse
+    {
+        $request->validate([
+            'attachment' => ['required', 'file', 'max:10240', 'mimes:pdf,jpg,jpeg,png,doc,docx'],
+        ]);
+
+        $customer = Customer::withTrashed()->where('uuid', $uuid)->firstOrFail();
+        if ($customer->trashed()) {
+            return response()->json([
+                'message' => 'Cannot upload attachment for deleted customer.',
+            ], 422);
+        }
+
+        DB::transaction(function () use ($customer, $request): void {
+            $this->storeAttachment($customer, $request);
+        });
+
+        return response()->json([
+            'message' => 'Attachment uploaded.',
+            'data' => $this->customerPayload($customer->fresh(['documents'])),
+        ], 201);
+    }
+
     private function customerPayload(Customer $customer): array
     {
-        return $customer->only([
+        $base = $customer->only([
+            'id',
             'uuid',
             'name',
             'fname',
@@ -214,5 +252,105 @@ class CustomerController extends Controller
             'updated_at',
             'deleted_at',
         ]);
+
+        $documents = $customer->relationLoaded('documents')
+            ? $customer->documents->sortByDesc(fn (Document $document) => $document->created_at?->getTimestamp() ?? 0)->values()
+            : collect();
+
+        $base['documents'] = $documents
+            ->map(function (Document $document): array {
+                $documentType = $this->inferCustomerDocumentType(
+                    (string) ($document->document_type ?? ''),
+                    (string) $document->file_path,
+                );
+
+                return [
+                    'id' => $document->id,
+                    'module' => $document->module,
+                    'document_type' => $documentType,
+                    'reference_id' => $document->reference_id,
+                    'file_path' => $document->file_path,
+                    'file_url' => Storage::disk('public')->url($document->file_path),
+                    'expiry_date' => $document->expiry_date?->toDateString(),
+                    'created_at' => $document->created_at?->toISOString(),
+                ];
+            })
+            ->values()
+            ->all();
+
+        return $base;
+    }
+
+    private function storeAttachment(Customer $customer, Request $request): void
+    {
+        if (!$request->hasFile('attachment')) {
+            return;
+        }
+
+        $file = $request->file('attachment');
+        if (!$file || !$file->isValid()) {
+            return;
+        }
+
+        $documentType = $this->resolveCustomerDocumentType($file);
+
+        if ($documentType === 'customer_image') {
+            $this->removeExistingCustomerImages($customer);
+        }
+
+        $path = $file->store('documents/customers', 'public');
+
+        Document::query()->create([
+            'module' => 'customer',
+            'document_type' => $documentType,
+            'reference_id' => (int) $customer->id,
+            'file_path' => $path,
+            'expiry_date' => null,
+            'created_at' => now(),
+        ]);
+    }
+
+    private function removeExistingCustomerImages(Customer $customer): void
+    {
+        $documents = Document::query()
+            ->where('module', 'customer')
+            ->where('reference_id', (int) $customer->id)
+            ->where('document_type', 'customer_image')
+            ->get();
+
+        foreach ($documents as $document) {
+            if (trim((string) $document->file_path) !== '') {
+                Storage::disk('public')->delete($document->file_path);
+            }
+            $document->delete();
+        }
+    }
+
+    private function inferCustomerDocumentType(string $documentType, string $filePath): string
+    {
+        $normalized = trim(strtolower($documentType));
+        if ($normalized !== '') {
+            return $normalized;
+        }
+
+        $extension = strtolower((string) pathinfo($filePath, PATHINFO_EXTENSION));
+        $imageExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'svg'];
+
+        return in_array($extension, $imageExtensions, true)
+            ? 'customer_image'
+            : 'customer_attachment';
+    }
+
+    private function resolveCustomerDocumentType(UploadedFile $file): string
+    {
+        $mime = strtolower((string) $file->getMimeType());
+        $extension = strtolower((string) $file->getClientOriginalExtension());
+        $imageExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'svg'];
+
+        if (str_starts_with($mime, 'image/') || in_array($extension, $imageExtensions, true)) {
+            return 'customer_image';
+        }
+
+        return 'customer_attachment';
     }
 }

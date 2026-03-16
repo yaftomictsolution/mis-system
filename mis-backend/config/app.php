@@ -54,6 +54,13 @@ return [
 
     'url' => env('APP_URL', 'http://localhost'),
 
+    'frontend_url' => env('APP_FRONTEND_URL', 'http://localhost:3000'),
+
+    'deed_alert_emails' => array_values(array_filter(array_map(
+        static fn (string $email): string => trim($email),
+        explode(',', (string) env('DEED_ALERT_EMAILS', ''))
+    ))),
+
     /*
     |--------------------------------------------------------------------------
     | Application Timezone
