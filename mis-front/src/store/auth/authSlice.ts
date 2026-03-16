@@ -1,12 +1,23 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { api } from "@/lib/api";
 import { computeCredHash } from "@/lib/crypto";
+import {
+  clearLastEnforcedOfflineDeadline,
+  isOfflineAccessExpired,
+  offlinePolicyGet,
+  setLastEnforcedOfflineDeadline,
+  setOfflineSystemBlocked,
+  syncPendingOfflinePolicyReset,
+} from "@/modules/offline-policy/offline-policy.repo";
 
 type User = {
   id: number;
+  uuid?: string;
   full_name: string;
   email: string;
+  phone?: string | null;
   permissions: string[];
+  roles?: string[];
 };
 
 type AuthState = {
@@ -61,6 +72,21 @@ export const login = createAsyncThunk<
       localStorage.setItem("offline_token", token);
     } catch (error) {
       console.warn("computeCredHash failed", error);
+    }
+
+    // A successful online login should allow the online session to continue.
+    setOfflineSystemBlocked(false);
+
+    try {
+      await syncPendingOfflinePolicyReset();
+      const policy = await offlinePolicyGet();
+      if (isOfflineAccessExpired(policy)) {
+        setLastEnforcedOfflineDeadline(policy.system_offline_until);
+      } else {
+        clearLastEnforcedOfflineDeadline();
+      }
+    } catch {
+      // Keep the existing cached policy/marker state on refresh failure.
     }
 
     return { token, user };

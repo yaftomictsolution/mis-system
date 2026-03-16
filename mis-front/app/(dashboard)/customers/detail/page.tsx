@@ -123,6 +123,7 @@ export default function CustomerDetailsOfflineCapablePage() {
             phone1: values.phone_secondary,
             email: values.email,
             address: values.address,
+            attachment: values.attachment_file,
           });
           setItem(updated);
         }}

@@ -26,6 +26,9 @@ for (const group of NAV_ITEMS) {
 const EXTRA_CACHE_ROUTES: Array<[string, string]> = [
   ["/customers/new", "New Customer"],
   ["/customers/detail", "Customer Detail"],
+  ["/profile", "My Profile"],
+  ["/account-settings", "Account Settings"],
+  ["/offline", "Offline"],
 ];
 
 for (const [path, label] of EXTRA_CACHE_ROUTES) {

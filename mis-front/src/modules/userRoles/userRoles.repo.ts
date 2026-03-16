@@ -1,6 +1,7 @@
 import { db, type RoleRow } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { enqueueSync } from "@/sync/queue";
 
 const RETENTION_DAYS = 180;
@@ -202,7 +203,14 @@ export async function userRoleUpdate(uuid: string, patch: unknown): Promise<Role
   validateRole(updated);
 
   await db.roles.put(updated);
-  await enqueueSync({ entity: "roles", uuid, action: "update", payload: updated });
+  await enqueueSync({
+    entity: "roles",
+    uuid,
+    localKey: uuid,
+    action: "update",
+    payload: updated,
+    rollbackSnapshot: existing,
+  });
 
   if (!isOnline()) {
     notifySuccess("Role updated offline. It will sync when online.");
@@ -319,7 +327,13 @@ export async function userRoleCreate(payload: unknown): Promise<RoleRow> {
 
   validateRole(row);
   await db.roles.put(row);
-  await enqueueSync({ entity: "roles", uuid, action: "create", payload: row });
+  await enqueueSync({
+    entity: "roles",
+    uuid,
+    localKey: uuid,
+    action: "create",
+    payload: row,
+  });
 
   if (!isOnline()) {
     notifySuccess("Role saved offline. It will sync when online.");
@@ -350,8 +364,18 @@ export async function userRoleCreate(payload: unknown): Promise<RoleRow> {
 }
 
 export async function userRoleDelete(uuid: string): Promise<void> {
+  const existing = await db.roles.get(uuid);
+  if (!existing) throw new Error("Role not found locally");
+
   await db.roles.delete(uuid);
-  await enqueueSync({ entity: "roles", uuid, action: "delete", payload: {} });
+  await enqueueSync({
+    entity: "roles",
+    uuid,
+    localKey: uuid,
+    action: "delete",
+    payload: {},
+    rollbackSnapshot: existing,
+  });
 
   if (!isOnline()) {
     notifySuccess("Role deleted offline. It will sync when online.");
@@ -366,7 +390,8 @@ export async function userRoleDelete(uuid: string): Promise<void> {
 }
 
 export async function userRoleRetentionCleanup(): Promise<number> {
-  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const retentionDays = getOfflineModuleRetentionDays("roles", RETENTION_DAYS);
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const pending = await db.sync_queue.where("entity").equals("roles").toArray();
   const protectedUuids = new Set(pending.map((i) => i.uuid));
 

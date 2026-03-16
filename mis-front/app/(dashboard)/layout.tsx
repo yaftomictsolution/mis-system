@@ -5,12 +5,14 @@ import { setMobile } from '../../src/store/uiSlice'
 import AuthGate from "@/components/auth/AuthGate";
 import Sidebar from "@/components/layout/Sidebar";
 import TopNav from "@/components/layout/TopNav";
+import { useOfflinePolicyGuard } from "@/modules/offline-policy/offline-policy.engine";
 import { useAutoSync } from "@/sync/useAutoSync";
 import { usePrecacheRoutes } from "@/pwa/usePrecacheRoutes";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const dispatch = useDispatch()
   useAutoSync();
+  useOfflinePolicyGuard();
   usePrecacheRoutes();
 
    useEffect(() => {

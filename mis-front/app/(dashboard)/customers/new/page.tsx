@@ -14,7 +14,16 @@ export default function NewCustomerPage() {
       <CustomerForm
         submitLabel="Create"
         onSubmit={async (values) => {
-          const row = await customerCreate(values);
+          const row = await customerCreate({
+            name: values.first_name,
+            fname: values.father_name,
+            gname: values.grandfather_name,
+            phone: values.phone_primary,
+            phone1: values.phone_secondary,
+            email: values.email,
+            address: values.address,
+            attachment: values.attachment_file,
+          });
           router.replace(`/customers/detail#${encodeURIComponent(row.uuid)}`);
         }}
       />

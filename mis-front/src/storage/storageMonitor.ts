@@ -74,19 +74,16 @@ async function getIndexedDbApproxUsage(dbName: string): Promise<number> {
       const store = tx.objectStore(storeName);
       const req = store.openCursor();
       let sum = 0;
-
       req.onsuccess = (event) => {
         const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
         if (!cursor) return;
         sum += estimateValueBytes(cursor.value);
         cursor.continue();
       };
-
       tx.oncomplete = () => resolve(sum);
       tx.onerror = () => resolve(sum);
       tx.onabort = () => resolve(sum);
     });
-
     total += storeBytes;
   }
 

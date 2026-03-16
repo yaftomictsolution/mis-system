@@ -1,7 +1,14 @@
 import { db, type CustomerRow } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { enqueueSync } from "@/sync/queue";
+import { customerAttachmentEnqueueLocal } from "@/modules/customers/customer-attachments.repo";
+import {
+  createImageThumbFromBlob,
+  createImageThumbFromUrl,
+  isImageFile,
+} from "@/lib/imageThumb";
 
 const RETENTION_DAYS = 180;
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -11,9 +18,22 @@ const PULL_PAGE_SIZE = 200;
 const MAX_LOCAL_TEXT = 4000;
 const CURSOR_KEY = "customers_sync_cursor";
 const CLEANUP_KEY = "customers_last_cleanup_ms";
+const IMAGE_BACKFILL_KEY = "customers_image_backfill_v1";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type Obj = Record<string, unknown>;
+type CustomerMutationPayload = {
+  name?: unknown;
+  fname?: unknown;
+  gname?: unknown;
+  phone?: unknown;
+  phone1?: unknown;
+  email?: unknown;
+  status?: unknown;
+  address?: unknown;
+  customer_image_thumb?: unknown;
+  attachment?: unknown;
+};
 
 export type CustomersLocalQuery = {
   page?: number;
@@ -73,10 +93,51 @@ function toEmail(v: unknown): string | null {
   return t ? t.slice(0, 255) : null;
 }
 
+function toAttachment(v: unknown): File | null {
+  if (typeof File === "undefined") return null;
+  return v instanceof File ? v : null;
+}
+
+function toCustomerImageThumb(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const thumb = v.trim();
+  return thumb || null;
+}
+
+function firstCustomerImageUrl(input: unknown): string | null {
+  const root = obj(input);
+  const documents = Array.isArray(root.documents) ? root.documents : [];
+  const imageCandidates: Array<{ fileUrl: string; createdAt: number }> = [];
+
+  for (const item of documents) {
+    const row = obj(item);
+    const documentType = String(row.document_type ?? "").trim().toLowerCase();
+    const fileUrl = String(row.file_url ?? row.download_url ?? "").trim();
+    const filePath = String(row.file_path ?? "").trim().toLowerCase();
+    const createdAt = toTs(row.created_at ?? 0);
+
+    if (documentType === "customer_image" && fileUrl) {
+      imageCandidates.push({ fileUrl, createdAt });
+      continue;
+    }
+
+    if (!documentType && (/\.(jpg|jpeg|png|webp|gif|bmp|svg)(\?|$)/i.test(fileUrl) || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(filePath))) {
+      imageCandidates.push({
+        fileUrl: fileUrl || String(row.file_path ?? "").trim(),
+        createdAt,
+      });
+    }
+  }
+
+  return imageCandidates.sort((a, b) => b.createdAt - a.createdAt)[0]?.fileUrl ?? null;
+}
+
 function sanitizeCustomer(input: unknown): CustomerRow {
   const r = obj(input);
+  const rawId = Number(r.id);
 
   return {
+    id: Number.isFinite(rawId) && rawId > 0 ? Math.trunc(rawId) : undefined,
     uuid: String(r.uuid ?? ""),
     name: String(r.name ?? "").trim().slice(0, 255),
     fname: trimOrNull(r.fname, 255),
@@ -86,8 +147,57 @@ function sanitizeCustomer(input: unknown): CustomerRow {
     email: toEmail(r.email),
     status: trimOrNull(r.status, 50),
     address: trimOrNull(r.address, MAX_LOCAL_TEXT),
+    customer_image_url: firstCustomerImageUrl(r),
+    customer_image_thumb: toCustomerImageThumb(r.customer_image_thumb),
     updated_at: toTs(r.updated_at ?? r.server_updated_at),
   };
+}
+
+async function resolveCustomerThumb(
+  attachment: File | null,
+  fallbackThumb?: string | null,
+): Promise<string | null> {
+  if (attachment && isImageFile(attachment)) {
+    const thumb = await createImageThumbFromBlob(attachment);
+    if (thumb) return thumb;
+  }
+
+  return fallbackThumb ?? null;
+}
+
+async function attachOfflineCustomerThumb(
+  row: CustomerRow,
+  fallbackThumb?: string | null,
+  forceRefreshFromUrl = false,
+): Promise<CustomerRow> {
+  let customerImageThumb = row.customer_image_thumb ?? fallbackThumb ?? null;
+
+  if (row.customer_image_url && (!customerImageThumb || forceRefreshFromUrl)) {
+    const fetchedThumb = await createImageThumbFromUrl(row.customer_image_url);
+    if (fetchedThumb) {
+      customerImageThumb = fetchedThumb;
+    }
+  }
+
+  if (!customerImageThumb) return row;
+  return { ...row, customer_image_thumb: customerImageThumb };
+}
+
+function appendCustomerFormData(
+  form: FormData,
+  row: CustomerRow,
+  attachment: File,
+): void {
+  form.append("uuid", row.uuid);
+  form.append("name", row.name);
+  form.append("fname", row.fname ?? "");
+  form.append("gname", row.gname ?? "");
+  form.append("phone", row.phone);
+  form.append("phone1", row.phone1 ?? "");
+  form.append("email", row.email ?? "");
+  form.append("status", row.status ?? "");
+  form.append("address", row.address ?? "");
+  form.append("attachment", attachment);
 }
 
 function isDeletedRecord(input: unknown): boolean {
@@ -240,7 +350,8 @@ export async function customerGetLocal(uuid: string): Promise<CustomerRow | unde
 export async function customersPullToLocal(): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = getLs(CURSOR_KEY);
+  const shouldRunImageBackfill = !getLs(IMAGE_BACKFILL_KEY);
+  const since = shouldRunImageBackfill ? null : getLs(CURSOR_KEY);
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();
@@ -262,10 +373,21 @@ export async function customersPullToLocal(): Promise<{ pulled: number }> {
       await removeQueuedOpsForEntityUuids("customers", deletedUuids);
     }
 
-    const rows = parsed.list
+    const nextRows = parsed.list
       .filter((item) => !isDeletedRecord(item))
       .map(sanitizeCustomer)
       .filter((r) => r.uuid && r.name && r.phone);
+
+    const existingRows = await db.customers.bulkGet(nextRows.map((row) => row.uuid));
+    const rows = await Promise.all(
+      nextRows.map((row, index) => {
+        const existing = existingRows[index];
+        const fallbackThumb =
+          row.customer_image_url === existing?.customer_image_url ? existing?.customer_image_thumb ?? null : null;
+
+        return attachOfflineCustomerThumb(row, fallbackThumb, Boolean(row.customer_image_url && row.customer_image_url !== existing?.customer_image_url));
+      })
+    );
 
     if (rows.length) {
       await db.customers.bulkPut(rows);
@@ -278,30 +400,50 @@ export async function customersPullToLocal(): Promise<{ pulled: number }> {
   }
 
   setLs(CURSOR_KEY, serverTime);
+  if (shouldRunImageBackfill) {
+    setLs(IMAGE_BACKFILL_KEY, "1");
+  }
   await customersRetentionCleanupIfDue();
 
   return { pulled };
 }
 
 export async function customerCreate(payload: unknown): Promise<CustomerRow> {
+  const input = obj(payload) as CustomerMutationPayload;
+  const attachment = toAttachment(input.attachment);
+  const customerImageThumb = await resolveCustomerThumb(attachment, toCustomerImageThumb(input.customer_image_thumb));
+
   const uuid = crypto.randomUUID();
-  const row = sanitizeCustomer({ ...obj(payload), uuid, updated_at: Date.now() });
+  const row = sanitizeCustomer({ ...input, customer_image_thumb: customerImageThumb, uuid, updated_at: Date.now() });
 
   validateCustomer(row);
   await assertNoDuplicate(row);
 
 
   if (!isOnline()) {
-
     await db.customers.put(row);
-    await enqueueSync({ entity: "customers", uuid, action: "create", payload: row });
+    await enqueueSync({ entity: "customers", uuid, localKey: uuid, action: "create", payload: row });
+    if (attachment) {
+      await customerAttachmentEnqueueLocal(uuid, attachment);
+      notifyInfo("Customer saved offline. Attachment will upload when online.");
+      return row;
+    }
     notifySuccess("Customer saved offline. It will sync when online.");
     return row;
   }
 
   try {
-    const res = await api.post("/api/customers", row);
-    const saved = sanitizeCustomer(obj(res.data).data ?? row);
+    const res = attachment
+      ? await (() => {
+          const form = new FormData();
+          appendCustomerFormData(form, row, attachment);
+          return api.post("/api/customers", form);
+        })()
+      : await api.post("/api/customers", row);
+    const saved = await attachOfflineCustomerThumb(
+      sanitizeCustomer(obj(res.data).data ?? row),
+      row.customer_image_thumb ?? null
+    );
     await db.customers.put(saved);
     notifySuccess("Customer created successfully.");
     return saved;
@@ -315,7 +457,10 @@ export async function customerCreate(payload: unknown): Promise<CustomerRow> {
       throw new Error(message);
     }
     await db.customers.put(row);
-    await enqueueSync({ entity: "customers", uuid, action: "create", payload: row });
+    await enqueueSync({ entity: "customers", uuid, localKey: uuid, action: "create", payload: row });
+    if (attachment) {
+      await customerAttachmentEnqueueLocal(uuid, attachment);
+    }
     notifyInfo("Customer saved locally. Server sync will retry later.");
     return row;
   }
@@ -325,22 +470,54 @@ export async function customerUpdate(uuid: string, patch: unknown): Promise<Cust
   const existing = await db.customers.get(uuid);
   if (!existing) throw new Error("Customer not found locally");
 
-  const updated = sanitizeCustomer({ ...existing, ...obj(patch), uuid, updated_at: Date.now() });
+  const input = obj(patch) as CustomerMutationPayload;
+  const attachment = toAttachment(input.attachment);
+  const customerImageThumb = await resolveCustomerThumb(attachment, toCustomerImageThumb(input.customer_image_thumb) ?? existing.customer_image_thumb ?? null);
+
+  const updated = sanitizeCustomer({
+    ...existing,
+    ...input,
+    customer_image_thumb: customerImageThumb,
+    uuid,
+    updated_at: Date.now(),
+  });
 
   validateCustomer(updated);
   await assertNoDuplicate(updated, uuid);
 
   await db.customers.put(updated);
-  await enqueueSync({ entity: "customers", uuid, action: "update", payload: updated });
+  await enqueueSync({
+    entity: "customers",
+    uuid,
+    localKey: uuid,
+    action: "update",
+    payload: updated,
+    rollbackSnapshot: existing,
+  });
 
   if (!isOnline()) {
+    if (attachment) {
+      await customerAttachmentEnqueueLocal(uuid, attachment);
+      notifyInfo("Customer updated offline. Attachment will upload when online.");
+      return updated;
+    }
     notifySuccess("Customer updated offline. It will sync when online.");
     return updated;
   }
 
   try {
-    const res = await api.put(`/api/customers/${uuid}`, updated);
-    const saved = sanitizeCustomer(obj(res.data).data ?? updated);
+    const res = attachment
+      ? await (() => {
+          const form = new FormData();
+          appendCustomerFormData(form, updated, attachment);
+          form.append("_method", "PUT");
+          return api.post(`/api/customers/${uuid}`, form);
+        })()
+      : await api.put(`/api/customers/${uuid}`, updated);
+    const saved = await attachOfflineCustomerThumb(
+      sanitizeCustomer(obj(res.data).data ?? updated),
+      updated.customer_image_thumb ?? null
+    );
     await db.customers.put(saved);
     notifySuccess("Customer updated successfully.");
     return saved;
@@ -352,14 +529,27 @@ export async function customerUpdate(uuid: string, patch: unknown): Promise<Cust
       notifyError(message);
       throw new Error(message);
     }
+    if (attachment) {
+      await customerAttachmentEnqueueLocal(uuid, attachment);
+    }
     notifyInfo("Customer updated locally. Server sync will retry later.");
     return updated;
   }
 }
 
 export async function customerDelete(uuid: string): Promise<void> {
+  const existing = await db.customers.get(uuid);
+  if (!existing) throw new Error("Customer not found locally");
+
   await db.customers.delete(uuid);
-  await enqueueSync({ entity: "customers", uuid, action: "delete", payload: {} });
+  await enqueueSync({
+    entity: "customers",
+    uuid,
+    localKey: uuid,
+    action: "delete",
+    payload: {},
+    rollbackSnapshot: existing,
+  });
 
   if (!isOnline()) {
     notifySuccess("Customer deleted offline. It will sync when online.");
@@ -374,7 +564,8 @@ export async function customerDelete(uuid: string): Promise<void> {
 }
 
 export async function customersRetentionCleanup(): Promise<number> {
-  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const retentionDays = getOfflineModuleRetentionDays("customers", RETENTION_DAYS);
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const pending = await db.sync_queue.where("entity").equals("customers").toArray();
   const locked = new Set(pending.map((i) => i.uuid));
 

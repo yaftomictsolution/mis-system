@@ -5,6 +5,7 @@ import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch, RootState } from "@/store/store";
 import { login, hydrateAuth } from "@/store/auth/authSlice";
 import { computeCredHash } from "@/lib/crypto";
+import { isOfflineAccessExpired, isOfflineSystemBlocked } from "@/modules/offline-policy/offline-policy.repo";
 import { ArrowRight, Building2, Eye, EyeOff, LockKeyhole, Mail } from "lucide-react";
 
 export default function LoginPage() {
@@ -45,6 +46,11 @@ export default function LoginPage() {
   };
 
   const tryOfflineLogin = async (): Promise<boolean> => {
+    if (isOfflineSystemBlocked() || isOfflineAccessExpired()) {
+      rejectLogin("Offline access expired. Internet connection is required.");
+      return false;
+    }
+
     const storedHash = localStorage.getItem("cred_hash");
     if (!storedHash) {
       rejectLogin("No offline credentials stored");

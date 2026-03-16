@@ -1,10 +1,35 @@
 import type { NextConfig } from "next";
 import withPWAInit from "next-pwa";
 
+const STATIC_APP_ROUTES = [
+  "/",
+  "/login",
+  "/offline",
+  "/profile",
+  "/account-settings",
+  "/apartment-sales",
+  "/apartments",
+  "/crm",
+  "/customers",
+  "/customers/detail",
+  "/customers/new",
+  "/documents",
+  "/employees",
+  "/installments",
+  "/inventories",
+  "/rental-payments",
+  "/rentals",
+  "/user-roles",
+  "/users",
+];
+
 const withPWA = withPWAInit({
   dest: "public",
-  register: true,
+  register: false,
   skipWaiting: true,
+  cacheStartUrl: false,
+  dynamicStartUrl: false,
+  cacheOnFrontEndNav: true,
   // Enable PWA only in production builds unless explicitly enabled in dev.
   disable:
     process.env.NODE_ENV === "development" &&
@@ -12,6 +37,10 @@ const withPWA = withPWAInit({
   fallbacks: {
     document: "/offline",
   },
+  additionalManifestEntries: STATIC_APP_ROUTES.map((url) => ({
+    url,
+    revision: "v1",
+  })),
   runtimeCaching: [
     {
       // Next.js static chunks and static assets.
@@ -32,15 +61,15 @@ const withPWA = withPWAInit({
         if (url.pathname.startsWith("/api/")) return false;
         return !/\.[^/]+$/.test(url.pathname);
       },
-      handler: "NetworkFirst",
+      handler: "StaleWhileRevalidate",
       options: {
         cacheName: "pages",
-        expiration: { maxEntries: 50, maxAgeSeconds: 7 * 24 * 60 * 60 },
+        expiration: { maxEntries: 100, maxAgeSeconds: 7 * 24 * 60 * 60 },
       },
     },
     {
       urlPattern: /\/\?_rsc=|\/_next\/.*\?_rsc=/,
-      handler: "NetworkFirst",
+      handler: "StaleWhileRevalidate",
       options: {
         cacheName: "rsc",
         expiration: { maxEntries: 50, maxAgeSeconds: 7 * 24 * 60 * 60 },

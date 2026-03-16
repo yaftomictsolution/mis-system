@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { FormField } from "@/components/ui/FormField";
 
-type CustomerFormValues = {
-
+export type CustomerFormValues = {
   first_name: string;
   father_name: string;
   grandfather_name: string;
@@ -11,139 +11,151 @@ type CustomerFormValues = {
   phone_secondary: string;
   email: string;
   address: string;
+  attachment_file: File | null;
 };
 
-type CustomerSubmitValues = {
-  
-  first_name: string;
-  father_name: string | null;
-  grandfather_name: string | null;
-  phone_primary: string;
-  phone_secondary: string | null;
-  email: string | null;
-  address: string | null;
-};
-
-type Props = {
-  initial?: Partial<CustomerFormValues> | null;
-  onSubmit: (values: CustomerSubmitValues) => Promise<void>;
+type CustomerFormProps = {
+  initial?: Partial<CustomerFormValues>;
   submitLabel?: string;
+  onSubmit: (values: CustomerFormValues) => Promise<void> | void;
 };
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DEFAULT_VALUES: CustomerFormValues = {
+  first_name: "",
+  father_name: "",
+  grandfather_name: "",
+  phone_primary: "",
+  phone_secondary: "",
+  email: "",
+  address: "",
+  attachment_file: null,
+};
 
-function trimOrNull(value: string): string | null {
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-export default function CustomerForm({ initial, onSubmit, submitLabel = "Save" }: Props) {
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState<CustomerFormValues>({
-    first_name: initial?.first_name ?? "",
-    father_name: initial?.father_name ?? "",
-    grandfather_name: initial?.grandfather_name ?? "",
-    phone_primary: initial?.phone_primary ?? "",
-    phone_secondary: initial?.phone_secondary ?? "",
-    email: initial?.email ?? "",
-    address: initial?.address ?? "",
+export default function CustomerForm({ initial, submitLabel = "Save", onSubmit }: CustomerFormProps) {
+  const [values, setValues] = useState<CustomerFormValues>({
+    ...DEFAULT_VALUES,
+    ...initial,
   });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  function validateForm(): string | null {
-    const firstName = form.first_name.trim();
-    const primaryPhone = form.phone_primary.trim();
-    const email = form.email.trim();
+  const canSubmit = useMemo(
+    () => values.first_name.trim().length > 0 && values.phone_primary.trim().length > 0,
+    [values.first_name, values.phone_primary],
+  );
 
-    if (!firstName) return "First name is required.";
-    if (!primaryPhone) return "Primary phone is required.";
-    if (firstName.length > 255) return "First name is too long.";
-    if (primaryPhone.length > 50) return "Primary phone is too long.";
-    if (email && !EMAIL_REGEX.test(email)) return "Email format is invalid.";
+  const setField = (key: keyof CustomerFormValues, value: string | number | File | null) => {
+    setValues((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+  };
 
-    return null;
-  }
+  const handleSubmit = async () => {
+    if (submitting) return;
 
-  async function submit() {
-    setError(null);
-
-    const validationError = validateForm();
-    if (validationError) {
-      setError(validationError);
+    if (!canSubmit) {
+      setError("Full name and primary phone are required.");
       return;
     }
 
-    setSaving(true);
+    setSubmitting(true);
+    setError(null);
+
     try {
       await onSubmit({
-        first_name: form.first_name.trim(),
-        father_name: trimOrNull(form.father_name),
-        grandfather_name: trimOrNull(form.grandfather_name),
-        phone_primary: form.phone_primary.trim(),
-        phone_secondary: trimOrNull(form.phone_secondary),
-        email: trimOrNull(form.email)?.toLowerCase() ?? null,
-        address: trimOrNull(form.address),
+        first_name: values.first_name.trim(),
+        father_name: values.father_name.trim(),
+        grandfather_name: values.grandfather_name.trim(),
+        phone_primary: values.phone_primary.trim(),
+        phone_secondary: values.phone_secondary.trim(),
+        email: values.email.trim(),
+        address: values.address.trim(),
+        attachment_file: values.attachment_file,
       });
-    } catch (error: unknown) {
-      setError(error instanceof Error ? error.message : "Failed to save customer.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not save customer.");
     } finally {
-      setSaving(false);
+      setSubmitting(false);
     }
-  }
+  };
 
   return (
-    <div className="space-y-4 rounded-2xl border bg-white p-5">
-      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>}
-
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <Input label="First Name" value={form.first_name} onChange={(v) => setForm({ ...form, first_name: v })} />
-        <Input label="Phone Primary" value={form.phone_primary} onChange={(v) => setForm({ ...form, phone_primary: v })} />
-      </div>
-
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <Input label="Father Name" value={form.father_name} onChange={(v) => setForm({ ...form, father_name: v })} />
-        <Input
+    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <FormField
+          label="Full Name"
+          value={values.first_name}
+          onChange={(value) => setField("first_name", value)}
+          required
+        />
+        <FormField
+          label="Phone Number"
+          value={values.phone_primary}
+          onChange={(value) => setField("phone_primary", value)}
+          required
+        />
+        <FormField
+          label="Father Name"
+          value={values.father_name}
+          onChange={(value) => setField("father_name", value)}
+        />
+        <FormField
           label="Grandfather Name"
-          value={form.grandfather_name}
-          onChange={(v) => setForm({ ...form, grandfather_name: v })}
+          value={values.grandfather_name}
+          onChange={(value) => setField("grandfather_name", value)}
         />
+        <FormField
+          label="Second Number"
+          value={values.phone_secondary}
+          onChange={(value) => setField("phone_secondary", value)}
+        />
+        <FormField
+          label="Email Address"
+          type="email"
+          value={values.email}
+          onChange={(value) => setField("email", value)}
+        />
+        <div className="space-y-1.5">
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Attachment</label>
+          <input
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+            onChange={(event) => {
+              const file = event.target.files?.[0] ?? null;
+              setField("attachment_file", file);
+            }}
+            className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
+          />
+          {values.attachment_file && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">{values.attachment_file.name}</p>
+          )}
+        </div>
+        <div className="md:col-span-2">
+          <FormField
+            label="Address"
+            type="textarea"
+            value={values.address}
+            onChange={(value) => setField("address", value)}
+            rows={3}
+          />
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <Input
-          label="Phone Secondary"
-          value={form.phone_secondary}
-          onChange={(v) => setForm({ ...form, phone_secondary: v })}
-        />
-        <Input label="Email" value={form.email} onChange={(v) => setForm({ ...form, email: v })} />
+      {error && <div className="mt-4 text-sm text-red-600">{error}</div>}
+
+      <div className="mt-4 flex justify-end">
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={() => {
+            void handleSubmit();
+          }}
+          className="rounded-lg bg-blue-600 px-4 py-2 text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {submitting ? "Saving..." : submitLabel}
+        </button>
       </div>
-
-      <label className="block space-y-1">
-        <div className="text-xs text-gray-500">Address</div>
-        <textarea
-          className="w-full rounded-xl border p-2"
-          rows={3}
-          value={form.address}
-          onChange={(e) => setForm({ ...form, address: e.target.value })}
-        />
-      </label>
-
-      <button
-        onClick={submit}
-        disabled={saving}
-        className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-50"
-      >
-        {saving ? "Saving..." : submitLabel} (works offline)
-      </button>
     </div>
-  );
-}
-
-function Input({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="space-y-1">
-      <div className="text-xs text-gray-500">{label}</div>
-      <input className="w-full rounded-xl border p-2" value={value} onChange={(e) => onChange(e.target.value)} />
-    </label>
   );
 }

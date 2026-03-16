@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useDispatch, useSelector } from "react-redux";
+import { isOfflineAccessExpired, isOfflineSystemBlocked } from "@/modules/offline-policy/offline-policy.repo";
 import type { AppDispatch, RootState } from "@/store/store";
 import { fetchMe } from "@/store/auth/authSlice";
 
@@ -13,6 +14,11 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return;
+
+    if (typeof navigator !== "undefined" && !navigator.onLine && (isOfflineSystemBlocked() || isOfflineAccessExpired())) {
+      router.replace("/login");
+      return;
+    }
 
     if (!token) {
       router.replace("/login");

@@ -8,9 +8,12 @@ import { ThemeProvider } from './context/ThemeContext'
 import CacheOnVisit from '@/pwa/CacheOnVisit';
 import DebugRegister from '@/pwa/debugRegister';
 import ToastHost from "@/components/ui/ToastHost";
+import { ensureCacheSchemaCompatibility } from "@/sync/cacheSchema";
 
 function Bootstrap() {
   useEffect(() => {
+    void ensureCacheSchemaCompatibility();
+
     const token = localStorage.getItem("token");
     const userRaw = localStorage.getItem("user");
     let user = null;
