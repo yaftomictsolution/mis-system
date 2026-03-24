@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { useSelector } from "react-redux";
 import { notifyInfo } from "@/lib/notify";
-import { CACHE_ROUTES, CACHE_ROUTE_PATHS } from "@/config/cacheRoutes";
+import { CACHE_ROUTE_PATHS, getCacheRoutesForPermissions } from "@/config/cacheRoutes";
 import { listDynamicCacheRoutes, warmRouteForOffline } from "@/pwa/cacheWarm";
 import { getOfflineDataStatuses, type OfflineDataStatus } from "@/pwa/offlineReadiness";
+import type { RootState } from "@/store/store";
 
 const EXTRA_ALLOWED_PAGES = ["/offline", "/login"];
 const CORE_ROUTE_SET = new Set(CACHE_ROUTE_PATHS.map((path) => normalizePath(path)));
@@ -44,7 +46,8 @@ async function hasActiveServiceWorkerController(): Promise<boolean> {
 export default function CacheStatus() {
   const pathname = usePathname();
   const router = useRouter();
-  const [routes, setRoutes] = useState(CACHE_ROUTES);
+  const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
+  const [routes, setRoutes] = useState(() => getCacheRoutesForPermissions(permissions));
   const [status, setStatus] = useState<Record<string, boolean>>({});
   const [dataStatuses, setDataStatuses] = useState<OfflineDataStatus[]>([]);
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null);
@@ -89,8 +92,9 @@ export default function CacheStatus() {
 
   const loadRoutes = useCallback(async () => {
     try {
-      const dynamicRoutes = await listDynamicCacheRoutes();
-      const merged = [...CACHE_ROUTES, ...dynamicRoutes];
+      const staticRoutes = getCacheRoutesForPermissions(permissions);
+      const dynamicRoutes = await listDynamicCacheRoutes(permissions);
+      const merged = [...staticRoutes, ...dynamicRoutes];
       const routeMap = new Map<string, (typeof merged)[number]>();
       for (const route of merged) {
         routeMap.set(normalizePath(route.path), { path: normalizePath(route.path), label: route.label });
@@ -99,10 +103,11 @@ export default function CacheStatus() {
       setRoutes(nextRoutes);
       return nextRoutes;
     } catch {
-      setRoutes(CACHE_ROUTES);
-      return CACHE_ROUTES;
+      const fallbackRoutes = getCacheRoutesForPermissions(permissions);
+      setRoutes(fallbackRoutes);
+      return fallbackRoutes;
     }
-  }, []);
+  }, [permissions]);
 
   const collectStatus = useCallback(
     async (routeList = routes): Promise<CacheSnapshot> => {

@@ -15,6 +15,7 @@ import {
   Search,
   Settings,
   Sun,
+  Trash2,
   UserCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -24,16 +25,20 @@ import { notifyInfo } from "@/lib/notify";
 import { toggleSidebar } from "@/store/uiSlice";
 import { useTheme } from "../../../app/context/ThemeContext";
 import CacheStatus from "./CacheStatus";
-import OfflineAccessTimer from "./OfflineAccessTimer";
-import UnsyncedPurgeMetric from "./UnsyncedPurgeMetric";
 import { useSyncWidget } from "@/sync/useSyncWidget";
+import { subscribeAppEvent } from "@/lib/appEvents";
 import {
+  notificationDeleteAllRead,
+  notificationDelete,
   notificationMarkAllRead,
   notificationMarkRead,
   notificationsListMine,
   type AdminNotificationRow,
 } from "@/modules/notifications/notifications.repo";
-import { subscribeAppEvent } from "@/lib/appEvents";
+import {
+  getNotificationPreferences,
+  notificationPreferencesEvent,
+} from "@/modules/notifications/notification-preferences";
 
 type NotificationTone = "success" | "warning" | "info";
 
@@ -121,6 +126,7 @@ export default function TopNav() {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
 
   const notificationMenuRef = useRef<HTMLDivElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
@@ -132,6 +138,7 @@ export default function TopNav() {
   const initials = getInitials(displayName);
 
   const unreadCount = useMemo(() => notifications.filter((item) => item.unread).length, [notifications]);
+  const readCount = useMemo(() => notifications.filter((item) => !item.unread).length, [notifications]);
   const unreadEligibleCount = useMemo(
     () => notifications.filter((item) => item.unread && item.category === "sale_deed_eligible").length,
     [notifications]
@@ -140,6 +147,11 @@ export default function TopNav() {
   const loadNotifications = useCallback(
     async (showAdminToast: boolean) => {
       if (!user) return;
+      if (!notificationsEnabled) {
+        setNotifications([]);
+        setNotificationsLoading(false);
+        return;
+      }
 
       setNotificationsLoading(true);
       try {
@@ -163,8 +175,25 @@ export default function TopNav() {
         setNotificationsLoading(false);
       }
     },
-    [canApproveSales, user]
+    [canApproveSales, notificationsEnabled, user]
   );
+
+  useEffect(() => {
+    setNotificationsEnabled(getNotificationPreferences().pushNotifications);
+    const unsubscribe = subscribeAppEvent(notificationPreferencesEvent, (detail) => {
+      const enabled =
+        typeof detail?.pushNotifications === "boolean"
+          ? detail.pushNotifications
+          : getNotificationPreferences().pushNotifications;
+      setNotificationsEnabled(enabled);
+      if (!enabled) {
+        setNotifications([]);
+        setIsNotificationsOpen(false);
+      }
+    });
+
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     const update = () => setTime(new Date().toLocaleTimeString([], { hour12: false }));
@@ -175,11 +204,16 @@ export default function TopNav() {
 
   useEffect(() => {
     if (!user) return;
+    if (!notificationsEnabled) {
+      setNotifications([]);
+      return;
+    }
     void loadNotifications(true);
-  }, [loadNotifications, user]);
+  }, [loadNotifications, notificationsEnabled, user]);
 
   useEffect(() => {
     if (!user) return;
+    if (!notificationsEnabled) return;
 
     const onSyncComplete = () => {
       void loadNotifications(false);
@@ -193,7 +227,7 @@ export default function TopNav() {
       unsubscribeNotifications();
       window.removeEventListener("sync:complete", onSyncComplete as EventListener);
     };
-  }, [loadNotifications, user]);
+  }, [loadNotifications, notificationsEnabled, user]);
 
   useEffect(() => {
     if (!isNotificationsOpen && !isProfileOpen) return;
@@ -224,6 +258,10 @@ export default function TopNav() {
   }, [isNotificationsOpen, isProfileOpen]);
 
   const toggleNotifications = () => {
+    if (!notificationsEnabled) {
+      notifyInfo("In-app notifications are disabled in Settings.");
+      return;
+    }
     setIsNotificationsOpen((isOpen) => {
       const nextState = !isOpen;
       if (nextState) {
@@ -266,6 +304,33 @@ export default function TopNav() {
       setNotifications((prev) => prev.map((item) => ({ ...item, unread: false, tone: "success" })));
     } catch {
       // No-op
+    }
+  };
+
+  const handleNotificationDelete = async (id: string) => {
+    const previous = notifications;
+    setNotifications((prev) => prev.filter((item) => item.id !== id));
+
+    try {
+      await notificationDelete(id);
+    } catch {
+      setNotifications(previous);
+    }
+  };
+
+  const handleDeleteAllRead = async () => {
+    if (readCount <= 0) return;
+
+    const previous = notifications;
+    setNotifications((prev) => prev.filter((item) => item.unread));
+
+    try {
+      const removed = await notificationDeleteAllRead();
+      if (removed <= 0) {
+        setNotifications(previous);
+      }
+    } catch {
+      setNotifications(previous);
     }
   };
 
@@ -350,10 +415,14 @@ export default function TopNav() {
               onClick={toggleNotifications}
               aria-expanded={isNotificationsOpen}
               aria-haspopup="menu"
-              className="relative p-2 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors hover:bg-slate-100 dark:hover:bg-[#1a1a2e] rounded-lg"
+              className={`relative rounded-lg p-2 transition-colors ${
+                notificationsEnabled
+                  ? "text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-[#1a1a2e] dark:hover:text-white"
+                  : "cursor-not-allowed text-slate-300 dark:text-slate-600"
+              }`}
             >
               <Bell className="w-4 h-4" />
-              {unreadCount > 0 && (
+              {notificationsEnabled && unreadCount > 0 && (
                 <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
               )}
             </button>
@@ -368,15 +437,27 @@ export default function TopNav() {
                       {canApproveSales && unreadEligibleCount > 0 ? ` | ${unreadEligibleCount} deed approvals` : ""}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void handleMarkAllRead();
-                    }}
-                    className="text-[10px] font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
-                  >
-                    Mark all as read
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleMarkAllRead();
+                      }}
+                      className="text-[10px] font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+                    >
+                      Mark all as read
+                    </button>
+                    <button
+                      type="button"
+                      disabled={readCount <= 0}
+                      onClick={() => {
+                        void handleDeleteAllRead();
+                      }}
+                      className="text-[10px] font-semibold uppercase tracking-wide text-rose-600 transition-colors hover:text-rose-700 disabled:cursor-not-allowed disabled:text-slate-300 dark:text-rose-400 dark:hover:text-rose-300 dark:disabled:text-slate-600"
+                    >
+                      Clear read
+                    </button>
+                  </div>
                 </div>
                 <div className="p-2 max-h-80 overflow-y-auto space-y-1.5">
                   {notificationsLoading && (
@@ -390,31 +471,49 @@ export default function TopNav() {
                     const tone = notificationToneStyles[notification.tone];
 
                     return (
-                      <button
+                      <div
                         key={notification.id}
-                        type="button"
-                        onClick={() => {
-                          void handleNotificationClick(notification);
-                        }}
                         className={`w-full flex items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors hover:bg-slate-50 dark:hover:bg-[#1a1a2e] ${
                           notification.unread
                             ? "border-blue-200 dark:border-blue-500/30 bg-blue-50/60 dark:bg-blue-500/5"
                             : "border-transparent"
                         }`}
                       >
-                        <span className={`mt-0.5 h-8 w-8 rounded-lg flex items-center justify-center ${tone.wrapper}`}>
-                          <Icon className={`w-4 h-4 ${tone.icon}`} />
-                        </span>
-                        <span className="flex-1 min-w-0">
-                          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 block">
-                            {notification.title}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleNotificationClick(notification);
+                          }}
+                          className="flex min-w-0 flex-1 items-start gap-3 text-left"
+                        >
+                          <span className={`mt-0.5 h-8 w-8 rounded-lg flex items-center justify-center ${tone.wrapper}`}>
+                            <Icon className={`w-4 h-4 ${tone.icon}`} />
                           </span>
-                          <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 block">
-                            {notification.description}
+                          <span className="flex-1 min-w-0">
+                            <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 block">
+                              {notification.title}
+                            </span>
+                            <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 block">
+                              {notification.description}
+                            </span>
                           </span>
-                        </span>
-                        <span className="mt-0.5 text-[10px] text-slate-400 whitespace-nowrap">{notification.time}</span>
-                      </button>
+                          <span className="mt-0.5 text-[10px] text-slate-400 whitespace-nowrap">{notification.time}</span>
+                        </button>
+
+                        {!notification.unread ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleNotificationDelete(notification.id);
+                            }}
+                            className="ml-2 mt-0.5 rounded-md p-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
+                            title="Remove notification"
+                            aria-label={`Remove ${notification.title}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
                     );
                   })}
                 </div>
@@ -453,7 +552,7 @@ export default function TopNav() {
                   type="button"
                   onClick={() => {
                     setIsProfileOpen(false);
-                    router.push("/profile");
+                    router.push("/account-settings");
                   }}
                   className="mt-2 w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1a1a2e]"
                 >

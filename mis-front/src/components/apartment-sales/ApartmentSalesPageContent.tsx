@@ -19,8 +19,6 @@ import {
   buildSalePayload,
   customerRemainingAmount,
   resolveRowEditScope,
-  toCurrency,
-  toDateLabel,
   toForm,
   toMoney2,
 } from "@/components/apartment-sales/apartment-sale.page-helpers";
@@ -416,11 +414,16 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
     [installmentPaidBySaleUuid, municipalityRemainingBySaleUuid]
   );
 
-
+  
+  const openSalePrintPage = useCallback((row: ApartmentSaleRow) => {
+    if (typeof window === "undefined") return;
+    window.open(`/print/apartment-sales/${row.uuid}/sale`, "_blank", "noopener,noreferrer");
+  }, []);
 
   const openDeedPrintPage = useCallback((row: ApartmentSaleRow) => {
     if (typeof window === "undefined") return;
-    window.open(`/print/apartment-sales/${row.uuid}/deed`, "_blank", "noopener,noreferrer");
+    void row;
+    window.open("/deed-template.jpg", "_blank", "noopener,noreferrer");
   }, []);
 
   const salesColumns = useMemo(
@@ -428,6 +431,7 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
       createApartmentSalesColumns({
         customerLabelById,
         apartmentLabelById,
+        onPrintSale: openSalePrintPage,
         onPrintDeed: openDeedPrintPage,
         canManageSales,
         canIssueDeed: canApproveDeed,
@@ -446,6 +450,7 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
       municipalityRemainingBySaleUuid,
       openHandoverDialog,
       openIssueDeedDialog,
+      openSalePrintPage,
       openDeedPrintPage,
       openTerminateDialog,
     ]
@@ -676,10 +681,12 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
   }, [canApproveDeed, deedIssuing, pendingIssueDeed, refresh]);
 
   const terminatePaidTotal = useMemo(() => getSalePaidTotal(pendingTerminate), [getSalePaidTotal, pendingTerminate]);
+ 
   const terminateDefaultedMinCharge = useMemo(
     () => defaultedMinCharge(terminatePaidTotal),
     [defaultedMinCharge, terminatePaidTotal]
   );
+
   const terminateSuggestedCharge = useMemo(
     () => suggestedCharge(terminateForm.status, terminatePaidTotal),
     [suggestedCharge, terminateForm.status, terminatePaidTotal]

@@ -7,6 +7,17 @@ function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
 }
 
+function isSameOriginUrl(source: string): boolean {
+  if (!isBrowser()) return false;
+
+  try {
+    const url = new URL(source, window.location.origin);
+    return url.origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 export function isImageFile(file: File | Blob | null | undefined): boolean {
   if (!file) return false;
   const mime = String(file.type ?? "").toLowerCase();
@@ -73,6 +84,7 @@ export async function createImageThumbFromBlob(file: File | Blob | null | undefi
 export async function createImageThumbFromUrl(url: string | null | undefined): Promise<string | null> {
   const source = String(url ?? "").trim();
   if (!isBrowser() || !source) return null;
+  if (!isSameOriginUrl(source)) return null;
 
   try {
     const response = await fetch(source, { credentials: "include" });
@@ -97,8 +109,13 @@ export function resolveOfflineImageSrc(input: {
   if (apartmentThumb) return apartmentThumb;
 
   const customerUrl = String(input.customer_image_url ?? "").trim();
-  if (customerUrl) return customerUrl;
+  if (customerUrl) {
+    if (!isBrowser()) return customerUrl;
+    if (navigator.onLine || isSameOriginUrl(customerUrl)) return customerUrl;
+  }
 
   const apartmentUrl = String(input.apartment_image_url ?? "").trim();
-  return apartmentUrl || null;
+  if (!apartmentUrl) return null;
+  if (!isBrowser()) return apartmentUrl;
+  return navigator.onLine || isSameOriginUrl(apartmentUrl) ? apartmentUrl : null;
 }

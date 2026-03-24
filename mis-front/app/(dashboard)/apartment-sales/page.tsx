@@ -26,6 +26,7 @@ import { notifyError, notifySuccess } from "@/lib/notify";
 import type { RootState } from "@/store/store";
 
 export default function ApartmentSalesPage() {
+  
   const perms = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
   const canManageSales = useMemo(() => perms.includes("sales.create"), [perms]);
   const readOnly = !canManageSales;
@@ -84,11 +85,9 @@ export default function ApartmentSalesPage() {
 
         const uniqueKey = `${customerId}:${apartmentId}`;
         if (seenCustomerApartment.has(uniqueKey)) continue;
-
         seenCustomerApartment.add(uniqueKey);
         countByCustomer.set(customerId, (countByCustomer.get(customerId) ?? 0) + 1);
       }
-
       if (!local.hasMore) break;
       page += 1;
     }

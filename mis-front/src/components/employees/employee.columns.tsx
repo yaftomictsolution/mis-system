@@ -3,11 +3,7 @@
 import { Badge } from "@/components/ui/Badge";
 import type { Column } from "@/components/ui/DataTable";
 import { EmployeeRow } from "@/db/localDB";
-import { resolveOfflineImageSrc } from "@/lib/imageThumb";
-import { SalaryType,EmployeeStatus } from "./employee.types";
-import { types } from "util";
-
-
+import { SalaryType, EmployeeStatus } from "./employee.types";
 
 const normalizeStatus = (status: string): EmployeeStatus => {
   const value = status.trim().toLowerCase();
@@ -15,14 +11,21 @@ const normalizeStatus = (status: string): EmployeeStatus => {
   return "active";
 };
 
-const normalizeSalarType = (salaryType: string): SalaryType => {
-  return salaryType.trim().toLowerCase() === "fixed" ? "daily" : "project";
+const normalizeSalaryType = (salaryType?: string | null): SalaryType => {
+  const value = String(salaryType ?? "").trim().toLowerCase();
+  if (value === "daily" || value === "project") return value;
+  return "fixed";
 };
-
-const statusColor: Record<EmployeeStatus,"purple" | "emerald"> = {
+export const toDateLabel = (value?: number | null): string => {
+  if (!value || !Number.isFinite(value)) return "-";
+  return new Date(value).toLocaleDateString();
+};
+const statusColor: Record<EmployeeStatus, "purple" | "emerald"> = {
   active: "emerald",
   resign: "purple",
 };
+
+
 
 
 export const employeeColumns: Column<EmployeeRow>[] = [
@@ -45,7 +48,7 @@ export const employeeColumns: Column<EmployeeRow>[] = [
     key: "salary_type",
     label: "Salary Type",
     render: (item) => {
-      const usage = normalizeSalarType(item.salary_type);
+      const usage = normalizeSalaryType(item.salary_type);
       return <Badge color={usage === "fixed" ? "blue" : "purple"}>{usage}</Badge>;
     },
   },
@@ -69,7 +72,7 @@ export const employeeColumns: Column<EmployeeRow>[] = [
   {
     key: "hire_date",
     label: "Hire Date",
-    render: (item) => <span>{item.hire_date}</span>,
+    render: (item) => <span>{toDateLabel(item.hire_date)}</span>,
   },
   {
     key: "status",

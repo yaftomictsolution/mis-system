@@ -28,26 +28,32 @@ async function waitForServiceWorkerReady(timeoutMs = 8000): Promise<void> {
   });
 }
 
-export async function listDynamicCacheRoutes(): Promise<CacheRoute[]> {
+function hasPermission(permissions: string[], permission: string): boolean {
+  return permissions.includes(permission);
+}
+
+export async function listDynamicCacheRoutes(permissions: string[] = []): Promise<CacheRoute[]> {
   const routeMap = new Map<string, string>();
 
-  const customers = await db.customers.toArray();
-  for (const customer of customers) {
-    const uuid = String(customer.uuid ?? "").trim();
-    if (!uuid) continue;
-    routeMap.set(`/customers/${uuid}`, `${customer.name || "Customer"} Detail`);
-    routeMap.set(`/customers/${uuid}/activity`, `${customer.name || "Customer"} Activity`);
+  if (hasPermission(permissions, "customers.view")) {
+    const customers = await db.customers.toArray();
+    for (const customer of customers) {
+      const uuid = String(customer.uuid ?? "").trim();
+      if (!uuid) continue;
+      routeMap.set(`/customers/${uuid}`, `${customer.name || "Customer"} Detail`);
+      routeMap.set(`/customers/${uuid}/activity`, `${customer.name || "Customer"} Activity`);
+    }
   }
 
-  const sales = await db.apartment_sales.toArray();
-  for (const sale of sales) {
-    const uuid = String(sale.uuid ?? "").trim();
-    const saleId = String(sale.sale_id ?? "").trim() || uuid.slice(0, 8).toUpperCase();
-    if (!uuid) continue;
-    routeMap.set(`/apartment-sales/${uuid}/financial`, `${saleId} Financial`);
-    routeMap.set(`/apartment-sales/${uuid}/history`, `${saleId} History`);
-    if (String(sale.deed_status ?? "").trim().toLowerCase() === "issued") {
-      routeMap.set(`/print/apartment-sales/${uuid}/deed`, `${saleId} Deed`);
+  if (hasPermission(permissions, "sales.create")) {
+    const sales = await db.apartment_sales.toArray();
+    for (const sale of sales) {
+      const uuid = String(sale.uuid ?? "").trim();
+      const saleId = String(sale.sale_id ?? "").trim() || uuid.slice(0, 8).toUpperCase();
+      if (!uuid) continue;
+      routeMap.set(`/print/apartment-sales/${uuid}/sale`, `${saleId} Summary`);
+      routeMap.set(`/apartment-sales/${uuid}/financial`, `${saleId} Financial`);
+      routeMap.set(`/apartment-sales/${uuid}/history`, `${saleId} History`);
     }
   }
 

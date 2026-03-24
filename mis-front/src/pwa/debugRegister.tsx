@@ -38,6 +38,15 @@ async function clearAllCaches(): Promise<void> {
   await Promise.all(names.map((name) => caches.delete(name)));
 }
 
+async function waitForReadyRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (!("serviceWorker" in navigator)) return null;
+  try {
+    return await navigator.serviceWorker.ready;
+  } catch {
+    return null;
+  }
+}
+
 export default function DebugRegister() {
   useEffect(() => {
     if (!SW_ENABLED) return;
@@ -50,13 +59,7 @@ export default function DebugRegister() {
     void (async () => {
       try {
         const isOnline = typeof navigator === "undefined" ? true : navigator.onLine;
-        if (!isOnline) {
-          const existing = await navigator.serviceWorker.getRegistration();
-          if (existing) {
-            console.info("DebugRegister: offline mode detected, using existing service worker registration");
-            return;
-          }
-        }
+        const existing = await navigator.serviceWorker.getRegistration();
 
         if (isOnline) {
           const healthy = await hasReachableWorkboxScript();
@@ -75,22 +78,22 @@ export default function DebugRegister() {
               updateViaCache: "none",
             });
         await reg.update().catch(() => undefined);
+        const readyReg = (await waitForReadyRegistration()) ?? reg;
 
-        // A new worker is not guaranteed to control the current page until the next load.
-        // Reload once on first control so offline navigation/refresh runs under the active SW.
-        if (!navigator.serviceWorker.controller && sessionStorage.getItem(SW_CONTROLLED_RELOAD_KEY) !== "1") {
-          const onControllerChange = () => {
+        // An active worker does not always control the current tab until the next load.
+        // Force a one-time reload so offline navigation/refresh runs under SW control.
+        if (!navigator.serviceWorker.controller) {
+          const hasActiveWorker = Boolean(readyReg.active || readyReg.waiting || existing?.active);
+          if (hasActiveWorker && sessionStorage.getItem(SW_CONTROLLED_RELOAD_KEY) !== "1") {
             sessionStorage.setItem(SW_CONTROLLED_RELOAD_KEY, "1");
-            navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
             window.location.reload();
-          };
-
-          navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
-        } else if (navigator.serviceWorker.controller) {
+            return;
+          }
+        } else {
           sessionStorage.setItem(SW_CONTROLLED_RELOAD_KEY, "1");
         }
 
-        console.info("DebugRegister: service worker ready", reg);
+        console.info("DebugRegister: service worker ready", readyReg);
       } catch (err) {
         console.error("DebugRegister: registration failed", err);
       }
