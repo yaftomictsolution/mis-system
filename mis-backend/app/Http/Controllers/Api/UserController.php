@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
+use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Validation\Rule;
 use Spatie\Permission\Models\Role;
 use Illuminate\Http\JsonResponse;
@@ -244,6 +245,32 @@ class UserController extends Controller
         ]);
     }
 
+    public function forceDestroy(string $uuid): JsonResponse
+    {
+        $user = User::withTrashed()->where('uuid', $uuid)->firstOrFail();
+        if (! $user->trashed()) {
+            return response()->json([
+                'message' => 'User must be soft-deleted before permanent delete.',
+            ], 409);
+        }
+
+        try {
+            $user->syncRoles([]);
+            $user->forceDelete();
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(
+                PermanentDeleteDependencyInspector::buildBlockedDeletePayload('User', $user),
+                409
+            );
+        }
+
+        return response()->json([
+            'message' => 'Permanently deleted',
+        ]);
+    }
+
     private function UserPayload(User $user): array
     {
         $roles = $user->relationLoaded('roles')
@@ -279,3 +306,5 @@ class UserController extends Controller
     }
 
 }
+
+

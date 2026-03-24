@@ -4,16 +4,17 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreEmployeeRequest;
-use Illuminate\Http\Request;
 use App\Models\Employee;
+use App\Support\PermanentDeleteDependencyInspector;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Str;
+
 class EmployeeController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
-    public function index(Request $request): JsonResponse{
-        
-          $validated = $request->validate([
+    public function index(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
             'q' => ['nullable', 'string', 'max:255'],
             'since' => ['nullable', 'date'],
             'offline' => ['nullable', 'boolean'],
@@ -41,7 +42,8 @@ class EmployeeController extends Controller
                 'hire_date',
                 'updated_at',
                 'deleted_at',
-            ])->orderByDesc('updated_at');
+            ])
+            ->orderByDesc('updated_at');
 
         if ($includeDeleted) {
             $query->withTrashed();
@@ -51,8 +53,9 @@ class EmployeeController extends Controller
         if ($search !== '') {
             $query->where(function ($builder) use ($search) {
                 $builder
-                    ->orWhere('first_name', 'like', "%{$search}%")
+                    ->where('first_name', 'like', "%{$search}%")
                     ->orWhere('last_name', 'like', "%{$search}%")
+                    ->orWhere('job_title', 'like', "%{$search}%")
                     ->orWhere('phone', 'like', "%{$search}%")
                     ->orWhere('email', 'like', "%{$search}%")
                     ->orWhere('base_salary', 'like', "%{$search}%");
@@ -67,7 +70,7 @@ class EmployeeController extends Controller
             });
         }
 
-        if (!empty($validated['offline'])) {
+        if ($offline) {
             $windowStart = now()->subMonths(6);
             $query->where(function ($builder) use ($windowStart) {
                 $builder
@@ -99,18 +102,14 @@ class EmployeeController extends Controller
                 'server_time' => now()->toISOString(),
             ],
         ]);
-
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
     public function store(StoreEmployeeRequest $request): JsonResponse
     {
         $data = $request->validated();
 
         $incomingUuid = (string) ($data['uuid'] ?? '');
-        // $apartmentCode = trim((string) ($data['apartment_code'] ?? ''));
+        $email = trim((string) ($data['email'] ?? ''));
         $matches = collect();
 
         if ($incomingUuid !== '') {
@@ -120,10 +119,17 @@ class EmployeeController extends Controller
             }
         }
 
+        if ($email !== '') {
+            $matchByEmail = Employee::withTrashed()->where('email', $email)->first();
+            if ($matchByEmail) {
+                $matches->push($matchByEmail);
+            }
+        }
+
         $uniqueMatches = $matches->unique('id')->values();
         if ($uniqueMatches->count() > 1) {
             return response()->json([
-                'message' => 'Conflicting identifiers for apartment create request.',
+                'message' => 'Conflicting identifiers for employee create request.',
             ], 409);
         }
 
@@ -139,10 +145,11 @@ class EmployeeController extends Controller
             $employee->restore();
             $restored = true;
         } elseif ($incomingUuid !== '' && $employee->uuid === $incomingUuid) {
+            // Idempotent create retry.
         } else {
             return response()->json([
-                'message' => 'Apartment already exists.',
-                'data' => $this->apartmentPayload($employee),
+                'message' => 'Employee already exists.',
+                'data' => $this->employeePayload($employee),
             ], 409);
         }
 
@@ -152,38 +159,68 @@ class EmployeeController extends Controller
         $employee->save();
 
         return response()->json([
-            'data' => $this->EmployeePayload($employee->fresh()),
+            'data' => $this->employeePayload($employee->fresh()),
             'restored' => $restored,
         ], $created ? 201 : 200);
     }
 
-    /**
-     * Display the specified resource.
-     */
-    public function show(string $id)
+    public function update(StoreEmployeeRequest $request, string $uuid): JsonResponse
     {
-        //
+        $employee = Employee::withTrashed()->where('uuid', $uuid)->firstOrFail();
+        if ($employee->trashed()) {
+            $employee->restore();
+        }
+
+        $data = $request->validated();
+        unset($data['uuid']);
+        $employee->fill($data);
+        $employee->save();
+
+        return response()->json([
+            'data' => $this->employeePayload($employee->fresh(['documents'])),
+        ]);
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
-    public function update(Request $request, string $id)
+    public function destroy(string $uuid): JsonResponse
     {
-        //
+        $employee = Employee::withTrashed()->where('uuid', $uuid)->first();
+        if ($employee && !$employee->trashed()) {
+            $employee->delete();
+        }
+
+        return response()->json([
+            'message' => 'Deleted',
+        ]);
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
-    public function destroy(string $id)
+    public function forceDestroy(string $uuid): JsonResponse
     {
-        //
+        $employee = Employee::withTrashed()->where('uuid', $uuid)->firstOrFail();
+        if (!$employee->trashed()) {
+            return response()->json([
+                'message' => 'Employee must be soft-deleted before permanent delete.',
+            ], 409);
+        }
+
+        try {
+            $employee->forceDelete();
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(
+                PermanentDeleteDependencyInspector::buildBlockedDeletePayload('Employee', $employee),
+                409
+            );
+        }
+
+        return response()->json([
+            'message' => 'Permanently deleted',
+        ]);
     }
 
     private function employeePayload(Employee $employee): array
     {
-        $data = $employee->only([
+        return $employee->only([
             'id',
             'uuid',
             'first_name',
@@ -191,15 +228,16 @@ class EmployeeController extends Controller
             'job_title',
             'salary_type',
             'base_salary',
-            'adress',
+            'address',
             'email',
             'phone',
             'status',
             'hire_date',
             'updated_at',
             'created_at',
+            'deleted_at',
         ]);
-        return $data;
     }
-
 }
+
+

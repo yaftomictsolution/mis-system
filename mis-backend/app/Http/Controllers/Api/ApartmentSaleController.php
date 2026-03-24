@@ -12,6 +12,7 @@ use App\Models\InstallmentPayment;
 use App\Services\ApartmentSaleFinancialService;
 use App\Services\MunicipalityWorkflowService;
 use App\Services\SaleCreatedFinanceAlertService;
+use App\Support\PermanentDeleteDependencyInspector;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -268,6 +269,34 @@ class ApartmentSaleController extends Controller
 
         return response()->json([
             'message' => 'Deleted',
+        ]);
+    }
+
+    public function forceDestroy(string $uuid): JsonResponse
+    {
+        $sale = ApartmentSale::withTrashed()->where('uuid', $uuid)->firstOrFail();
+        if (!$sale->trashed()) {
+            return response()->json([
+                'message' => 'Sale must be soft-deleted before permanent delete.',
+            ], 409);
+        }
+
+        try {
+            DB::transaction(function () use ($sale): void {
+                ApartmentSaleFinancial::query()->where('apartment_sale_id', $sale->id)->delete();
+                $sale->forceDelete();
+            });
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(
+                PermanentDeleteDependencyInspector::buildBlockedDeletePayload('Sale', $sale, ['apartment_sale_financials']),
+                409
+            );
+        }
+
+        return response()->json([
+            'message' => 'Permanently deleted',
         ]);
     }
 
@@ -1113,3 +1142,5 @@ class ApartmentSaleController extends Controller
         return CarbonImmutable::parse((string) $value)->toDateString();
     }
 }
+
+

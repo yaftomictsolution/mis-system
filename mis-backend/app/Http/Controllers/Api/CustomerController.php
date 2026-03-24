@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreCustomerRequest;
 use App\Models\Customer;
 use App\Models\Document;
+use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
@@ -213,6 +214,49 @@ class CustomerController extends Controller
         ]);
     }
 
+    public function forceDestroy(string $uuid): JsonResponse
+    {
+        $customer = Customer::withTrashed()->where('uuid', $uuid)->firstOrFail();
+        if (!$customer->trashed()) {
+            return response()->json([
+                'message' => 'Customer must be soft-deleted before permanent delete.',
+            ], 409);
+        }
+
+        try {
+            DB::transaction(function () use ($customer): void {
+                $documents = Document::query()
+                    ->where('module', 'customer')
+                    ->where('reference_id', $customer->id)
+                    ->get();
+
+                foreach ($documents as $document) {
+                    if (trim((string) $document->file_path) !== '') {
+                        Storage::disk('public')->delete($document->file_path);
+                    }
+                }
+
+                Document::query()
+                    ->where('module', 'customer')
+                    ->where('reference_id', $customer->id)
+                    ->delete();
+
+                $customer->forceDelete();
+            });
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(
+                PermanentDeleteDependencyInspector::buildBlockedDeletePayload('Customer', $customer),
+                409
+            );
+        }
+
+        return response()->json([
+            'message' => 'Permanently deleted',
+        ]);
+    }
+
     public function storeAttachmentOnly(Request $request, string $uuid): JsonResponse
     {
         $request->validate([
@@ -354,3 +398,5 @@ class CustomerController extends Controller
         return 'customer_attachment';
     }
 }
+
+

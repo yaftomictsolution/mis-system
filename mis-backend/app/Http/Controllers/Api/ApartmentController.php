@@ -6,8 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreApartmentRequest;
 use App\Models\Apartment;
 use App\Models\Document;
+use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -205,6 +207,49 @@ class ApartmentController extends Controller
         ]);
     }
 
+    public function forceDestroy(string $uuid): JsonResponse
+    {
+        $apartment = Apartment::withTrashed()->where('uuid', $uuid)->firstOrFail();
+        if (!$apartment->trashed()) {
+            return response()->json([
+                'message' => 'Apartment must be soft-deleted before permanent delete.',
+            ], 409);
+        }
+
+        try {
+            DB::transaction(function () use ($apartment): void {
+                $documents = Document::query()
+                    ->where('module', 'apartment')
+                    ->where('reference_id', $apartment->id)
+                    ->get();
+
+                foreach ($documents as $document) {
+                    if (trim((string) $document->file_path) !== '') {
+                        Storage::disk('public')->delete($document->file_path);
+                    }
+                }
+
+                Document::query()
+                    ->where('module', 'apartment')
+                    ->where('reference_id', $apartment->id)
+                    ->delete();
+
+                $apartment->forceDelete();
+            });
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(
+                PermanentDeleteDependencyInspector::buildBlockedDeletePayload('Apartment', $apartment),
+                409
+            );
+        }
+
+        return response()->json([
+            'message' => 'Permanently deleted',
+        ]);
+    }
+
     private function apartmentPayload(Apartment $apartment): array
     {
         $base = $apartment->only([
@@ -272,3 +317,5 @@ class ApartmentController extends Controller
             : 'apartment_document';
     }
 }
+
+
