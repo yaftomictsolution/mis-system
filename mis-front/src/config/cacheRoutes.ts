@@ -5,40 +5,59 @@ export type CacheRoute = {
   label: string;
 };
 
+type CacheRouteDefinition = CacheRoute & {
+  permission?: string;
+};
+
 function normalizePath(path: string): string {
   if (!path) return "/";
   if (path !== "/" && path.endsWith("/")) return path.slice(0, -1);
   return path;
 }
 
-const routeMap = new Map<string, string>();
-routeMap.set("/", "Dashboard");
+const routeMap = new Map<string, CacheRouteDefinition>();
+routeMap.set("/", { path: "/", label: "Dashboard" });
 
 for (const group of NAV_ITEMS) {
   for (const item of group.items) {
     const path = normalizePath(item.path);
     if (!routeMap.has(path)) {
-      routeMap.set(path, item.label);
+      routeMap.set(path, {
+        path,
+        label: item.label,
+        permission: "permission" in item && typeof item.permission === "string" ? item.permission : undefined,
+      });
     }
   }
 }
 
-const EXTRA_CACHE_ROUTES: Array<[string, string]> = [
-  ["/customers/new", "New Customer"],
-  ["/customers/detail", "Customer Detail"],
-  ["/profile", "My Profile"],
-  ["/account-settings", "Account Settings"],
-  ["/offline", "Offline"],
+const EXTRA_CACHE_ROUTES: CacheRouteDefinition[] = [
+  { path: "/customers/new", label: "New Customer", permission: "customers.view" },
+  { path: "/customers/detail", label: "Customer Detail", permission: "customers.view" },
+  { path: "/account-settings", label: "Account Settings" },
+  { path: "/offline", label: "Offline" },
 ];
 
-for (const [path, label] of EXTRA_CACHE_ROUTES) {
-  const normalized = normalizePath(path);
+for (const route of EXTRA_CACHE_ROUTES) {
+  const normalized = normalizePath(route.path);
   if (!routeMap.has(normalized)) {
-    routeMap.set(normalized, label);
+    routeMap.set(normalized, {
+      path: normalized,
+      label: route.label,
+      permission: route.permission,
+    });
   }
 }
 
-export const CACHE_ROUTES: CacheRoute[] = Array.from(routeMap.entries()).map(([path, label]) => ({
+const ALL_CACHE_ROUTE_DEFINITIONS = Array.from(routeMap.values());
+
+export function getCacheRoutesForPermissions(permissions: string[] = []): CacheRoute[] {
+  return ALL_CACHE_ROUTE_DEFINITIONS
+    .filter((route) => !route.permission || permissions.includes(route.permission))
+    .map(({ path, label }) => ({ path, label }));
+}
+
+export const CACHE_ROUTES: CacheRoute[] = ALL_CACHE_ROUTE_DEFINITIONS.map(({ path, label }) => ({
   path,
   label,
 }));

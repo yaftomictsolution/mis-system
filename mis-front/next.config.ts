@@ -5,7 +5,6 @@ const STATIC_APP_ROUTES = [
   "/",
   "/login",
   "/offline",
-  "/profile",
   "/account-settings",
   "/apartment-sales",
   "/apartments",
@@ -43,8 +42,12 @@ const withPWA = withPWAInit({
   })),
   runtimeCaching: [
     {
-      // Next.js static chunks and static assets.
-      urlPattern: /^https?.*\.(?:js|css|woff2|png|jpg|jpeg|svg|ico)$/i,
+      // Only cache same-origin app assets. Cross-origin storage files can be blocked by CORS
+      // and should not poison the SW cache flow.
+      urlPattern: ({ request, url }: { request: Request; url: URL }) =>
+        request.method === "GET" &&
+        url.origin === location.origin &&
+        /\.(?:js|css|woff2|png|jpg|jpeg|svg|ico)$/i.test(url.pathname),
       handler: "CacheFirst",
       options: {
         cacheName: "static-assets",
@@ -77,7 +80,7 @@ const withPWA = withPWAInit({
     },
     {
       // Backend API GET requests.
-      urlPattern: /^http:\/\/127\.0\.0\.1:8000\/api\/.*$/i,
+      urlPattern: /^http:\/\/(?:127\.0\.0\.1|localhost):8000\/api\/.*$/i,
       handler: "NetworkFirst",
       method: "GET",
       options: {

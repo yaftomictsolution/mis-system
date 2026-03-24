@@ -1,6 +1,7 @@
 export type SalaryType = "fixed" | "daily" | "project";
 export type EmployeeStatus = "active" | "resign";
 export type FormMode = "create" | "edit" | null;
+const today = () => new Date().toISOString().slice(0, 10);
 
 export type EmployeeFormData = {
   first_name: string;
@@ -25,6 +26,6 @@ export const createEmptyEmployeeForm = (): EmployeeFormData => ({
   address: "",
   email: "",
   phone: 0,
-  status: "available",
-  hire_date: "",
+  status: "active",
+  hire_date: today(),
 });

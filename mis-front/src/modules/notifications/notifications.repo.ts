@@ -186,12 +186,40 @@ async function setNotificationReadState(readAt: string | null, id?: string): Pro
   );
 }
 
+async function removeNotificationLocal(id: string): Promise<void> {
+  if (!id) return;
+  await db.admin_notifications.delete(id);
+}
+
+async function removeReadNotificationsLocal(): Promise<number> {
+  const rows = await db.admin_notifications.toArray();
+  const ids = rows
+    .filter((row) => Boolean(row.read_at))
+    .map((row) => row.id)
+    .filter(Boolean);
+
+  if (ids.length > 0) {
+    await db.admin_notifications.bulkDelete(ids);
+  }
+
+  return ids.length;
+}
+
 async function syncNotificationOp(op: PendingModuleOpRow): Promise<"synced" | "retry" | "dropped"> {
   const payload = asObj(op.payload);
 
   try {
     if (op.action === "mark_all_read") {
       await api.post("/api/notifications/read-all");
+    } else if (op.action === "delete_all_read") {
+      await api.delete("/api/notifications/read");
+    } else if (op.action === "delete") {
+      const id = String(payload.id ?? op.target_id ?? "");
+      if (!id) {
+        await deletePendingModuleOp(op.id);
+        return "dropped";
+      }
+      await api.delete(`/api/notifications/${id}`);
     } else {
       const id = String(payload.id ?? op.target_id ?? "");
       if (!id) {
@@ -283,6 +311,67 @@ export async function notificationMarkAllRead(): Promise<void> {
     payload: { read_at: readAt },
   });
   emitAppEvent("notifications:changed");
+}
+
+export async function notificationDelete(id: string): Promise<void> {
+  if (!id) return;
+  await removeNotificationLocal(id);
+
+  if (isOnline()) {
+    try {
+      await api.delete(`/api/notifications/${id}`);
+      emitAppEvent("notifications:changed");
+      return;
+    } catch (error: unknown) {
+      const status = getApiStatus(error);
+      if (status === 404) {
+        emitAppEvent("notifications:changed");
+        return;
+      }
+      if (!isOfflineError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  await enqueuePendingModuleOp({
+    module: "notifications",
+    action: "delete",
+    target_id: id,
+    payload: { id },
+  });
+  emitAppEvent("notifications:changed");
+}
+
+export async function notificationDeleteAllRead(): Promise<number> {
+  const removed = await removeReadNotificationsLocal();
+  if (removed <= 0) return 0;
+
+  if (isOnline()) {
+    try {
+      await api.delete("/api/notifications/read");
+      emitAppEvent("notifications:changed");
+      return removed;
+    } catch (error: unknown) {
+      const status = getApiStatus(error);
+      if (status === 404) {
+        emitAppEvent("notifications:changed");
+        return removed;
+      }
+      if (!isOfflineError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  await enqueuePendingModuleOp({
+    module: "notifications",
+    action: "delete_all_read",
+    target_id: "read",
+    payload: { scope: "read" },
+  });
+  emitAppEvent("notifications:changed");
+  return removed;
 }
 
 export async function syncPendingNotificationOps(): Promise<NotificationSyncResult> {

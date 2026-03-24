@@ -4,19 +4,21 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useSelector } from "react-redux";
 import type { RootState } from "@/store/store";
-import { CACHE_ROUTE_PATHS } from "@/config/cacheRoutes";
+import { getCacheRoutesForPermissions } from "@/config/cacheRoutes";
 import { listDynamicCacheRoutes, warmRouteForOffline } from "@/pwa/cacheWarm";
 
 export function usePrecacheRoutes() {
   const token = useSelector((s: RootState) => s.auth.token);
+  const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
   const router = useRouter();
 
   useEffect(() => {
     if (!token) return;
 
     const warm = async () => {
-      const dynamicRoutes = await listDynamicCacheRoutes().catch(() => []);
-      const allPaths = [...new Set([...CACHE_ROUTE_PATHS, ...dynamicRoutes.map((route) => route.path)])];
+      const staticRoutes = getCacheRoutesForPermissions(permissions);
+      const dynamicRoutes = await listDynamicCacheRoutes(permissions).catch(() => []);
+      const allPaths = [...new Set([...staticRoutes.map((route) => route.path), ...dynamicRoutes.map((route) => route.path)])];
 
       for (const path of allPaths) {
         await warmRouteForOffline(path, router.prefetch.bind(router));
@@ -40,5 +42,5 @@ export function usePrecacheRoutes() {
       window.removeEventListener("sync:complete", onSyncComplete as EventListener);
       window.removeEventListener("online", onOnline);
     };
-  }, [router, token]);
+  }, [permissions, router, token]);
 }

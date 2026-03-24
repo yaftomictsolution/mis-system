@@ -7,21 +7,54 @@ import { DataTable } from "@/components/ui/DataTable";
 import { employeeColumns } from "@/components/employees/employee.columns";
 import { EmployeeRow } from "@/db/localDB";
 import EmployeeForm from "@/components/employees/EmployeeForm";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 import {
   createEmptyEmployeeForm,
+  type EmployeeStatus,
+  type SalaryType,
   type EmployeeFormData,
   type FormMode,
 } from "@/components/employees/employee.types";
-
 import {
   employeesListLocal,
   employeePullToLocal,
   employeeCreate,
+  employeeDelete,
+  employeeUpdate
 } from "@/modules/employees/employees.repo";
 
 const LOCAL_LIST_PAGE_SIZE = 200;
 const TABLE_PAGE_SIZE = 10;
+
+function normalizeSalaryType(value: string | null | undefined): SalaryType {
+  return value === "daily" || value === "project" ? value : "fixed";
+}
+
+function normalizeEmployeeStatus(value: string | null | undefined): EmployeeStatus {
+  return value === "resign" ? "resign" : "active";
+}
+
+export const toDateInput = (v?: number): string => {
+  if (!v || !Number.isFinite(v)) return new Date().toISOString().slice(0, 10);
+  return new Date(v).toISOString().slice(0, 10);
+};
+
+
+
+const toForm = (row: EmployeeRow): EmployeeFormData => ({
+
+    first_name: row.first_name ?? "",
+    last_name: row.last_name ?? "",
+    job_title: row.job_title ?? "",
+    salary_type: normalizeSalaryType(row.salary_type),
+    base_salary: row.base_salary ?? 0,
+    address: row.address ?? "",
+    email: row.email ?? "",
+    phone: row.phone ?? 0,
+    status: normalizeEmployeeStatus(row.status),
+    hire_date: toDateInput(row.hire_date),
+  });
 
 export default function EmployeePage() {
 
@@ -31,6 +64,8 @@ export default function EmployeePage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<EmployeeFormData>(createEmptyEmployeeForm());
+  const [pendingDelete, setPendingDelete] = useState<EmployeeRow | null>(null);
+  
   const [saving, setSaving] = useState(false);
   const isEditing = formMode === "edit";
 
@@ -88,12 +123,21 @@ export default function EmployeePage() {
     setForm(createEmptyEmployeeForm());
   }, [closeForm, formMode]);
 
+    const openEditForm = useCallback((row: EmployeeRow) => {
+
+    setFormMode("edit");
+    setEditingUuid(row.uuid);
+    setFormError(null);
+    setForm(toForm(row));
+  }, []);
 
   const handleSave = useCallback(async () => {
       
       if (saving) return;
+
       setSaving(true);
       setFormError(null);
+
       try {
         const payload = {
           first_name: form.first_name,
@@ -107,9 +151,8 @@ export default function EmployeePage() {
           status:  form.status,
           hire_date:  form.hire_date,
         };
-  
         if (editingUuid) {
-          // await apartmentUpdate(editingUuid, payload);
+          await employeeUpdate(editingUuid, payload);
         } else {
           await employeeCreate(payload);
         }
@@ -122,6 +165,19 @@ export default function EmployeePage() {
       }
   }, [closeForm, editingUuid, form, refresh, saving]);
   
+  const handleDelete = useCallback(async () => {
+    if (!pendingDelete?.uuid) return;
+    try {
+      await employeeDelete(pendingDelete.uuid);
+      if (editingUuid === pendingDelete.uuid) {
+        closeForm();
+      }
+      setPendingDelete(null);
+      await refresh();
+    } catch (error) {
+      console.error("Delete failed:", error);
+    }
+  }, [closeForm, editingUuid, pendingDelete, refresh]);
 
   return (
     <RequirePermission permission="employees.view">
@@ -150,14 +206,23 @@ export default function EmployeePage() {
             }}
           />
           <DataTable
-              columns={employeeColumns}
-              data={rows}
-              loading={loading}
-              // onEdit={openEditForm}
-              // onDelete={setPendingDelete}
-              searchKeys={["first_name", "last_name", "status", "salary_type"]}
-              pageSize={TABLE_PAGE_SIZE}
-            />
+            columns={employeeColumns}
+            data={rows}
+            loading={loading}
+            onEdit={openEditForm}
+            onDelete={setPendingDelete}
+            searchKeys={["first_name", "last_name", "status", "salary_type"]}
+            pageSize={TABLE_PAGE_SIZE}
+          />
+          <ConfirmDialog
+            isOpen={Boolean(pendingDelete)}
+            onClose={() => setPendingDelete(null)}
+            onConfirm={() => {
+              void handleDelete();
+            }}
+            title="Delete Employee"
+            message={`Are you sure you want to delete Employee ${pendingDelete?.first_name ?? ""}? This action cannot be undone.`}
+          />
         </div>
     </RequirePermission>
   );

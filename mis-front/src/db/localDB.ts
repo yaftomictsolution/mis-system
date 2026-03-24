@@ -186,13 +186,13 @@ export type EmployeeRow = {
   first_name: string;
   last_name?: string | null;
   job_title?: string | null;
-  salary_type: string;
+  salary_type?: string;
   base_salary?: number | null;
   address?: string | null;
   email: string;
   phone: number | null;
   status: string;
-  hire_date?: number | null;
+  hire_date?: number;
   updated_at: number;
 };
 
@@ -530,35 +530,6 @@ export class LocalDB extends Dexie {
       system_documents: "id, updated_at, module, reference_id, document_type, created_at",
       crm_messages: "id, updated_at, customer_id, status, channel, created_at",
       admin_notifications: "&id, updated_at, read_at, category, created_at",
-    }).upgrade(async (tx) => {
-      try {
-        const legacyRows = (await tx.table("EmployeeRow").toArray()) as Array<Record<string, unknown>>;
-        if (!legacyRows.length) return;
-
-        const migratedRows = legacyRows
-          .map((row) => ({
-            id: typeof row.id === "number" ? row.id : undefined,
-            uuid: String(row.uuid ?? "").trim(),
-            first_name: String(row.first_name ?? row.firstname ?? "").trim(),
-            last_name: typeof row.last_name === "string" ? row.last_name.trim() || null : null,
-            job_title: typeof row.job_title === "string" ? row.job_title.trim() || null : null,
-            salary_type: typeof row.salary_type === "string" ? row.salary_type.trim().toLowerCase() : "fixed",
-            base_salary: typeof row.base_salary === "number" ? row.base_salary : null,
-            address: typeof row.address === "string" ? row.address.trim() || null : null,
-            email: typeof row.email === "string" ? row.email.trim() || null : null,
-            phone: typeof row.phone === "number" ? row.phone : null,
-            status: typeof row.status === "string" ? row.status.trim().toLowerCase() : "active",
-            hire_date: typeof row.hire_date === "number" ? row.hire_date : null,
-            updated_at: typeof row.updated_at === "number" ? row.updated_at : Date.now(),
-          }))
-          .filter((row) => row.uuid && row.first_name);
-
-        if (migratedRows.length) {
-          await tx.table("employees").bulkPut(migratedRows);
-        }
-      } catch {
-        // Ignore missing legacy employee store during upgrade.
-      }
     });
 
     this.sync_queue = this.table("sync_queue");
