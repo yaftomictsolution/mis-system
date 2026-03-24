@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Models\Employee;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -15,14 +16,26 @@ class StoreEmployeeRequest extends FormRequest
     public function rules(): array
     {
         $employee = $this->route('employee');
-        $employeeId = is_object($employee) ? $employee->id : $employee;
+        $routeUuid = trim((string) ($this->route('uuid') ?? ''));
+
+        $employeeId = null;
+        if (is_object($employee) && isset($employee->id)) {
+            $employeeId = $employee->id;
+        } elseif (is_numeric($employee)) {
+            $employeeId = (int) $employee;
+        }
+
+        if (! $employeeId && $routeUuid !== '') {
+            $employeeId = Employee::withTrashed()
+                ->where('uuid', $routeUuid)
+                ->value('id');
+        }
 
         return [
             'uuid' => [
                 'nullable',
                 'string',
                 'size:36',
-                Rule::unique('employees', 'uuid')->ignore($employeeId),
             ],
 
             'first_name' => ['required', 'string', 'max:255'],
@@ -63,7 +76,7 @@ class StoreEmployeeRequest extends FormRequest
             'email.email' => 'Please enter a valid email address.',
             'email.unique' => 'This email already exists.',
             // 'phone.unique' => 'This phone number already exists.',
-            'uuid.unique' => 'This uuid already exists.',
+            // 'uuid.unique' => 'This uuid already exists.',
             // 'hire_date.required' => 'Hire date is required.',
             'hire_date.date' => 'Hire date must be a valid date.',
         ];

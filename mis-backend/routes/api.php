@@ -37,6 +37,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/customers', [CustomerController::class, 'store']);
     Route::put('/customers/{uuid}', [CustomerController::class, 'update']);
     Route::delete('/customers/{uuid}', [CustomerController::class, 'destroy']);
+    Route::delete('/customers/{uuid}/force', [CustomerController::class, 'forceDestroy']);
     Route::post('/customers/{uuid}/attachments', [CustomerController::class, 'storeAttachmentOnly']);
     //
     Route::get('/roles/permission-options', [UserRoleController::class, 'permissionOptions']);
@@ -44,26 +45,33 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/roles', [UserRoleController::class, 'store']);
     Route::put('/roles/{uuid}', [UserRoleController::class, 'update']);
     Route::delete('/roles/{uuid}', [UserRoleController::class, 'destroy']);
+    Route::delete('/roles/{uuid}/force', [UserRoleController::class, 'forceDestroy']);
     // 
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);
     Route::put('/users/{uuid}', [UserController::class, 'update']);
     Route::delete('/users/{uuid}', [UserController::class, 'destroy']);
+    Route::delete('/users/{uuid}/force', [UserController::class, 'forceDestroy']);
     Route::get('/users/role-options', [UserController::class, 'roleOptions']);
     //
     Route::get('/apartments', [ApartmentController::class, 'index']);
     Route::get('/employees', [EmployeeController::class, 'index']);
     Route::post('/employees', [EmployeeController::class, 'store']);
+    Route::put('/employees/{uuid}', [EmployeeController::class, 'update']);
+    Route::delete('/employees/{uuid}', [EmployeeController::class, 'destroy']);
+    Route::delete('/employees/{uuid}/force', [EmployeeController::class, 'forceDestroy']);
 
     Route::post('/apartments', [ApartmentController::class, 'store']);
     Route::put('/apartments/{uuid}', [ApartmentController::class, 'update']);
     Route::delete('/apartments/{uuid}', [ApartmentController::class, 'destroy']);
+    Route::delete('/apartments/{uuid}/force', [ApartmentController::class, 'forceDestroy']);
     //
 
     Route::get('/apartment-sales', [ApartmentSaleController::class, 'index']);
     Route::post('/apartment-sales', [ApartmentSaleController::class, 'store']);
     Route::put('/apartment-sales/{uuid}', [ApartmentSaleController::class, 'update']);
     Route::delete('/apartment-sales/{uuid}', [ApartmentSaleController::class, 'destroy']);
+    Route::delete('/apartment-sales/{uuid}/force', [ApartmentSaleController::class, 'forceDestroy']);
     Route::post('/apartment-sales/{uuid}/handover-key', [ApartmentSaleController::class, 'handoverKey']);
     Route::post('/apartment-sales/{uuid}/terminate', [ApartmentSaleController::class, 'terminate']);
     Route::post('/apartment-sales/{uuid}/issue-deed', [ApartmentSaleController::class, 'issueDeed']);
@@ -88,6 +96,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/notifications', [NotificationController::class, 'index']);
     Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
     Route::post('/notifications/{id}/read', [NotificationController::class, 'markRead']);
+    Route::delete('/notifications/read', [NotificationController::class, 'destroyRead']);
+    Route::delete('/notifications/{id}', [NotificationController::class, 'destroy']);
     Route::get('/crm/messages', [CrmMessageController::class, 'index']);
     Route::post('/crm/messages', [CrmMessageController::class, 'store']);
     Route::post('/crm/messages/{id}/retry', [CrmMessageController::class, 'retry']);
@@ -101,5 +111,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/sync/pull', [SyncController::class, 'pull']);
 
 });
+
+
+
+
 
 

@@ -70,6 +70,27 @@ class NotificationController extends Controller
         ]);
     }
 
+    public function destroyRead(Request $request): JsonResponse
+    {
+        $count = $request->user()->notifications()->whereNotNull('read_at')->delete();
+
+        return response()->json([
+            'message' => 'Read notifications deleted successfully.',
+            'count' => $count,
+        ]);
+    }
+
+    public function destroy(Request $request, string $id): JsonResponse
+    {
+        $notification = $request->user()->notifications()->where('id', $id)->firstOrFail();
+        $notification->delete();
+
+        return response()->json([
+            'message' => 'Notification deleted successfully.',
+            'id' => $id,
+        ]);
+    }
+
     private function payload(DatabaseNotification $notification): array
     {
         $data = is_array($notification->data) ? $notification->data : [];
@@ -88,4 +109,3 @@ class NotificationController extends Controller
         ];
     }
 }
-
