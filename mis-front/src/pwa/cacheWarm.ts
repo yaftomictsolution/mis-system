@@ -57,6 +57,26 @@ export async function listDynamicCacheRoutes(permissions: string[] = []): Promis
     }
   }
 
+  if (hasPermission(permissions, "payroll.view")) {
+    const salaryPayments = await db.salary_payments.toArray();
+    for (const payment of salaryPayments) {
+      const uuid = String(payment.uuid ?? "").trim();
+      if (!uuid) continue;
+      const slipId = `PS-${uuid.slice(0, 8).toUpperCase()}`;
+      routeMap.set(`/print/payroll/${uuid}/payslip`, `${slipId} Payslip`);
+    }
+  }
+
+  if (hasPermission(permissions, "inventory.request")) {
+    const materialRequests = await db.material_requests.toArray();
+    for (const request of materialRequests) {
+      const uuid = String(request.uuid ?? "").trim();
+      if (!uuid) continue;
+      const requestId = String(request.issue_receipt_no ?? request.request_no ?? "").trim() || `MR-${uuid.slice(0, 8).toUpperCase()}`;
+      routeMap.set(`/print/material-requests/${uuid}/receipt`, `${requestId} Material Record`);
+    }
+  }
+
   return Array.from(routeMap.entries()).map(([path, label]) => ({
     path: normalizePath(path),
     label,

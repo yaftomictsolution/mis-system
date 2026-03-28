@@ -9,6 +9,11 @@ import {
   MessageSquareText,
   KeyRound,
   FolderOpen,
+  Boxes,
+  ClipboardList,
+  PackageCheck,
+  FolderKanban,
+  ArrowLeftRight,
 } from 'lucide-react'
 
 export const NAV_ITEMS = [
@@ -26,6 +31,7 @@ export const NAV_ITEMS = [
     title: 'HR & Employee',
     items: [
       { icon: Building2, label: 'Employees',permission: "employees.view", path: '/employees' },
+      { icon: BadgeDollarSign, label: 'Payroll', permission: "payroll.view", path: '/payroll' },
     ],
   },
   {
@@ -37,6 +43,16 @@ export const NAV_ITEMS = [
       { icon: CalendarCheck, label: 'Installments',permission: "installments.pay", path: '/installments' },
       { icon: MessageSquareText, label: 'CRM', permission: "customers.view", path: '/crm' },
       { icon: FolderOpen, label: 'Documents', path: '/documents' },
+    ],
+  },
+  {
+    title: 'INVENTORY & ASSETS',
+    items: [
+      { icon: FolderKanban, label: 'Projects', permission: "inventory.request", path: '/projects' },
+      { icon: Boxes, label: 'Master Data', permission: "inventory.request", path: '/inventories' },
+      { icon: ClipboardList, label: 'Material Requests', permission: "inventory.request", path: '/inventory-requests' },
+      { icon: PackageCheck, label: 'Asset Requests', permission: "inventory.request", path: '/asset-requests' },
+      { icon: ArrowLeftRight, label: 'Movement History', permission: "inventory.request", path: '/inventory-movements' },
     ],
   },
 
