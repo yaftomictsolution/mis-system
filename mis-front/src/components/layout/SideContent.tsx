@@ -35,6 +35,7 @@ export default function SideContent(){
   const { sidebarOpen, isMobile } = useSelector((state: RootState) => state.ui);
   const [isUserRolesOpen, setIsUserRolesOpen] = useState(false);
   const dispatch = useDispatch();
+
   const groups = NAV_ITEMS.map((group) => ({
       ...group,
       items: group.items.filter((item) => {

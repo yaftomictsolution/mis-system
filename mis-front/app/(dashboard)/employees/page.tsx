@@ -35,7 +35,7 @@ function normalizeEmployeeStatus(value: string | null | undefined): EmployeeStat
   return value === "resign" ? "resign" : "active";
 }
 
-export const toDateInput = (v?: number): string => {
+const toDateInput = (v?: number | null): string => {
   if (!v || !Number.isFinite(v)) return new Date().toISOString().slice(0, 10);
   return new Date(v).toISOString().slice(0, 10);
 };

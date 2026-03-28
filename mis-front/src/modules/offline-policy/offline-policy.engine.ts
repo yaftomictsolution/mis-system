@@ -55,10 +55,20 @@ const MODULE_CONFIG: Record<OfflineModuleKey, ModuleCleanupConfig> = {
   apartment_sales: { getTable: () => db.apartment_sales, entity: "apartment_sales" },
   apartment_sale_financials: { getTable: () => db.apartment_sale_financials, entity: "apartment_sale_financials" },
   installments: { getTable: () => db.installments, entity: "installments" },
+  vendors: { getTable: () => db.vendors, entity: "vendors" },
+  warehouses: { getTable: () => db.warehouses, entity: "warehouses" },
+  materials: { getTable: () => db.materials, entity: "materials" },
+  company_assets: { getTable: () => db.company_assets, entity: "company_assets" },
+  projects: { getTable: () => db.projects, entity: "projects" },
+  material_requests: { getTable: () => db.material_requests, entity: "material_requests" },
+  asset_requests: { getTable: () => db.asset_requests, entity: "asset_requests" },
+  stock_movements: { getTable: () => db.stock_movements, entity: "stock_movements" },
   roles: { getTable: () => db.roles, entity: "roles" },
   users: { getTable: () => db.users, entity: "users" },
   rentals: { getTable: () => db.rentals },
   rental_payments: { getTable: () => db.rental_payments },
+  salary_advances: { getTable: () => db.salary_advances, entity: "salary_advances" },
+  salary_payments: { getTable: () => db.salary_payments, entity: "salary_payments" },
 };
 
 const ROLLBACK_ENTITY_TABLES: Record<string, (() => RollbackTable | undefined) | undefined> = {
@@ -68,8 +78,17 @@ const ROLLBACK_ENTITY_TABLES: Record<string, (() => RollbackTable | undefined) |
   apartment_sales: () => db.apartment_sales as unknown as RollbackTable,
   apartment_sale_financials: () => db.apartment_sale_financials as unknown as RollbackTable,
   installments: () => db.installments as unknown as RollbackTable,
+  vendors: () => db.vendors as unknown as RollbackTable,
+  warehouses: () => db.warehouses as unknown as RollbackTable,
+  materials: () => db.materials as unknown as RollbackTable,
+  company_assets: () => db.company_assets as unknown as RollbackTable,
+  projects: () => db.projects as unknown as RollbackTable,
+  material_requests: () => db.material_requests as unknown as RollbackTable,
+  asset_requests: () => db.asset_requests as unknown as RollbackTable,
   roles: () => db.roles as unknown as RollbackTable,
   users: () => db.users as unknown as RollbackTable,
+  salary_advances: () => db.salary_advances as unknown as RollbackTable,
+  salary_payments: () => db.salary_payments as unknown as RollbackTable,
 };
 
 let maintenanceInProgress = false;

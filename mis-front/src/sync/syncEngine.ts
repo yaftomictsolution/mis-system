@@ -30,6 +30,7 @@ export async function runSyncOnce() {
   try {
     let syncedAny = false;
     let hasRetryableFailure = false;
+    const syncedEntities = new Set<string>();
     const items = await db.sync_queue.orderBy("created_at").toArray();
 
     for (const item of items) {
@@ -42,6 +43,7 @@ export async function runSyncOnce() {
           await db.sync_queue.delete(item.id);
         }
         syncedAny = true;
+        syncedEntities.add(item.entity);
         console.log("Synced", item.entity, item.uuid);
       } catch (error) {
         const status = getApiStatus(error);
@@ -84,7 +86,7 @@ export async function runSyncOnce() {
     if (typeof window !== "undefined") {
       window.dispatchEvent(
         new CustomEvent("sync:complete", {
-          detail: { syncedAny },
+          detail: { syncedAny, entities: [...syncedEntities] },
         }),
       );
     }
