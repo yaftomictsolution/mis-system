@@ -9,8 +9,23 @@ use App\Models\ApartmentSaleFinancial;
 use App\Models\Customer;
 use App\Models\Installment;
 use App\Models\Roles;
+use App\Models\SalaryAdvance;
+use App\Models\SalaryPayment;
+use App\Models\Vendor;
+use App\Models\Warehouse;
+use App\Models\Material;
+use App\Models\CompanyAsset;
+use App\Models\MaterialRequest;
+use App\Models\MaterialRequestItem;
+use App\Models\PurchaseRequest;
+use App\Models\PurchaseRequestItem;
+use App\Models\AssetRequest;
+use App\Models\AssetAssignment;
+use App\Models\Project;
+use App\Models\StockMovement;
 use App\Models\User;
 use App\Services\ApartmentSaleFinancialService;
+use App\Services\MaterialStockService;
 use App\Services\MunicipalityWorkflowService;
 use App\Services\SaleCreatedFinanceAlertService;
 use App\Models\SyncInbox;
@@ -28,7 +43,8 @@ class SyncController extends Controller
     public function __construct(
         private readonly ApartmentSaleFinancialService $financials,
         private readonly MunicipalityWorkflowService $workflow,
-        private readonly SaleCreatedFinanceAlertService $saleCreatedAlerts
+        private readonly SaleCreatedFinanceAlertService $saleCreatedAlerts,
+        private readonly MaterialStockService $materialStocks
     )
     {
     }
@@ -37,7 +53,7 @@ class SyncController extends Controller
     {
         $validated = $request->validate([
             'idempotency_key' => ['required', 'string'],
-            'entity' => ['required', Rule::in(['customers', 'roles', 'users', 'apartments', 'apartment_sales', 'installments', 'apartment_sale_financials'])],
+            'entity' => ['required', Rule::in(['customers', 'roles', 'users', 'apartments', 'apartment_sales', 'installments', 'apartment_sale_financials', 'salary_advances', 'salary_payments', 'projects', 'vendors', 'warehouses', 'materials', 'company_assets', 'material_requests', 'purchase_requests', 'asset_requests'])],
             'uuid' => ['required', 'uuid'],
             'action' => ['required', 'in:create,update,delete'],
             'payload' => ['nullable', 'array'],
@@ -127,6 +143,166 @@ class SyncController extends Controller
             return;
         }
 
+        if ($entity === 'projects') {
+            $request->validate([
+                'payload.name' => ['required', 'string', 'max:255'],
+                'payload.location' => ['nullable', 'string', 'max:255'],
+                'payload.status' => ['nullable', Rule::in(['planned', 'active', 'completed'])],
+                'payload.start_date' => ['nullable', 'date'],
+                'payload.end_date' => ['nullable', 'date', 'after_or_equal:payload.start_date'],
+            ]);
+
+            return;
+        }
+
+        
+
+        if ($entity === 'vendors') {
+            $existing = Vendor::withTrashed()->where('uuid', $uuid)->first();
+
+            $request->validate([
+                'payload.name' => ['required', 'string', 'max:255'],
+                'payload.phone' => ['nullable', 'string', 'max:50'],
+                'payload.email' => [
+                    'nullable',
+                    'email',
+                    'max:255',
+                    Rule::unique('vendors', 'email')
+                        ->whereNull('deleted_at')
+                        ->ignore($existing?->id),
+                ],
+                'payload.address' => ['nullable', 'string'],
+                'payload.status' => ['nullable', Rule::in(['active', 'inactive'])],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'warehouses') {
+            $warehouseName = trim((string) ($request->input('payload.name') ?? ''));
+            $existing = Warehouse::withTrashed()->where('uuid', $uuid)->first();
+            if (! $existing && $warehouseName !== '') {
+                $existing = Warehouse::withTrashed()->where('name', $warehouseName)->first();
+            }
+
+            $request->validate([
+                'payload.name' => [
+                    'required',
+                    'string',
+                    'max:255',
+                    Rule::unique('warehouses', 'name')->ignore($existing?->id),
+                ],
+                'payload.location' => ['nullable', 'string', 'max:255'],
+                'payload.status' => ['nullable', Rule::in(['active', 'inactive'])],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'materials') {
+            $request->validate([
+                'payload.name' => ['required', 'string', 'max:255'],
+                'payload.material_type' => ['nullable', 'string', 'max:255'],
+                'payload.unit' => ['required', 'string', 'max:100'],
+                'payload.quantity' => ['nullable', 'numeric', 'min:0'],
+                'payload.reference_unit_price' => ['nullable', 'numeric', 'min:0'],
+                'payload.opening_warehouse_id' => ['nullable', 'integer', 'min:1', Rule::exists('warehouses', 'id')],
+                'payload.supplier_id' => ['nullable', 'integer', 'min:1', Rule::exists('vendors', 'id')],
+                'payload.batch_no' => ['nullable', 'string', 'max:255'],
+                'payload.serial_no' => ['nullable', 'string', 'max:255'],
+                'payload.expiry_date' => ['nullable', 'date'],
+                'payload.min_stock_level' => ['nullable', 'numeric', 'min:0'],
+                'payload.status' => ['nullable', Rule::in(['active', 'inactive'])],
+                'payload.notes' => ['nullable', 'string'],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'company_assets') {
+            $assetCode = trim((string) ($request->input('payload.asset_code') ?? ''));
+            $existing = CompanyAsset::withTrashed()->where('uuid', $uuid)->first();
+            if (! $existing && $assetCode !== '') {
+                $existing = CompanyAsset::withTrashed()->where('asset_code', $assetCode)->first();
+            }
+
+            $request->validate([
+                'payload.asset_code' => [
+                    'required',
+                    'string',
+                    'max:100',
+                    Rule::unique('company_assets', 'asset_code')->ignore($existing?->id),
+                ],
+                'payload.asset_name' => ['required', 'string', 'max:255'],
+                'payload.asset_type' => ['required', Rule::in(['vehicle', 'machine', 'tool', 'IT'])],
+                'payload.quantity' => ['required', 'numeric', 'min:0'],
+                'payload.supplier_id' => ['nullable', 'integer', 'min:1', Rule::exists('vendors', 'id')],
+                'payload.serial_no' => ['nullable', 'string', 'max:255'],
+                'payload.status' => ['nullable', Rule::in(['available', 'allocated', 'maintenance', 'damaged', 'retired'])],
+                'payload.current_employee_id' => ['nullable', 'integer', 'min:1', Rule::exists('employees', 'id')],
+                'payload.current_project_id' => ['nullable', 'integer', 'min:1', Rule::exists('projects', 'id')],
+                'payload.current_warehouse_id' => ['nullable', 'integer', 'min:1', Rule::exists('warehouses', 'id')],
+                'payload.notes' => ['nullable', 'string'],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'material_requests') {
+            $request->validate([
+                'payload.project_id' => ['nullable', 'integer', 'min:1', Rule::exists('projects', 'id')],
+                'payload.warehouse_id' => ['required', 'integer', 'min:1', Rule::exists('warehouses', 'id')],
+                'payload.requested_by_employee_id' => ['required', 'integer', 'min:1', Rule::exists('employees', 'id')],
+                'payload.notes' => ['nullable', 'string'],
+                'payload.items' => ['required', 'array', 'min:1'],
+                'payload.items.*.uuid' => ['nullable', 'string', 'size:36'],
+                'payload.items.*.material_id' => ['required', 'integer', 'min:1', Rule::exists('materials', 'id')],
+                'payload.items.*.quantity_requested' => ['required', 'numeric', 'min:0.01'],
+                'payload.items.*.unit' => ['required', 'string', 'max:100'],
+                'payload.items.*.notes' => ['nullable', 'string'],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'purchase_requests') {
+            $request->validate([
+                'payload.request_type' => ['nullable', Rule::in(['material', 'asset'])],
+                'payload.source_material_request_id' => ['nullable', 'integer', 'min:1', Rule::exists('material_requests', 'id')],
+                'payload.project_id' => ['nullable', 'integer', 'min:1', Rule::exists('projects', 'id')],
+                'payload.warehouse_id' => ['required', 'integer', 'min:1', Rule::exists('warehouses', 'id')],
+                'payload.vendor_id' => ['nullable', 'integer', 'min:1', Rule::exists('vendors', 'id')],
+                'payload.requested_by_employee_id' => ['required', 'integer', 'min:1', Rule::exists('employees', 'id')],
+                'payload.notes' => ['nullable', 'string'],
+                'payload.items' => ['required', 'array', 'min:1'],
+                'payload.items.*.uuid' => ['nullable', 'string', 'size:36'],
+                'payload.items.*.item_kind' => ['nullable', Rule::in(['material', 'asset'])],
+                'payload.items.*.material_id' => ['nullable', 'integer', 'min:1', Rule::exists('materials', 'id')],
+                'payload.items.*.company_asset_id' => ['nullable', 'integer', 'min:1', Rule::exists('company_assets', 'id')],
+                'payload.items.*.asset_name' => ['nullable', 'string', 'max:255'],
+                'payload.items.*.asset_type' => ['nullable', Rule::in(['vehicle', 'machine', 'tool', 'IT'])],
+                'payload.items.*.asset_code_prefix' => ['nullable', 'string', 'max:50'],
+                'payload.items.*.quantity_requested' => ['required', 'numeric', 'min:0.01'],
+                'payload.items.*.estimated_unit_price' => ['nullable', 'numeric', 'min:0'],
+                'payload.items.*.unit' => ['required', 'string', 'max:100'],
+                'payload.items.*.notes' => ['nullable', 'string'],
+            ]);
+
+            return;
+        }
+        if ($entity === 'asset_requests') {
+            $request->validate([
+                'payload.project_id' => ['nullable', 'integer', 'min:1', Rule::exists('projects', 'id')],
+                'payload.requested_by_employee_id' => ['required', 'integer', 'min:1', Rule::exists('employees', 'id')],
+                'payload.requested_asset_id' => ['nullable', 'integer', 'min:1', Rule::exists('company_assets', 'id')],
+                'payload.asset_type' => ['nullable', Rule::in(['vehicle', 'machine', 'tool', 'IT'])],
+                'payload.quantity_requested' => ['required', 'numeric', 'min:0.01'],
+                'payload.reason' => ['nullable', 'string'],
+                'payload.notes' => ['nullable', 'string'],
+            ]);
+
+            return;
+        }
         if ($entity === 'customers') {
             $existing = Customer::withTrashed()->where('uuid', $uuid)->first();
 
@@ -291,6 +467,35 @@ class SyncController extends Controller
             return;
         }
 
+        if ($entity === 'salary_advances') {
+            $request->validate([
+                'payload.employee_id' => ['required', 'integer', 'min:1', Rule::exists('employees', 'id')],
+                'payload.amount' => ['required', 'numeric', 'min:0.01'],
+                'payload.user_id' => ['nullable', 'integer', 'min:1', Rule::exists('users', 'id')],
+                'payload.reason' => ['nullable', 'string'],
+                'payload.status' => ['nullable', Rule::in(['pending', 'approved', 'deducted', 'rejected'])],
+                'payload.updated_at' => ['nullable'],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'salary_payments') {
+            $request->validate([
+                'payload.employee_id' => ['required', 'integer', 'min:1', Rule::exists('employees', 'id')],
+                'payload.period' => ['required', 'string', 'max:100'],
+                'payload.gross_salary' => ['required', 'numeric', 'min:0'],
+                'payload.advance_deducted' => ['nullable', 'numeric', 'min:0'],
+                'payload.net_salary' => ['nullable', 'numeric', 'min:0'],
+                'payload.status' => ['nullable', Rule::in(['draft', 'paid', 'cancelled'])],
+                'payload.user_id' => ['nullable', 'integer', 'min:1', Rule::exists('users', 'id')],
+                'payload.paid_at' => ['nullable', 'date'],
+                'payload.updated_at' => ['nullable'],
+            ]);
+
+            return;
+        }
+
         if ($entity === 'installments') {
             $request->validate([
                 'payload.apartment_sale_id' => ['required', 'integer', 'min:1', Rule::exists('apartment_sales', 'id')],
@@ -302,6 +507,8 @@ class SyncController extends Controller
                 'payload.status' => ['nullable', Rule::in(['pending', 'paid', 'overdue', 'cancelled'])],
                 'payload.updated_at' => ['nullable'],
             ]);
+
+            return;
         }
 
 
@@ -354,6 +561,484 @@ class SyncController extends Controller
 
 
 
+        
+
+        if ($entity === 'projects') {
+            if ($action === 'delete') {
+                $project = Project::withTrashed()->where('uuid', $uuid)->first();
+                if ($project && ! $project->trashed()) {
+                    $project->delete();
+                }
+
+                return;
+            }
+
+            $project = Project::withTrashed()->where('uuid', $uuid)->first();
+            if (! $project) {
+                $project = new Project();
+                $project->uuid = $uuid;
+            } elseif ($project->trashed()) {
+                $project->restore();
+            }
+
+            if (array_key_exists('name', $payload)) {
+                $project->name = trim((string) $payload['name']);
+            }
+            $project->location = array_key_exists('location', $payload)
+                ? (trim((string) ($payload['location'] ?? '')) !== '' ? trim((string) $payload['location']) : null)
+                : $project->location;
+            if (array_key_exists('status', $payload)) {
+                $status = strtolower(trim((string) $payload['status']));
+                $project->status = in_array($status, ['active', 'completed'], true) ? $status : 'planned';
+            } elseif (! $project->status) {
+                $project->status = 'planned';
+            }
+            $project->start_date = array_key_exists('start_date', $payload)
+                ? ($payload['start_date'] ? CarbonImmutable::parse((string) $payload['start_date'])->toDateString() : null)
+                : $project->start_date;
+            $project->end_date = array_key_exists('end_date', $payload)
+                ? ($payload['end_date'] ? CarbonImmutable::parse((string) $payload['end_date'])->toDateString() : null)
+                : $project->end_date;
+            $project->save();
+
+            return;
+        }
+
+        if ($entity === 'vendors') {
+            if ($action === 'delete') {
+                $vendor = Vendor::withTrashed()->where('uuid', $uuid)->first();
+                if ($vendor && ! $vendor->trashed()) {
+                    $vendor->delete();
+                }
+
+                return;
+            }
+
+            $email = trim((string) ($payload['email'] ?? ''));
+            $vendor = Vendor::withTrashed()->where('uuid', $uuid)->first();
+            if (! $vendor && $email !== '') {
+                $vendor = Vendor::withTrashed()->where('email', $email)->first();
+            }
+
+            if (! $vendor) {
+                $vendor = new Vendor();
+                $vendor->uuid = $uuid;
+            } elseif ($vendor->trashed()) {
+                $vendor->restore();
+            }
+
+            $vendor->name = trim((string) ($payload['name'] ?? $vendor->name ?? ''));
+            $vendor->phone = array_key_exists('phone', $payload)
+                ? (trim((string) ($payload['phone'] ?? '')) !== '' ? trim((string) $payload['phone']) : null)
+                : $vendor->phone;
+            $vendor->email = array_key_exists('email', $payload)
+                ? (trim((string) ($payload['email'] ?? '')) !== '' ? trim((string) $payload['email']) : null)
+                : $vendor->email;
+            $vendor->address = array_key_exists('address', $payload)
+                ? (trim((string) ($payload['address'] ?? '')) !== '' ? trim((string) $payload['address']) : null)
+                : $vendor->address;
+            if (array_key_exists('status', $payload)) {
+                $vendor->status = strtolower(trim((string) $payload['status'])) === 'inactive' ? 'inactive' : 'active';
+            } elseif (! $vendor->status) {
+                $vendor->status = 'active';
+            }
+            $vendor->save();
+
+            return;
+        }
+
+        if ($entity === 'warehouses') {
+            if ($action === 'delete') {
+                $warehouse = Warehouse::withTrashed()->where('uuid', $uuid)->first();
+                if ($warehouse && ! $warehouse->trashed()) {
+                    $warehouse->delete();
+                }
+
+                return;
+            }
+
+            $name = trim((string) ($payload['name'] ?? ''));
+            $warehouse = Warehouse::withTrashed()->where('uuid', $uuid)->first();
+            if (! $warehouse && $name !== '') {
+                $warehouse = Warehouse::withTrashed()->where('name', $name)->first();
+            }
+
+            if (! $warehouse) {
+                $warehouse = new Warehouse();
+                $warehouse->uuid = $uuid;
+            } elseif ($warehouse->trashed()) {
+                $warehouse->restore();
+            }
+
+            if (array_key_exists('name', $payload)) {
+                $warehouse->name = trim((string) $payload['name']);
+            }
+            $warehouse->location = array_key_exists('location', $payload)
+                ? (trim((string) ($payload['location'] ?? '')) !== '' ? trim((string) $payload['location']) : null)
+                : $warehouse->location;
+            if (array_key_exists('status', $payload)) {
+                $warehouse->status = strtolower(trim((string) $payload['status'])) === 'inactive' ? 'inactive' : 'active';
+            } elseif (! $warehouse->status) {
+                $warehouse->status = 'active';
+            }
+            $warehouse->save();
+
+            return;
+        }
+
+        if ($entity === 'materials') {
+            if ($action === 'delete') {
+                $material = Material::withTrashed()->where('uuid', $uuid)->first();
+                if ($material && ! $material->trashed()) {
+                    $material->delete();
+                }
+
+                return;
+            }
+
+            $material = Material::withTrashed()->where('uuid', $uuid)->first();
+            if (! $material) {
+                $material = new Material();
+                $material->uuid = $uuid;
+            } elseif ($material->trashed()) {
+                $material->restore();
+            }
+
+            $hasStructuredStock = $material->warehouseMaterialStocks()->exists();
+            $requestedQuantity = array_key_exists('quantity', $payload)
+                ? max(0, round((float) $payload['quantity'], 2))
+                : null;
+
+            if (array_key_exists('name', $payload)) {
+                $material->name = trim((string) $payload['name']);
+            }
+            $material->material_type = array_key_exists('material_type', $payload)
+                ? (trim((string) ($payload['material_type'] ?? '')) !== '' ? trim((string) $payload['material_type']) : null)
+                : $material->material_type;
+            if (array_key_exists('unit', $payload)) {
+                $material->unit = trim((string) $payload['unit']);
+            }
+            if (! $hasStructuredStock && $requestedQuantity !== null) {
+                $material->quantity = $requestedQuantity;
+            } elseif ($material->quantity === null) {
+                $material->quantity = 0;
+            }
+            if (array_key_exists('reference_unit_price', $payload)) {
+                $material->reference_unit_price = $payload['reference_unit_price'] !== null
+                    ? max(0, round((float) $payload['reference_unit_price'], 2))
+                    : null;
+            }
+            $material->supplier_id = array_key_exists('supplier_id', $payload)
+                ? ($payload['supplier_id'] !== null ? (int) $payload['supplier_id'] : null)
+                : $material->supplier_id;
+            $material->batch_no = array_key_exists('batch_no', $payload)
+                ? (trim((string) ($payload['batch_no'] ?? '')) !== '' ? trim((string) $payload['batch_no']) : null)
+                : $material->batch_no;
+            $material->serial_no = array_key_exists('serial_no', $payload)
+                ? (trim((string) ($payload['serial_no'] ?? '')) !== '' ? trim((string) $payload['serial_no']) : null)
+                : $material->serial_no;
+            $material->expiry_date = array_key_exists('expiry_date', $payload)
+                ? ($payload['expiry_date'] ?: null)
+                : $material->expiry_date;
+            if (array_key_exists('min_stock_level', $payload)) {
+                $material->min_stock_level = max(0, round((float) $payload['min_stock_level'], 2));
+            } elseif ($material->min_stock_level === null) {
+                $material->min_stock_level = 0;
+            }
+            if (array_key_exists('status', $payload)) {
+                $material->status = strtolower(trim((string) $payload['status'])) === 'inactive' ? 'inactive' : 'active';
+            } elseif (! $material->status) {
+                $material->status = 'active';
+            }
+            $material->notes = array_key_exists('notes', $payload)
+                ? (trim((string) ($payload['notes'] ?? '')) !== '' ? trim((string) $payload['notes']) : null)
+                : $material->notes;
+            $material->save();
+
+            $openingWarehouseId = array_key_exists('opening_warehouse_id', $payload) && $payload['opening_warehouse_id'] !== null
+                ? (int) $payload['opening_warehouse_id']
+                : null;
+            if ($openingWarehouseId && ! $hasStructuredStock) {
+                $legacyQuantity = $this->materialStocks->getLegacyQuantity($material);
+                if ($legacyQuantity > 0) {
+                    $this->materialStocks->assignLegacyStock($material->id, $openingWarehouseId);
+                    StockMovement::query()->create([
+                        'uuid' => (string) Str::uuid(),
+                        'material_id' => $material->id,
+                        'warehouse_id' => $openingWarehouseId,
+                        'project_id' => null,
+                        'employee_id' => null,
+                        'material_request_item_id' => null,
+                        'quantity' => $legacyQuantity,
+                        'movement_type' => 'IN',
+                        'reference_type' => 'opening_balance',
+                        'reference_no' => 'MOB-' . str_pad((string) $material->id, 6, '0', STR_PAD_LEFT),
+                        'approved_by_user_id' => null,
+                        'issued_by_user_id' => null,
+                        'movement_date' => now(),
+                        'notes' => trim((string) ($payload['notes'] ?? '')) ?: null,
+                    ]);
+                }
+            }
+
+            return;
+        }
+
+        if ($entity === 'company_assets') {
+            if ($action === 'delete') {
+                $asset = CompanyAsset::withTrashed()->where('uuid', $uuid)->first();
+                if ($asset && ! $asset->trashed()) {
+                    $asset->delete();
+                }
+
+                return;
+            }
+
+            $assetCode = trim((string) ($payload['asset_code'] ?? ''));
+            $asset = CompanyAsset::withTrashed()->where('uuid', $uuid)->first();
+            if (! $asset && $assetCode !== '') {
+                $asset = CompanyAsset::withTrashed()->where('asset_code', $assetCode)->first();
+            }
+
+            if (! $asset) {
+                $asset = new CompanyAsset();
+                $asset->uuid = $uuid;
+            } elseif ($asset->trashed()) {
+                $asset->restore();
+            }
+
+            if (array_key_exists('asset_code', $payload)) {
+                $asset->asset_code = trim((string) $payload['asset_code']);
+            }
+            if (array_key_exists('asset_name', $payload)) {
+                $asset->asset_name = trim((string) $payload['asset_name']);
+            }
+            if (array_key_exists('asset_type', $payload)) {
+                $asset->asset_type = trim((string) $payload['asset_type']);
+            }
+            if (array_key_exists('quantity', $payload)) {
+                $asset->quantity = max(0, round((float) ($payload['quantity'] ?? 0), 2));
+            }
+            $asset->supplier_id = array_key_exists('supplier_id', $payload)
+                ? ($payload['supplier_id'] !== null ? (int) $payload['supplier_id'] : null)
+                : $asset->supplier_id;
+            $asset->serial_no = array_key_exists('serial_no', $payload)
+                ? (trim((string) ($payload['serial_no'] ?? '')) !== '' ? trim((string) $payload['serial_no']) : null)
+                : $asset->serial_no;
+            if (array_key_exists('status', $payload)) {
+                $status = strtolower(trim((string) $payload['status']));
+                $asset->status = in_array($status, ['allocated', 'maintenance', 'damaged', 'retired'], true) ? $status : 'available';
+            } elseif (! $asset->status) {
+                $asset->status = 'available';
+            }
+            $asset->current_employee_id = array_key_exists('current_employee_id', $payload)
+                ? ($payload['current_employee_id'] !== null ? (int) $payload['current_employee_id'] : null)
+                : $asset->current_employee_id;
+            $asset->current_project_id = array_key_exists('current_project_id', $payload)
+                ? ($payload['current_project_id'] !== null ? (int) $payload['current_project_id'] : null)
+                : $asset->current_project_id;
+            $asset->current_warehouse_id = array_key_exists('current_warehouse_id', $payload)
+                ? ($payload['current_warehouse_id'] !== null ? (int) $payload['current_warehouse_id'] : null)
+                : $asset->current_warehouse_id;
+            $asset->notes = array_key_exists('notes', $payload)
+                ? (trim((string) ($payload['notes'] ?? '')) !== '' ? trim((string) $payload['notes']) : null)
+                : $asset->notes;
+            $asset->allocated_quantity = $asset->allocated_quantity ?? 0;
+            $asset->maintenance_quantity = $asset->maintenance_quantity ?? 0;
+            $asset->damaged_quantity = $asset->damaged_quantity ?? 0;
+            $asset->retired_quantity = $asset->retired_quantity ?? 0;
+            $asset->save();
+
+            return;
+        }
+        if ($entity === 'material_requests') {
+            if ($action === 'delete') {
+                $materialRequest = MaterialRequest::withTrashed()->where('uuid', $uuid)->first();
+                if ($materialRequest && ! $materialRequest->trashed()) {
+                    $materialRequest->delete();
+                }
+
+                return;
+            }
+
+            $materialRequest = MaterialRequest::withTrashed()->where('uuid', $uuid)->first();
+            if (! $materialRequest) {
+                $materialRequest = new MaterialRequest();
+                $materialRequest->uuid = $uuid;
+                $materialRequest->request_no = 'MR-' . str_pad((string) ((int) MaterialRequest::withTrashed()->max('id') + 1), 6, '0', STR_PAD_LEFT);
+                $materialRequest->requested_at = now();
+            } elseif ($materialRequest->trashed()) {
+                $materialRequest->restore();
+            }
+
+            $materialRequest->project_id = array_key_exists('project_id', $payload)
+                ? ($payload['project_id'] !== null ? (int) $payload['project_id'] : null)
+                : $materialRequest->project_id;
+            $materialRequest->warehouse_id = (int) ($payload['warehouse_id'] ?? $materialRequest->warehouse_id);
+            $materialRequest->requested_by_employee_id = (int) ($payload['requested_by_employee_id'] ?? $materialRequest->requested_by_employee_id);
+            $materialRequest->status = 'pending';
+            $materialRequest->notes = array_key_exists('notes', $payload)
+                ? (trim((string) ($payload['notes'] ?? '')) !== '' ? trim((string) $payload['notes']) : null)
+                : $materialRequest->notes;
+            $materialRequest->save();
+
+            $materialRequest->items()->delete();
+            foreach ((array) ($payload['items'] ?? []) as $row) {
+                MaterialRequestItem::query()->create([
+                    'uuid' => (string) ($row['uuid'] ?? Str::uuid()),
+                    'material_request_id' => $materialRequest->id,
+                    'material_id' => (int) ($row['material_id'] ?? 0),
+                    'quantity_requested' => round((float) ($row['quantity_requested'] ?? 0), 2),
+                    'quantity_approved' => 0,
+                    'quantity_issued' => 0,
+                    'unit' => trim((string) ($row['unit'] ?? '')),
+                    'notes' => isset($row['notes']) && trim((string) $row['notes']) !== '' ? trim((string) $row['notes']) : null,
+                ]);
+            }
+
+            return;
+        }
+
+        if ($entity === 'purchase_requests') {
+            if ($action === 'delete') {
+                $purchaseRequest = PurchaseRequest::withTrashed()->where('uuid', $uuid)->first();
+                if ($purchaseRequest && ! $purchaseRequest->trashed()) {
+                    $purchaseRequest->delete();
+                }
+
+                return;
+            }
+
+            $purchaseRequest = PurchaseRequest::withTrashed()->where('uuid', $uuid)->first();
+            if (! $purchaseRequest) {
+                $purchaseRequest = new PurchaseRequest();
+                $purchaseRequest->uuid = $uuid;
+                $purchaseRequest->request_no = 'PR-' . str_pad((string) ((int) PurchaseRequest::withTrashed()->max('id') + 1), 6, '0', STR_PAD_LEFT);
+                $purchaseRequest->requested_at = now();
+            } elseif ($purchaseRequest->trashed()) {
+                $purchaseRequest->restore();
+            }
+
+            if (array_key_exists('request_type', $payload)) {
+                $purchaseRequest->request_type = strtolower(trim((string) ($payload['request_type'] ?? ''))) === 'asset' ? 'asset' : 'material';
+            } elseif (! $purchaseRequest->request_type) {
+                $purchaseRequest->request_type = 'material';
+            }
+            $purchaseRequest->source_material_request_id = array_key_exists('source_material_request_id', $payload)
+                ? ($payload['source_material_request_id'] !== null ? (int) $payload['source_material_request_id'] : null)
+                : $purchaseRequest->source_material_request_id;
+            $purchaseRequest->project_id = array_key_exists('project_id', $payload)
+                ? ($payload['project_id'] !== null ? (int) $payload['project_id'] : null)
+                : $purchaseRequest->project_id;
+            $purchaseRequest->warehouse_id = (int) ($payload['warehouse_id'] ?? $purchaseRequest->warehouse_id);
+            $purchaseRequest->vendor_id = array_key_exists('vendor_id', $payload)
+                ? ($payload['vendor_id'] !== null ? (int) $payload['vendor_id'] : null)
+                : $purchaseRequest->vendor_id;
+            $purchaseRequest->requested_by_employee_id = (int) ($payload['requested_by_employee_id'] ?? $purchaseRequest->requested_by_employee_id);
+            $purchaseRequest->status = 'pending';
+            $purchaseRequest->notes = array_key_exists('notes', $payload)
+                ? (trim((string) ($payload['notes'] ?? '')) !== '' ? trim((string) $payload['notes']) : null)
+                : $purchaseRequest->notes;
+            $purchaseRequest->save();
+
+            $purchaseRequest->items()->delete();
+            foreach ((array) ($payload['items'] ?? []) as $row) {
+                $itemKind = strtolower(trim((string) ($row['item_kind'] ?? $purchaseRequest->request_type ?? 'material'))) === 'asset'
+                    ? 'asset'
+                    : 'material';
+                $companyAssetId = $itemKind === 'asset' ? (int) ($row['company_asset_id'] ?? 0) : 0;
+                $companyAsset = $companyAssetId > 0 ? CompanyAsset::withTrashed()->find($companyAssetId) : null;
+                PurchaseRequestItem::query()->create([
+                    'uuid' => (string) ($row['uuid'] ?? Str::uuid()),
+                    'purchase_request_id' => $purchaseRequest->id,
+                    'item_kind' => $itemKind,
+                    'material_id' => $itemKind === 'material' ? (int) ($row['material_id'] ?? 0) : null,
+                    'company_asset_id' => $itemKind === 'asset' && $companyAsset ? (int) $companyAsset->id : null,
+                    'asset_name' => $itemKind === 'asset'
+                        ? ($companyAsset?->asset_name ?: (trim((string) ($row['asset_name'] ?? '')) !== '' ? trim((string) $row['asset_name']) : null))
+                        : null,
+                    'asset_type' => $itemKind === 'asset'
+                        ? ($companyAsset
+                            ? (trim((string) $companyAsset->asset_type) === 'IT' ? 'IT' : strtolower(trim((string) $companyAsset->asset_type)))
+                            : (trim((string) ($row['asset_type'] ?? '')) === 'IT' ? 'IT' : strtolower(trim((string) ($row['asset_type'] ?? '')))))
+                        : null,
+                    'asset_code_prefix' => $itemKind === 'asset' && ! $companyAsset && trim((string) ($row['asset_code_prefix'] ?? '')) !== '' ? strtoupper(trim((string) $row['asset_code_prefix'])) : null,
+                    'quantity_requested' => $itemKind === 'asset'
+                        ? max(0, (int) round((float) ($row['quantity_requested'] ?? 0)))
+                        : round((float) ($row['quantity_requested'] ?? 0), 2),
+                    'quantity_approved' => 0,
+                    'quantity_received' => 0,
+                    'estimated_unit_price' => array_key_exists('estimated_unit_price', $row) && $row['estimated_unit_price'] !== null
+                        ? round(max(0, (float) $row['estimated_unit_price']), 2)
+                        : null,
+                    'estimated_line_total' => array_key_exists('estimated_unit_price', $row) && $row['estimated_unit_price'] !== null
+                        ? round(
+                            (($itemKind === 'asset'
+                                ? max(0, (int) round((float) ($row['quantity_requested'] ?? 0)))
+                                : round((float) ($row['quantity_requested'] ?? 0), 2))
+                            * max(0, (float) $row['estimated_unit_price'])),
+                            2
+                        )
+                        : null,
+                    'actual_unit_price' => null,
+                    'actual_line_total' => null,
+                    'unit' => trim((string) ($row['unit'] ?? '')),
+                    'notes' => isset($row['notes']) && trim((string) $row['notes']) !== '' ? trim((string) $row['notes']) : null,
+                ]);
+            }
+
+            return;
+        }
+        if ($entity === 'asset_requests') {
+            if ($action === 'delete') {
+                $assetRequest = AssetRequest::withTrashed()->where('uuid', $uuid)->first();
+                if ($assetRequest && ! $assetRequest->trashed()) {
+                    $assetRequest->delete();
+                }
+
+                return;
+            }
+
+            $assetRequest = AssetRequest::withTrashed()->where('uuid', $uuid)->first();
+            if (! $assetRequest) {
+                $assetRequest = new AssetRequest();
+                $assetRequest->uuid = $uuid;
+                $assetRequest->request_no = 'AR-' . str_pad((string) ((int) AssetRequest::withTrashed()->max('id') + 1), 6, '0', STR_PAD_LEFT);
+                $assetRequest->requested_at = now();
+            } elseif ($assetRequest->trashed()) {
+                $assetRequest->restore();
+            }
+
+            $asset = isset($payload['requested_asset_id']) && $payload['requested_asset_id'] !== null
+                ? CompanyAsset::withTrashed()->find((int) $payload['requested_asset_id'])
+                : null;
+            $assetType = array_key_exists('asset_type', $payload)
+                ? (trim((string) ($payload['asset_type'] ?? '')) !== '' ? trim((string) $payload['asset_type']) : null)
+                : ($asset?->asset_type ?: $assetRequest->asset_type);
+
+            $assetRequest->project_id = array_key_exists('project_id', $payload)
+                ? ($payload['project_id'] !== null ? (int) $payload['project_id'] : null)
+                : $assetRequest->project_id;
+            $assetRequest->requested_by_employee_id = (int) ($payload['requested_by_employee_id'] ?? $assetRequest->requested_by_employee_id);
+            $assetRequest->requested_asset_id = array_key_exists('requested_asset_id', $payload)
+                ? ($payload['requested_asset_id'] !== null ? (int) $payload['requested_asset_id'] : null)
+                : $assetRequest->requested_asset_id;
+            $assetRequest->asset_type = $assetType;
+            $assetRequest->quantity_requested = array_key_exists('quantity_requested', $payload)
+                ? max(0.01, round((float) ($payload['quantity_requested'] ?? 1), 2))
+                : ($assetRequest->quantity_requested ?: 1);
+            $assetRequest->quantity_allocated = $assetRequest->quantity_allocated ?? 0;
+            $assetRequest->status = 'pending';
+            $assetRequest->reason = array_key_exists('reason', $payload)
+                ? (trim((string) ($payload['reason'] ?? '')) !== '' ? trim((string) $payload['reason']) : null)
+                : $assetRequest->reason;
+            $assetRequest->notes = array_key_exists('notes', $payload)
+                ? (trim((string) ($payload['notes'] ?? '')) !== '' ? trim((string) $payload['notes']) : null)
+                : $assetRequest->notes;
+            $assetRequest->save();
+
+            return;
+        }
         if ($entity === 'customers') {
             if ($action === 'delete') {
                 $customer = Customer::withTrashed()->where('uuid', $uuid)->first();
@@ -456,6 +1141,81 @@ class SyncController extends Controller
                     ->all();
                 $role->syncPermissions($permissionNames);
             }
+
+            return;
+        }
+
+        if ($entity === 'salary_advances') {
+            if ($action === 'delete') {
+                $advance = SalaryAdvance::withTrashed()->where('uuid', $uuid)->first();
+                if ($advance && ! $advance->trashed()) {
+                    $advance->delete();
+                }
+
+                return;
+            }
+
+            $advance = SalaryAdvance::withTrashed()->where('uuid', $uuid)->first();
+            if (! $advance) {
+                $advance = new SalaryAdvance();
+                $advance->uuid = $uuid;
+            } elseif ($advance->trashed()) {
+                $advance->restore();
+            }
+
+            $advance->employee_id = (int) ($payload['employee_id'] ?? $advance->employee_id ?? 0);
+            $advance->amount = max(0.01, round((float) ($payload['amount'] ?? $advance->amount ?? 0), 2));
+            $advance->user_id = array_key_exists('user_id', $payload)
+                ? ($payload['user_id'] !== null ? (int) $payload['user_id'] : null)
+                : ($advance->user_id ?: ($actorId > 0 ? $actorId : null));
+            $advance->reason = array_key_exists('reason', $payload)
+                ? (trim((string) ($payload['reason'] ?? '')) !== '' ? trim((string) $payload['reason']) : null)
+                : $advance->reason;
+            $advanceStatus = strtolower(trim((string) ($payload['status'] ?? $advance->status ?? 'pending')));
+            $advance->status = in_array($advanceStatus, ['approved', 'deducted', 'rejected'], true) ? $advanceStatus : 'pending';
+            $advance->save();
+
+            return;
+        }
+
+        if ($entity === 'salary_payments') {
+            if ($action === 'delete') {
+                $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->first();
+                if ($payment && ! $payment->trashed()) {
+                    $payment->delete();
+                }
+
+                return;
+            }
+
+            $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->first();
+            if (! $payment) {
+                $payment = new SalaryPayment();
+                $payment->uuid = $uuid;
+            } elseif ($payment->trashed()) {
+                $payment->restore();
+            }
+
+            $grossSalary = max(0, round((float) ($payload['gross_salary'] ?? $payment->gross_salary ?? 0), 2));
+            $advanceDeducted = max(0, round((float) ($payload['advance_deducted'] ?? $payment->advance_deducted ?? 0), 2));
+            if ($advanceDeducted > $grossSalary) {
+                $advanceDeducted = $grossSalary;
+            }
+
+            $payment->employee_id = (int) ($payload['employee_id'] ?? $payment->employee_id ?? 0);
+            $payment->period = trim((string) ($payload['period'] ?? $payment->period ?? ''));
+            $payment->gross_salary = $grossSalary;
+            $payment->advance_deducted = $advanceDeducted;
+            $payment->net_salary = max(0, round($grossSalary - $advanceDeducted, 2));
+            $paymentStatus = strtolower(trim((string) ($payload['status'] ?? $payment->status ?? 'draft')));
+            $payment->status = in_array($paymentStatus, ['paid', 'cancelled'], true) ? $paymentStatus : 'draft';
+            $payment->user_id = array_key_exists('user_id', $payload)
+                ? ($payload['user_id'] !== null ? (int) $payload['user_id'] : null)
+                : ($payment->user_id ?: ($actorId > 0 ? $actorId : null));
+            $payment->paid_at = array_key_exists('paid_at', $payload) && !empty($payload['paid_at'])
+                ? CarbonImmutable::parse((string) $payload['paid_at'])->toDateTimeString()
+                : (array_key_exists('paid_at', $payload) ? null : $payment->paid_at);
+            $payment->save();
 
             return;
         }
@@ -1088,3 +1848,14 @@ class SyncController extends Controller
             ->exists();
     }
 }
+
+
+
+
+
+
+
+
+
+
+

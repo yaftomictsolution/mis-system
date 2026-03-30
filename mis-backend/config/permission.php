@@ -174,6 +174,84 @@ return [
      */
     // 'wildcard_permission' => Spatie\Permission\WildcardPermission::class,
 
+    /*
+     * Application-level permission catalog used by the role editor.
+     * These names are also synced into the permissions table so new modules
+     * can be assigned without depending on old broad fallbacks only.
+     */
+    'permissions' => [
+        'Core' => [
+            'users.view',
+            'users.create',
+            'users.update',
+            'roles.view',
+            'roles.create',
+            'roles.update',
+            'reports.view',
+        ],
+        'HR' => [
+            'employees.view',
+            'employees.create',
+            'employees.update',
+            'payroll.view',
+            'payroll.pay',
+            'payroll.advance',
+            'payroll.approve',
+        ],
+        'Apartment' => [
+            'apartments.view',
+            'apartments.create',
+            'apartments.update',
+            'customers.view',
+            'customers.create',
+            'customers.update',
+            'sales.create',
+            'sales.approve',
+            'sales.cancel',
+            'installments.pay',
+            'municipality.view',
+            'municipality.record_receipt',
+            'municipality.approve',
+        ],
+        'Inventory' => [
+            'projects.view',
+            'projects.create',
+            'projects.update',
+            'inventory_master.view',
+            'vendors.view',
+            'vendors.create',
+            'vendors.update',
+            'warehouses.view',
+            'warehouses.create',
+            'warehouses.update',
+            'materials.view',
+            'materials.create',
+            'materials.update',
+            'company_assets.view',
+            'company_assets.create',
+            'company_assets.update',
+            'warehouse_stock.view',
+            'material_requests.view',
+            'material_requests.create',
+            'material_requests.update',
+            'purchase_requests.view',
+            'purchase_requests.create',
+            'purchase_requests.update',
+            'asset_requests.view',
+            'asset_requests.create',
+            'asset_requests.update',
+            'stock_movements.view',
+            'inventory.request',
+            'inventory.approve',
+            'inventory.issue',
+        ],
+        'Commercial' => [
+            'vendors.manage',
+            'contracts.manage',
+            'payments.approve',
+        ],
+    ],
+
     /* Cache-specific settings */
 
     'cache' => [

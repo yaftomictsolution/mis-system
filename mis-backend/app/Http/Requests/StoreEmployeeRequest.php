@@ -30,42 +30,34 @@ class StoreEmployeeRequest extends FormRequest
                 ->where('uuid', $routeUuid)
                 ->value('id');
         }
-
         return [
             'uuid' => [
                 'nullable',
                 'string',
                 'size:36',
             ],
-
             'first_name' => ['required', 'string', 'max:255'],
             'last_name' => ['nullable', 'string', 'max:255'],
             'job_title' => ['nullable', 'string', 'max:255'],
-
             'salary_type' => ['required', 'string', 'max:255'],
             'base_salary' => ['nullable', 'numeric', 'min:0'],
-
             'address' => ['nullable', 'string', 'max:255'],
-
             'email' => [
                 'nullable',
                 'email',
                 'max:255',
                 Rule::unique('employees', 'email')->ignore($employeeId),
             ],
-
             // 'phone' => [
             //     'nullable',
             //     'string',
             //     'max:255',
             //     Rule::unique('employees', 'phone')->ignore($employeeId),
             // ],
-
             // 'hire_date' => ['required', 'date'],
             'status' => ['nullable', 'string', 'max:255'],
         ];
     }
-
     public function messages(): array
     {
         return [

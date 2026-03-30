@@ -2,12 +2,13 @@
 
 namespace Database\Seeders;
 
+use App\Models\Roles;
 use App\Models\User;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Spatie\Permission\Models\Permission;
-use Spatie\Permission\Models\Role;
 
 class AuthSeed extends Seeder
 {
@@ -25,30 +26,34 @@ class AuthSeed extends Seeder
         ];
 
         foreach ($roles as $r) {
-          
-             Role:: (
-                ['name' => $r],
-                ['uuid' => (string) Str::uuid()]
-            );
+            $role = Roles::withTrashed()->firstOrNew([
+                'name' => $r,
+                'guard_name' => 'web',
+            ]);
 
+            if (! $role->uuid) {
+                $role->uuid = (string) Str::uuid();
+            }
+
+            if ($role->trashed()) {
+                $role->restore();
+            }
+
+            $role->save();
         }
 
-        $permissions = [
-            'users.view', 'users.create', 'users.update',
-             'roles.view','roles.create','roles.update',
-            'apartments.view', 'apartments.create', 'apartments.update',
-            'customers.view', 'customers.create', 'customers.update',
-            'sales.create', 'sales.approve', 'sales.cancel',
-            'installments.pay',
-            'municipality.view', 'municipality.record_receipt', 'municipality.approve',
-            'inventory.request', 'inventory.approve', 'inventory.issue',
-            'vendors.manage', 'contracts.manage', 'payments.approve',
-            'payroll.view', 'payroll.pay', 'payroll.advance', 'payroll.approve',
-            'reports.view',
-        ];
+        $permissions = collect(Arr::flatten(config('permission.permissions', [])))
+            ->filter(fn ($value) => is_string($value) && trim($value) !== '')
+            ->map(fn ($value) => trim($value))
+            ->unique()
+            ->values()
+            ->all();
 
         foreach ($permissions as $p) {
-            Permission::firstOrCreate(['name' => $p]);
+            Permission::firstOrCreate([
+                'name' => $p,
+                'guard_name' => 'web',
+            ]);
         }
 
         // Admin has all permissions
