@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
-import RequirePermission from "@/components/auth/RequirePermission";
+import RequireAdmin from "@/components/auth/RequireAdmin";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { FormField } from "@/components/ui/FormField";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -190,7 +190,7 @@ export default function UsersPage() {
   );
 
   return (
-    <RequirePermission permission="customers.view">
+    <RequireAdmin>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Users" subtitle="Manage users and profiles">
           <button
@@ -271,6 +271,6 @@ export default function UsersPage() {
           message={`Are you sure you want to delete user ${current.name ?? ""}? This action cannot be undone.`}
         />
       </div>
-    </RequirePermission>
+    </RequireAdmin>
   );
 }

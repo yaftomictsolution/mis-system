@@ -1,5 +1,6 @@
 "use client";
 import { NAV_ITEMS } from "@/config/nav";
+import { hasAnyPermission, hasAnyRole } from "@/lib/permissions";
 import { RootState } from "@/store/store";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
@@ -32,6 +33,7 @@ export default function SideContent(){
 
   const pathname = usePathname();
   const perms: string[] = useSelector((s: RootState) => s.auth.user?.permissions || []);
+  const roles: string[] = useSelector((s: RootState) => s.auth.user?.roles || []);
   const { sidebarOpen, isMobile } = useSelector((state: RootState) => state.ui);
   const [isUserRolesOpen, setIsUserRolesOpen] = useState(false);
   const dispatch = useDispatch();
@@ -40,7 +42,8 @@ export default function SideContent(){
       ...group,
       items: group.items.filter((item) => {
       const permission = "permission" in item ? item.permission : undefined;
-      return typeof permission !== "string" || perms.includes(permission);
+      const role = "role" in item ? item.role : undefined;
+      return hasAnyPermission(perms, permission) && hasAnyRole(roles, role);
       }),
   })).filter((group) => group.items.length > 0);
 

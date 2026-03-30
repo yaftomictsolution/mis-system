@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useSelector } from "react-redux";
 import RequirePermission from "@/components/auth/RequirePermission";
 import { Badge } from "@/components/ui/Badge";
@@ -25,6 +26,7 @@ import {
   type MaterialIssueInput,
   type MaterialRequestInput,
 } from "@/modules/inventory-workflow/inventory-workflow.repo";
+import { setPurchaseRequestDraft } from "@/modules/purchase-requests/purchase-request-draft";
 import { projectsListLocal, projectsPullToLocal } from "@/modules/projects/projects.repo";
 import type { RootState } from "@/store/store";
 
@@ -128,7 +130,30 @@ function openRequestPrint(uuid: string): void {
   window.open(`/print/material-requests/${uuid}/receipt`, "_blank", "noopener,noreferrer");
 }
 
+function getShortageDraftItems(row: MaterialRequestRow, materials: MaterialRow[]) {
+  return (row.items ?? [])
+    .map((item) => {
+      const material = materials.find((entry) => Number(entry.id) === Number(item.material_id));
+      const approved = Number(item.quantity_approved ?? 0);
+      const baseline = approved > 0 ? approved : Number(item.quantity_requested ?? 0);
+      const outstanding = Math.max(0, baseline - Number(item.quantity_issued ?? 0));
+      const available = Math.max(0, Number(material?.quantity ?? 0));
+      const shortage = Math.max(0, outstanding - available);
+
+      if (shortage <= 0) return null;
+
+      return {
+        material_id: Number(item.material_id),
+        quantity_requested: shortage,
+        unit: item.unit || material?.unit || "pcs",
+        notes: `Shortage from ${row.request_no}`,
+      };
+    })
+    .filter((item): item is { material_id: number; quantity_requested: number; unit: string; notes: string } => Boolean(item));
+}
+
 export default function MaterialRequestsPage() {
+  const router = useRouter();
   const permissions = useSelector((state: RootState) => state.auth.user?.permissions ?? []);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -282,6 +307,28 @@ export default function MaterialRequestsPage() {
     setIssueOpen(true);
   }, [materials]);
 
+  const openPurchaseRequest = useCallback((row: MaterialRequestRow) => {
+    const shortageItems = getShortageDraftItems(row, materials);
+    if (!shortageItems.length) {
+      notifyError("This request does not currently need a purchase request because warehouse stock is enough.");
+      return;
+    }
+
+    setPurchaseRequestDraft({
+      request_type: "material",
+      source_material_request_id: row.request_no.startsWith("MR-LOCAL-") ? null : Number(row.id ?? 0) || null,
+      source_material_request_uuid: row.uuid,
+      source_material_request_no: row.request_no,
+      project_id: row.project_id ?? null,
+      warehouse_id: row.warehouse_id,
+      requested_by_employee_id: row.requested_by_employee_id,
+      notes: `Auto-generated from ${row.request_no} because stock was not enough for issuance.`,
+      items: shortageItems,
+    });
+
+    router.push("/purchase-requests");
+  }, [materials, router]);
+
   const closeIssue = useCallback(() => {
     setIssueOpen(false);
     setIssueTarget(null);
@@ -397,37 +444,47 @@ export default function MaterialRequestsPage() {
     {
       key: "workflow",
       label: "Workflow",
-      render: (item) => (
-        <div className="flex flex-wrap justify-end gap-2">
-          {item.status === "pending" && (
-            <>
-              <button type="button" onClick={() => openEdit(item)} className={`${actionBtn} border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100`}>Edit</button>
-              <button type="button" onClick={() => setPendingDelete(item)} className={`${actionBtn} border border-red-200 bg-red-50 text-red-700 hover:bg-red-100`}>Delete</button>
-            </>
-          )}
-          {canApprove && item.status === "pending" && (
-            <>
-              <button type="button" onClick={() => { void handleApprove(item); }} className={`${actionBtn} border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100`}>Approve</button>
-              <button type="button" onClick={() => { void handleReject(item); }} className={`${actionBtn} border border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200`}>Reject</button>
-            </>
-          )}
-          {canIssue && (item.status === "approved" || item.status === "partial_issued") && (
-            <button type="button" onClick={() => openIssue(item)} className={`${actionBtn} border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100`}>Issue</button>
-          )}
-          <button
-            type="button"
-            onClick={() => openRequestPrint(item.uuid)}
-            className={`${actionBtn} border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100`}
-          >
-            {item.issue_receipt_no ? "Print Receipt" : "Print Record"}
-          </button>
-        </div>
-      ),
+      render: (item) => {
+        const shortageItems = getShortageDraftItems(item, materials);
+        const canCreatePurchaseRequest = item.status !== "issued" && item.status !== "rejected" && shortageItems.length > 0;
+
+        return (
+          <div className="flex flex-wrap justify-end gap-2">
+            {item.status === "pending" && (
+              <>
+                <button type="button" onClick={() => openEdit(item)} className={`${actionBtn} border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100`}>Edit</button>
+                <button type="button" onClick={() => setPendingDelete(item)} className={`${actionBtn} border border-red-200 bg-red-50 text-red-700 hover:bg-red-100`}>Delete</button>
+              </>
+            )}
+            {canApprove && item.status === "pending" && (
+              <>
+                <button type="button" onClick={() => { void handleApprove(item); }} className={`${actionBtn} border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100`}>Approve</button>
+                <button type="button" onClick={() => { void handleReject(item); }} className={`${actionBtn} border border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200`}>Reject</button>
+              </>
+            )}
+            {canIssue && (item.status === "approved" || item.status === "partial_issued") && (
+              <button type="button" onClick={() => openIssue(item)} className={`${actionBtn} border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100`}>Issue</button>
+            )}
+            {canCreatePurchaseRequest && (
+              <button type="button" onClick={() => openPurchaseRequest(item)} className={`${actionBtn} border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100`}>
+                Create Purchase Request
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => openRequestPrint(item.uuid)}
+              className={`${actionBtn} border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100`}
+            >
+              {item.issue_receipt_no ? "Print Receipt" : "Print Record"}
+            </button>
+          </div>
+        );
+      },
     },
-  ], [canApprove, canIssue, handleApprove, handleReject, openEdit, openIssue]);
+  ], [canApprove, canIssue, handleApprove, handleReject, materials, openEdit, openIssue, openPurchaseRequest]);
 
   return (
-    <RequirePermission permission="inventory.request">
+    <RequirePermission permission={["material_requests.view", "inventory.request"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Material Requests" subtitle="Local-first request entry with online approval and issue workflow.">
           <div className="flex flex-wrap gap-2">

@@ -13,10 +13,19 @@ import { motion } from 'framer-motion'
 import { useTheme } from '../../../app/context/ThemeContext'
 import type { DashboardSalesPoint } from './useDashboardData'
 
+const usdFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
+})
+
 const formatCurrency = (value: number) => {
-  if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`
-  if (value >= 1000) return `${(value / 1000).toFixed(0)}K`
-  return value.toString()
+  const absolute = Math.abs(value)
+  const prefix = value < 0 ? '-' : ''
+  if (absolute >= 1000000) return `${prefix}$${(absolute / 1000000).toFixed(1)}M`
+  if (absolute >= 1000) return `${prefix}$${(absolute / 1000).toFixed(0)}K`
+  return `${prefix}$${Math.round(absolute)}`
 }
 
 type SalesChartProps = {
@@ -67,7 +76,7 @@ export function SalesChart({ data }: SalesChartProps) {
                 }}
                 itemStyle={{ color: isDark ? '#e2e8f0' : '#0f172a' }}
                 labelStyle={{ color: '#94a3b8' }}
-                formatter={(value: number | undefined) => [value != null ? `AFN ${Math.round(value).toLocaleString()}` : '', 'Revenue']}
+                formatter={(value: number | undefined) => [value != null ? usdFormatter.format(value) : '', 'Revenue']}
               />
               <Bar dataKey="sales" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={40} />
             </BarChart>

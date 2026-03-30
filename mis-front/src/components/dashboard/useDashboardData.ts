@@ -1,8 +1,11 @@
-﻿"use client";
+"use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSelector } from "react-redux";
 import { db } from "@/db/localDB";
+import { api } from "@/lib/api";
 import { subscribeAppEvent } from "@/lib/appEvents";
+import type { RootState } from "@/store/store";
 
 export type DashboardSummary = {
   totalApartments: number;
@@ -88,6 +91,25 @@ export type DashboardData = {
   refresh: () => Promise<void>;
 };
 
+type DashboardSnapshot = Omit<DashboardData, "loading" | "refresh"> & {
+  generated_at?: string | null;
+};
+
+type DashboardCacheEntry = {
+  snapshot: DashboardSnapshot;
+  isStale: boolean;
+};
+
+type DashboardRefreshOptions = {
+  force?: boolean;
+  silent?: boolean;
+  preferLocal?: boolean;
+};
+
+const DASHBOARD_CACHE_PREFIX = "dashboard_summary_v1";
+const DASHBOARD_CACHE_TTL_SECONDS = 300;
+const REMOTE_REFRESH_MIN_INTERVAL_MS = 30_000;
+
 const EMPTY_SUMMARY: DashboardSummary = {
   totalApartments: 0,
   availableApartments: 0,
@@ -105,6 +127,41 @@ const EMPTY_SUMMARY: DashboardSummary = {
   rentalsDueSoon: 0,
 };
 
+const EMPTY_SNAPSHOT: DashboardSnapshot = {
+  generated_at: null,
+  summary: EMPTY_SUMMARY,
+  salesChartData: [],
+  apartmentStatusData: [],
+  recentSales: [],
+  approvals: [],
+  progressItems: [],
+  activities: [],
+  metrics: [],
+};
+
+const isOnline = (): boolean => typeof navigator !== "undefined" && navigator.onLine;
+const asObj = (value: unknown): Record<string, unknown> =>
+  typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+const nowIso = () => new Date().toISOString();
+
+function toNumber(value: unknown, fallback = 0): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function toStringValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function toActivityType(value: unknown): DashboardActivity["type"] {
+  const type = String(value ?? "").trim().toLowerCase();
+  if (type === "sale" || type === "milestone" || type === "payment" || type === "document" || type === "alert") {
+    return type;
+  }
+  return "milestone";
+}
+
 function safeStatus(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -116,7 +173,12 @@ function timestampOf(value: number | string | null | undefined): number {
 }
 
 function formatCurrencyFull(amount: number): string {
-  return `AFN ${Math.round(amount).toLocaleString()}`;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(amount || 0));
 }
 
 function formatDate(value: number | string | null | undefined): string {
@@ -233,295 +295,409 @@ function isSalePendingDeedApproval(
   return customerDebt <= 0 && remainingMunicipality <= 0;
 }
 
-export function useDashboardData(): DashboardData {
-  const [loading, setLoading] = useState(true);
-  const [summary, setSummary] = useState<DashboardSummary>(EMPTY_SUMMARY);
-  const [salesChartData, setSalesChartData] = useState<DashboardSalesPoint[]>([]);
-  const [apartmentStatusData, setApartmentStatusData] = useState<DashboardStatusPoint[]>([]);
-  const [recentSales, setRecentSales] = useState<DashboardRecentSale[]>([]);
-  const [approvals, setApprovals] = useState<DashboardApproval[]>([]);
-  const [progressItems, setProgressItems] = useState<DashboardProgressItem[]>([]);
-  const [activities, setActivities] = useState<DashboardActivity[]>([]);
-  const [metrics, setMetrics] = useState<DashboardMetric[]>([]);
+function dashboardCacheKey(userId: string): string {
+  return `${DASHBOARD_CACHE_PREFIX}:${userId}`;
+}
 
-  const load = useCallback(async () => {
-    setLoading(true);
+function sanitizeSummary(value: unknown): DashboardSummary {
+  const row = asObj(value);
+  return {
+    totalApartments: toNumber(row.totalApartments),
+    availableApartments: toNumber(row.availableApartments),
+    soldApartments: toNumber(row.soldApartments),
+    totalCustomers: toNumber(row.totalCustomers),
+    totalRevenue: toNumber(row.totalRevenue),
+    currentMonthRevenue: toNumber(row.currentMonthRevenue),
+    previousMonthRevenue: toNumber(row.previousMonthRevenue),
+    pendingApprovals: toNumber(row.pendingApprovals),
+    overdueInstallments: toNumber(row.overdueInstallments),
+    overdueAmount: toNumber(row.overdueAmount),
+    municipalityPending: toNumber(row.municipalityPending),
+    municipalityPendingCount: toNumber(row.municipalityPendingCount),
+    activeRentals: toNumber(row.activeRentals),
+    rentalsDueSoon: toNumber(row.rentalsDueSoon),
+  };
+}
 
-    const [apartments, customers, sales, installments, financials, rentals, notifications] = await Promise.all([
-      db.apartments.toArray(),
-      db.customers.toArray(),
-      db.apartment_sales.toArray(),
-      db.installments.toArray(),
-      db.apartment_sale_financials.toArray(),
-      db.rentals.toArray(),
-      db.admin_notifications.toArray(),
-    ]);
+function sanitizeSnapshot(value: unknown): DashboardSnapshot {
+  const row = asObj(value);
 
-    const customerById = new Map<number, string>();
-    for (const customer of customers) {
-      if (typeof customer.id === "number" && customer.id > 0) {
-        customerById.set(customer.id, customer.name || "Customer");
-      }
+  return {
+    generated_at: row.generated_at == null ? null : String(row.generated_at),
+    summary: sanitizeSummary(row.summary),
+    salesChartData: asArray(row.salesChartData).map((entry) => {
+      const item = asObj(entry);
+      return {
+        name: toStringValue(item.name),
+        sales: toNumber(item.sales),
+      };
+    }),
+    apartmentStatusData: asArray(row.apartmentStatusData).map((entry) => {
+      const item = asObj(entry);
+      return {
+        name: toStringValue(item.name),
+        value: toNumber(item.value),
+        color: toStringValue(item.color),
+      };
+    }),
+    recentSales: asArray(row.recentSales).map((entry) => {
+      const item = asObj(entry);
+      return {
+        id: toStringValue(item.id),
+        customer: toStringValue(item.customer, "Customer"),
+        apartment: toStringValue(item.apartment, "Apartment"),
+        amount: toStringValue(item.amount, formatCurrencyFull(0)),
+        date: toStringValue(item.date, "-"),
+        status: toStringValue(item.status, "Active"),
+        href: toStringValue(item.href, "/apartment-sales"),
+      };
+    }),
+    approvals: asArray(row.approvals).map((entry) => {
+      const item = asObj(entry);
+      return {
+        id: toStringValue(item.id),
+        desc: toStringValue(item.desc),
+        requester: toStringValue(item.requester),
+        time: toStringValue(item.time, "-"),
+        href: item.href == null ? undefined : String(item.href),
+      };
+    }),
+    progressItems: asArray(row.progressItems).map((entry) => {
+      const item = asObj(entry);
+      return {
+        id: toStringValue(item.id),
+        name: toStringValue(item.name),
+        location: toStringValue(item.location),
+        progress: toNumber(item.progress),
+        status: toStringValue(item.status),
+        href: toStringValue(item.href, "/rentals"),
+      };
+    }),
+    activities: asArray(row.activities).map((entry) => {
+      const item = asObj(entry);
+      return {
+        id: toStringValue(item.id),
+        text: toStringValue(item.text),
+        time: toStringValue(item.time, "-"),
+        user: toStringValue(item.user, "System"),
+        type: toActivityType(item.type),
+      };
+    }),
+    metrics: asArray(row.metrics).map((entry) => {
+      const item = asObj(entry);
+      return {
+        label: toStringValue(item.label),
+        value: toStringValue(item.value),
+        color: toStringValue(item.color),
+        bar: toStringValue(item.bar),
+        width: toStringValue(item.width, "0%"),
+      };
+    }),
+  };
+}
+
+async function readCachedSnapshot(userId: string): Promise<DashboardCacheEntry | null> {
+  if (!userId) return null;
+  const row = await db.api_cache.get(dashboardCacheKey(userId));
+  if (!row) return null;
+
+  return {
+    snapshot: sanitizeSnapshot(row.data),
+    isStale: row.updated_at + row.ttl_seconds * 1000 <= Date.now(),
+  };
+}
+
+async function writeCachedSnapshot(userId: string, snapshot: DashboardSnapshot): Promise<void> {
+  if (!userId) return;
+  await db.api_cache.put({
+    key: dashboardCacheKey(userId),
+    data: snapshot,
+    updated_at: Date.now(),
+    ttl_seconds: DASHBOARD_CACHE_TTL_SECONDS,
+  });
+}
+
+async function fetchRemoteSnapshot(): Promise<DashboardSnapshot> {
+  const response = await api.get("/api/dashboard/summary");
+  return sanitizeSnapshot(asObj(response.data).data);
+}
+
+async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
+  const [apartments, customers, sales, installments, financials, rentals, notifications] = await Promise.all([
+    db.apartments.toArray(),
+    db.customers.toArray(),
+    db.apartment_sales.toArray(),
+    db.installments.toArray(),
+    db.apartment_sale_financials.toArray(),
+    db.rentals.toArray(),
+    db.admin_notifications.toArray(),
+  ]);
+
+  const customerById = new Map<number, string>();
+  for (const customer of customers) {
+    if (typeof customer.id === "number" && customer.id > 0) {
+      customerById.set(customer.id, customer.name || "Customer");
     }
+  }
 
-    const apartmentById = new Map<number, string>();
-    for (const apartment of apartments) {
-      if (typeof apartment.id === "number" && apartment.id > 0) {
-        apartmentById.set(apartment.id, apartment.apartment_code || "Apartment");
-      }
+  const apartmentById = new Map<number, string>();
+  for (const apartment of apartments) {
+    if (typeof apartment.id === "number" && apartment.id > 0) {
+      apartmentById.set(apartment.id, apartment.apartment_code || "Apartment");
     }
+  }
 
-    const financialBySaleUuid = new Map<string, (typeof financials)[number]>();
-    for (const financial of financials) {
-      const saleUuid = String(financial.sale_uuid ?? "").trim();
-      if (!saleUuid) continue;
-      financialBySaleUuid.set(saleUuid, financial);
-    }
+  const financialBySaleUuid = new Map<string, (typeof financials)[number]>();
+  for (const financial of financials) {
+    const saleUuid = String(financial.sale_uuid ?? "").trim();
+    if (!saleUuid) continue;
+    financialBySaleUuid.set(saleUuid, financial);
+  }
 
-    const apartmentStatuses = apartments.reduce(
-      (acc, apartment) => {
-        const status = safeStatus(apartment.status);
-        if (status === "sold" || status === "handed_over") acc.sold += 1;
-        else if (status === "rented") acc.rented += 1;
-        else if (status === "reserved") acc.reserved += 1;
-        else if (status === "company_use") acc.companyUse += 1;
-        else acc.available += 1;
-        return acc;
-      },
-      { available: 0, sold: 0, rented: 0, reserved: 0, companyUse: 0 },
-    );
+  const apartmentStatuses = apartments.reduce(
+    (acc, apartment) => {
+      const status = safeStatus(apartment.status);
+      if (status === "sold" || status === "handed_over") acc.sold += 1;
+      else if (status === "rented") acc.rented += 1;
+      else if (status === "reserved") acc.reserved += 1;
+      else if (status === "company_use") acc.companyUse += 1;
+      else acc.available += 1;
+      return acc;
+    },
+    { available: 0, sold: 0, rented: 0, reserved: 0, companyUse: 0 },
+  );
 
-    const now = new Date();
-    const currentMonthKey = monthKey(now);
-    const previousMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    const previousMonthKey = monthKey(previousMonth);
+  const now = new Date();
+  const currentMonthKey = monthKey(now);
+  const previousMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const previousMonthKey = monthKey(previousMonth);
 
-    let totalRevenue = 0;
-    let currentMonthRevenue = 0;
-    let previousMonthRevenue = 0;
-    const salesByMonth = new Map<string, number>();
+  let totalRevenue = 0;
+  let currentMonthRevenue = 0;
+  let previousMonthRevenue = 0;
+  const salesByMonth = new Map<string, number>();
 
-    for (const sale of sales) {
-      const revenue = revenueForSale(sale);
-      totalRevenue += revenue;
+  for (const sale of sales) {
+    const revenue = revenueForSale(sale);
+    totalRevenue += revenue;
 
-      const saleTs = timestampOf(Number(sale.sale_date ?? 0));
-      if (!saleTs) continue;
-      const key = monthKey(new Date(saleTs));
-      salesByMonth.set(key, Number(((salesByMonth.get(key) ?? 0) + revenue).toFixed(2)));
-      if (key === currentMonthKey) currentMonthRevenue += revenue;
-      if (key === previousMonthKey) previousMonthRevenue += revenue;
-    }
+    const saleTs = timestampOf(Number(sale.sale_date ?? 0));
+    if (!saleTs) continue;
+    const key = monthKey(new Date(saleTs));
+    salesByMonth.set(key, Number(((salesByMonth.get(key) ?? 0) + revenue).toFixed(2)));
+    if (key === currentMonthKey) currentMonthRevenue += revenue;
+    if (key === previousMonthKey) previousMonthRevenue += revenue;
+  }
 
-    const overdueRows = installments.filter((row) => installmentIsOverdue(row));
-    const overdueAmount = overdueRows.reduce((sum, row) => {
-      const remaining =
-        row.remaining_amount == null
-          ? Math.max(0, Number(row.amount ?? 0) - Number(row.paid_amount ?? 0))
-          : Number(row.remaining_amount ?? 0);
-      return sum + Math.max(0, remaining);
-    }, 0);
+  const overdueRows = installments.filter((row) => installmentIsOverdue(row));
+  const overdueAmount = overdueRows.reduce((sum, row) => {
+    const remaining =
+      row.remaining_amount == null
+        ? Math.max(0, Number(row.amount ?? 0) - Number(row.paid_amount ?? 0))
+        : Number(row.remaining_amount ?? 0);
+    return sum + Math.max(0, remaining);
+  }, 0);
 
-    const municipalityPending = financials.reduce(
-      (sum, row) => sum + Math.max(0, Number(row.remaining_municipality ?? 0)),
-      0,
-    );
-    const municipalityPendingCount = financials.filter((row) => Number(row.remaining_municipality ?? 0) > 0).length;
+  const municipalityPending = financials.reduce(
+    (sum, row) => sum + Math.max(0, Number(row.remaining_municipality ?? 0)),
+    0,
+  );
+  const municipalityPendingCount = financials.filter((row) => Number(row.remaining_municipality ?? 0) > 0).length;
 
-    const activeRentalStatuses = new Set(["active", "advance_pending"]);
-    const closedRentalStatuses = new Set(["completed", "terminated", "defaulted", "cancelled"]);
-    const activeRentals = rentals.filter((row) => activeRentalStatuses.has(safeStatus(row.status))).length;
-    const rentalsDueSoon = rentals.filter((row) => {
-      const status = safeStatus(row.status);
-      if (closedRentalStatuses.has(status)) return false;
-      const nextDue = Number(row.next_due_date ?? 0);
-      if (!Number.isFinite(nextDue) || nextDue <= 0) return false;
-      const diff = nextDue - Date.now();
-      return diff >= 0 && diff <= 7 * 24 * 60 * 60 * 1000;
-    }).length;
+  const activeRentalStatuses = new Set(["active", "advance_pending"]);
+  const closedRentalStatuses = new Set(["completed", "terminated", "defaulted", "cancelled"]);
+  const activeRentals = rentals.filter((row) => activeRentalStatuses.has(safeStatus(row.status))).length;
+  const rentalsDueSoon = rentals.filter((row) => {
+    const status = safeStatus(row.status);
+    if (closedRentalStatuses.has(status)) return false;
+    const nextDue = Number(row.next_due_date ?? 0);
+    if (!Number.isFinite(nextDue) || nextDue <= 0) return false;
+    const diff = nextDue - Date.now();
+    return diff >= 0 && diff <= 7 * 24 * 60 * 60 * 1000;
+  }).length;
 
-    const latestDeedNotificationBySaleUuid = new Map<string, (typeof notifications)[number]>();
-    const deedNotifications = [...notifications]
-      .filter((row) => safeStatus(row.category) === "sale_deed_eligible")
-      .sort((a, b) => timestampOf(b.created_at) - timestampOf(a.created_at));
+  const latestDeedNotificationBySaleUuid = new Map<string, (typeof notifications)[number]>();
+  const deedNotifications = [...notifications]
+    .filter((row) => safeStatus(row.category) === "sale_deed_eligible")
+    .sort((a, b) => timestampOf(b.created_at) - timestampOf(a.created_at));
 
-    for (const notification of deedNotifications) {
-      const saleUuid = String(notification.sale_uuid ?? "").trim();
-      if (!saleUuid || latestDeedNotificationBySaleUuid.has(saleUuid)) continue;
-      latestDeedNotificationBySaleUuid.set(saleUuid, notification);
-    }
+  for (const notification of deedNotifications) {
+    const saleUuid = String(notification.sale_uuid ?? "").trim();
+    if (!saleUuid || latestDeedNotificationBySaleUuid.has(saleUuid)) continue;
+    latestDeedNotificationBySaleUuid.set(saleUuid, notification);
+  }
 
-    const pendingApprovalSales = sales
-      .filter((sale) => isSalePendingDeedApproval(sale, financialBySaleUuid.get(sale.uuid)))
-      .sort((a, b) => {
-        const notificationA = latestDeedNotificationBySaleUuid.get(a.uuid);
-        const notificationB = latestDeedNotificationBySaleUuid.get(b.uuid);
-        const timeA = timestampOf(notificationA?.created_at) || timestampOf(a.updated_at) || timestampOf(a.sale_date);
-        const timeB = timestampOf(notificationB?.created_at) || timestampOf(b.updated_at) || timestampOf(b.sale_date);
-        return timeB - timeA;
-      });
+  const pendingApprovalSales = sales
+    .filter((sale) => isSalePendingDeedApproval(sale, financialBySaleUuid.get(sale.uuid)))
+    .sort((a, b) => {
+      const notificationA = latestDeedNotificationBySaleUuid.get(a.uuid);
+      const notificationB = latestDeedNotificationBySaleUuid.get(b.uuid);
+      const timeA = timestampOf(notificationA?.created_at) || timestampOf(a.updated_at) || timestampOf(a.sale_date);
+      const timeB = timestampOf(notificationB?.created_at) || timestampOf(b.updated_at) || timestampOf(b.sale_date);
+      return timeB - timeA;
+    });
 
-    const nextRecentSales = [...sales]
-      .sort((a, b) => Number(b.sale_date ?? 0) - Number(a.sale_date ?? 0))
-      .slice(0, 5)
-      .map((sale) => {
-        const customer = customerById.get(Number(sale.customer_id ?? 0)) || sale.sale_id || "Customer";
-        const apartment = apartmentById.get(Number(sale.apartment_id ?? 0)) || "Apartment";
-        const amount = formatCurrencyFull(revenueForSale(sale));
-        const status = safeStatus(sale.status);
-        return {
-          id: sale.uuid,
-          customer,
-          apartment,
-          amount,
-          date: formatDate(sale.sale_date),
-          status: status ? `${status.charAt(0).toUpperCase()}${status.slice(1)}` : "Active",
-          href: sale.uuid ? `/apartment-sales/${sale.uuid}/financial` : "/apartment-sales",
-        };
-      });
-
-    const nextApprovals = pendingApprovalSales.slice(0, 6).map((sale) => {
-      const notification = latestDeedNotificationBySaleUuid.get(sale.uuid);
-      const saleId = String(sale.sale_id ?? "").trim() || sale.uuid.slice(0, 8).toUpperCase();
-      const customerName = customerById.get(Number(sale.customer_id ?? 0)) || "Customer";
-      const apartmentName = apartmentById.get(Number(sale.apartment_id ?? 0)) || "Apartment";
-
+  const recentSales = [...sales]
+    .sort((a, b) => Number(b.sale_date ?? 0) - Number(a.sale_date ?? 0))
+    .slice(0, 5)
+    .map((sale) => {
+      const customer = customerById.get(Number(sale.customer_id ?? 0)) || sale.sale_id || "Customer";
+      const apartment = apartmentById.get(Number(sale.apartment_id ?? 0)) || "Apartment";
+      const amount = formatCurrencyFull(revenueForSale(sale));
+      const status = safeStatus(sale.status);
       return {
         id: sale.uuid,
-        desc:
-          notification?.title ||
-          `Deed approval required for ${apartmentName}`,
-        requester: `${customerName} - Sale ${saleId}`,
-        time: relativeTime(notification?.created_at ?? sale.updated_at ?? sale.sale_date),
-        href: `/apartment-sales/${sale.uuid}/financial`,
+        customer,
+        apartment,
+        amount,
+        date: formatDate(sale.sale_date),
+        status: status ? `${status.charAt(0).toUpperCase()}${status.slice(1)}` : "Active",
+        href: sale.uuid ? `/apartment-sales/${sale.uuid}/financial` : "/apartment-sales",
       };
     });
 
-    const totalRentalCount = rentals.length;
-    const rentalStatusCounts = {
-      active: rentals.filter((row) => safeStatus(row.status) === "active").length,
-      advancePending: rentals.filter((row) => safeStatus(row.status) === "advance_pending").length,
-      completed: rentals.filter((row) => safeStatus(row.status) === "completed").length,
+  const approvals = pendingApprovalSales.slice(0, 6).map((sale) => {
+    const notification = latestDeedNotificationBySaleUuid.get(sale.uuid);
+    const saleId = String(sale.sale_id ?? "").trim() || sale.uuid.slice(0, 8).toUpperCase();
+    const customerName = customerById.get(Number(sale.customer_id ?? 0)) || "Customer";
+    const apartmentName = apartmentById.get(Number(sale.apartment_id ?? 0)) || "Apartment";
+
+    return {
+      id: sale.uuid,
+      desc: notification?.title || `Deed approval required for ${apartmentName}`,
+      requester: `${customerName} - Sale ${saleId}`,
+      time: relativeTime(notification?.created_at ?? sale.updated_at ?? sale.sale_date),
+      href: `/apartment-sales/${sale.uuid}/financial`,
     };
+  });
 
-    const nextProgressItems: DashboardProgressItem[] = totalRentalCount
-      ? [
-          {
-            id: "active-rentals",
-            name: "Active Rentals",
-            location: `${rentalStatusCounts.active} active contracts`,
-            progress: percentage(rentalStatusCounts.active, totalRentalCount),
-            status: "Tracking occupied units",
-            href: "/rentals",
-          },
-          {
-            id: "advance-pending",
-            name: "Advance Pending",
-            location: `${rentalStatusCounts.advancePending} contracts waiting for full advance`,
-            progress: percentage(rentalStatusCounts.advancePending, totalRentalCount),
-            status: "Needs collection follow-up",
-            href: "/rentals",
-          },
-          {
-            id: "completed-rentals",
-            name: "Completed Rentals",
-            location: `${rentalStatusCounts.completed} closed successfully`,
-            progress: percentage(rentalStatusCounts.completed, totalRentalCount),
-            status: "Closed rental agreements",
-            href: "/rentals",
-          },
-        ]
-      : [];
+  const totalRentalCount = rentals.length;
+  const rentalStatusCounts = {
+    active: rentals.filter((row) => safeStatus(row.status) === "active").length,
+    advancePending: rentals.filter((row) => safeStatus(row.status) === "advance_pending").length,
+    completed: rentals.filter((row) => safeStatus(row.status) === "completed").length,
+  };
 
-    const notificationActivities = [...notifications]
-      .sort((a, b) => timestampOf(b.created_at) - timestampOf(a.created_at))
-      .slice(0, 5)
-      .map((item) => ({
-        id: item.id,
-        text: item.title || item.message || "Notification update",
-        time: relativeTime(item.created_at),
-        user: item.sale_id ? `Sale ${item.sale_id}` : item.type.split("\\").pop() || "System",
-        type: activityTypeFromNotification(item.category),
-      }));
+  const progressItems: DashboardProgressItem[] = totalRentalCount
+    ? [
+        {
+          id: "active-rentals",
+          name: "Active Rentals",
+          location: `${rentalStatusCounts.active} active contracts`,
+          progress: percentage(rentalStatusCounts.active, totalRentalCount),
+          status: "Tracking occupied units",
+          href: "/rentals",
+        },
+        {
+          id: "advance-pending",
+          name: "Advance Pending",
+          location: `${rentalStatusCounts.advancePending} contracts waiting for full advance`,
+          progress: percentage(rentalStatusCounts.advancePending, totalRentalCount),
+          status: "Needs collection follow-up",
+          href: "/rentals",
+        },
+        {
+          id: "completed-rentals",
+          name: "Completed Rentals",
+          location: `${rentalStatusCounts.completed} closed successfully`,
+          progress: percentage(rentalStatusCounts.completed, totalRentalCount),
+          status: "Closed rental agreements",
+          href: "/rentals",
+        },
+      ]
+    : [];
 
-    const fallbackActivities: DashboardActivity[] = [
-      ...nextRecentSales.slice(0, 3).map((sale) => ({
-        id: `sale-${sale.id}`,
-        text: `Sale recorded for ${sale.apartment}`,
-        time: sale.date,
-        user: sale.customer,
-        type: "sale" as const,
-      })),
-      ...(overdueRows.length
-        ? [
-            {
-              id: "overdue-installments",
-              text: `${overdueRows.length} installments are currently overdue`,
-              time: "live",
-              user: "Collections",
-              type: "alert" as const,
-            },
-          ]
-        : []),
-      ...(rentalsDueSoon
-        ? [
-            {
-              id: "rentals-due-soon",
-              text: `${rentalsDueSoon} rentals have payments due within 7 days`,
-              time: "live",
-              user: "Rentals",
-              type: "payment" as const,
-            },
-          ]
-        : []),
-    ].slice(0, 5);
-
-    const nextSalesChartData = lastSixMonths().map((entry) => ({
-      name: entry.label,
-      sales: Number((salesByMonth.get(entry.key) ?? 0).toFixed(2)),
+  const notificationActivities = [...notifications]
+    .sort((a, b) => timestampOf(b.created_at) - timestampOf(a.created_at))
+    .slice(0, 5)
+    .map((item) => ({
+      id: item.id,
+      text: item.title || item.message || "Notification update",
+      time: relativeTime(item.created_at),
+      user: item.sale_id ? `Sale ${item.sale_id}` : item.type.split("\\").pop() || "System",
+      type: activityTypeFromNotification(item.category),
     }));
 
-    const nextApartmentStatusData: DashboardStatusPoint[] = [
-      { name: "Available", value: apartmentStatuses.available, color: "#3b82f6" },
-      { name: "Sold", value: apartmentStatuses.sold, color: "#10b981" },
-      { name: "Rented", value: apartmentStatuses.rented, color: "#f59e0b" },
-      { name: "Reserved", value: apartmentStatuses.reserved, color: "#a855f7" },
-      { name: "Company Use", value: apartmentStatuses.companyUse, color: "#64748b" },
-    ].filter((item) => item.value > 0);
+  const fallbackActivities: DashboardActivity[] = [
+    ...recentSales.slice(0, 3).map((sale) => ({
+      id: `sale-${sale.id}`,
+      text: `Sale recorded for ${sale.apartment}`,
+      time: sale.date,
+      user: sale.customer,
+      type: "sale" as const,
+    })),
+    ...(overdueRows.length
+      ? [
+          {
+            id: "overdue-installments",
+            text: `${overdueRows.length} installments are currently overdue`,
+            time: "live",
+            user: "Collections",
+            type: "alert" as const,
+          },
+        ]
+      : []),
+    ...(rentalsDueSoon
+      ? [
+          {
+            id: "rentals-due-soon",
+            text: `${rentalsDueSoon} rentals have payments due within 7 days`,
+            time: "live",
+            user: "Rentals",
+            type: "payment" as const,
+          },
+        ]
+      : []),
+  ].slice(0, 5);
 
-    const unreadNotifications = notifications.filter((row) => !row.read_at).length;
-    const nextMetrics: DashboardMetric[] = [
-      {
-        label: "Available Units",
-        value: `${apartmentStatuses.available}`,
-        color: "text-blue-600 dark:text-blue-400",
-        bar: "bg-blue-500",
-        width: percentWidth(apartmentStatuses.available, apartments.length),
-      },
-      {
-        label: "Sold Units",
-        value: `${apartmentStatuses.sold}`,
-        color: "text-emerald-600 dark:text-emerald-400",
-        bar: "bg-emerald-500",
-        width: percentWidth(apartmentStatuses.sold, apartments.length),
-      },
-      {
-        label: "Overdue Rate",
-        value: `${percentage(overdueRows.length, installments.length)}%`,
-        color: "text-amber-600 dark:text-amber-400",
-        bar: "bg-amber-500",
-        width: percentWidth(overdueRows.length, installments.length),
-      },
-      {
-        label: "Unread Alerts",
-        value: `${unreadNotifications}`,
-        color: "text-slate-600 dark:text-slate-400",
-        bar: "bg-slate-500",
-        width: percentWidth(unreadNotifications, notifications.length),
-      },
-    ];
+  const salesChartData = lastSixMonths().map((entry) => ({
+    name: entry.label,
+    sales: Number((salesByMonth.get(entry.key) ?? 0).toFixed(2)),
+  }));
 
-    setSummary({
+  const apartmentStatusData: DashboardStatusPoint[] = [
+    { name: "Available", value: apartmentStatuses.available, color: "#3b82f6" },
+    { name: "Sold", value: apartmentStatuses.sold, color: "#10b981" },
+    { name: "Rented", value: apartmentStatuses.rented, color: "#f59e0b" },
+    { name: "Reserved", value: apartmentStatuses.reserved, color: "#a855f7" },
+    { name: "Company Use", value: apartmentStatuses.companyUse, color: "#64748b" },
+  ].filter((item) => item.value > 0);
+
+  const unreadNotifications = notifications.filter((row) => !row.read_at).length;
+  const metrics: DashboardMetric[] = [
+    {
+      label: "Available Units",
+      value: `${apartmentStatuses.available}`,
+      color: "text-blue-600 dark:text-blue-400",
+      bar: "bg-blue-500",
+      width: percentWidth(apartmentStatuses.available, apartments.length),
+    },
+    {
+      label: "Sold Units",
+      value: `${apartmentStatuses.sold}`,
+      color: "text-emerald-600 dark:text-emerald-400",
+      bar: "bg-emerald-500",
+      width: percentWidth(apartmentStatuses.sold, apartments.length),
+    },
+    {
+      label: "Overdue Rate",
+      value: `${percentage(overdueRows.length, installments.length)}%`,
+      color: "text-amber-600 dark:text-amber-400",
+      bar: "bg-amber-500",
+      width: percentWidth(overdueRows.length, installments.length),
+    },
+    {
+      label: "Unread Alerts",
+      value: `${unreadNotifications}`,
+      color: "text-slate-600 dark:text-slate-400",
+      bar: "bg-slate-500",
+      width: percentWidth(unreadNotifications, notifications.length),
+    },
+  ];
+
+  return {
+    generated_at: nowIso(),
+    summary: {
       totalApartments: apartments.length,
       availableApartments: apartmentStatuses.available,
       soldApartments: apartmentStatuses.sold,
@@ -536,41 +712,117 @@ export function useDashboardData(): DashboardData {
       municipalityPendingCount,
       activeRentals,
       rentalsDueSoon,
-    });
-    setSalesChartData(nextSalesChartData);
-    setApartmentStatusData(nextApartmentStatusData);
-    setRecentSales(nextRecentSales);
-    setApprovals(nextApprovals);
-    setProgressItems(nextProgressItems);
-    setActivities(notificationActivities.length ? notificationActivities : fallbackActivities);
-    setMetrics(nextMetrics);
+    },
+    salesChartData,
+    apartmentStatusData,
+    recentSales,
+    approvals,
+    progressItems,
+    activities: notificationActivities.length ? notificationActivities : fallbackActivities,
+    metrics,
+  };
+}
+
+export function useDashboardData(): DashboardData {
+  const userId = useSelector((state: RootState) => String(state.auth.user?.id ?? "").trim());
+  const [loading, setLoading] = useState(true);
+  const [snapshot, setSnapshot] = useState<DashboardSnapshot>(EMPTY_SNAPSHOT);
+  const [snapshotOwner, setSnapshotOwner] = useState("");
+  const lastRemoteFetchRef = useRef(0);
+
+  const refresh = useCallback(async (options: DashboardRefreshOptions = {}): Promise<void> => {
+    const { force = false, silent = false, preferLocal = false } = options;
+
+    if (!silent) {
+      setLoading(true);
+    }
+
+    let localSnapshot: DashboardSnapshot | null = null;
+    if (preferLocal) {
+      localSnapshot = await buildLocalSnapshot();
+      setSnapshot(localSnapshot);
+      setSnapshotOwner(userId);
+      if (!silent) {
+        setLoading(false);
+      }
+    }
+
+    const cached = !preferLocal && userId ? await readCachedSnapshot(userId) : null;
+    if (cached) {
+      setSnapshot(cached.snapshot);
+      setSnapshotOwner(userId);
+      if (!silent) {
+        setLoading(false);
+      }
+    }
+
+    const shouldFetchRemote =
+      isOnline() &&
+      Boolean(userId) &&
+      (force || !cached || cached.isStale || Date.now() - lastRemoteFetchRef.current >= REMOTE_REFRESH_MIN_INTERVAL_MS);
+
+    if (shouldFetchRemote) {
+      try {
+        lastRemoteFetchRef.current = Date.now();
+        const remoteSnapshot = await fetchRemoteSnapshot();
+        setSnapshot(remoteSnapshot);
+        setSnapshotOwner(userId);
+        await writeCachedSnapshot(userId, remoteSnapshot);
+        setLoading(false);
+        return;
+      } catch {
+        if (cached || localSnapshot) {
+          setLoading(false);
+          return;
+        }
+      }
+    }
+
+    if (cached || localSnapshot) {
+      setLoading(false);
+      return;
+    }
+
+    const fallbackSnapshot = await buildLocalSnapshot();
+    setSnapshot(fallbackSnapshot);
+    setSnapshotOwner(userId);
     setLoading(false);
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void load();
-    }, 0);
+    let disposed = false;
+
+    const runRefresh = (options: DashboardRefreshOptions = {}) => {
+      void refresh(options).catch(() => {
+        if (!disposed) {
+          setLoading(false);
+        }
+      });
+    };
+
+    runRefresh({ force: true });
 
     const unsubscribeInstallments = subscribeAppEvent("installments:changed", () => {
-      void load();
+      runRefresh({ force: isOnline(), silent: true, preferLocal: true });
     });
     const unsubscribeRentals = subscribeAppEvent("rentals:changed", () => {
-      void load();
+      runRefresh({ force: isOnline(), silent: true, preferLocal: true });
     });
     const unsubscribeNotifications = subscribeAppEvent("notifications:changed", () => {
-      void load();
+      runRefresh({ force: isOnline(), silent: true, preferLocal: true });
     });
 
-    const onSyncComplete = () => {
-      void load();
+    const onSyncComplete = (event: Event) => {
+      const detail = (event as CustomEvent<{ syncedAny?: boolean }>).detail;
+      if (!detail?.syncedAny) return;
+      runRefresh({ force: true, silent: true });
     };
     const onOnline = () => {
-      void load();
+      runRefresh({ force: true, silent: true });
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") {
-        void load();
+        runRefresh({ silent: true });
       }
     };
 
@@ -579,7 +831,7 @@ export function useDashboardData(): DashboardData {
     document.addEventListener("visibilitychange", onVisible);
 
     return () => {
-      window.clearTimeout(timer);
+      disposed = true;
       unsubscribeInstallments();
       unsubscribeRentals();
       unsubscribeNotifications();
@@ -587,18 +839,22 @@ export function useDashboardData(): DashboardData {
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [load]);
+  }, [refresh]);
+
+  const visibleSnapshot = snapshotOwner === userId ? snapshot : EMPTY_SNAPSHOT;
 
   return {
     loading,
-    summary,
-    salesChartData,
-    apartmentStatusData,
-    recentSales,
-    approvals,
-    progressItems,
-    activities,
-    metrics,
-    refresh: load,
+    summary: visibleSnapshot.summary,
+    salesChartData: visibleSnapshot.salesChartData,
+    apartmentStatusData: visibleSnapshot.apartmentStatusData,
+    recentSales: visibleSnapshot.recentSales,
+    approvals: visibleSnapshot.approvals,
+    progressItems: visibleSnapshot.progressItems,
+    activities: visibleSnapshot.activities,
+    metrics: visibleSnapshot.metrics,
+    refresh: async () => {
+      await refresh({ force: true });
+    },
   };
 }

@@ -1,22 +1,16 @@
 "use client";
 
-import { useSelector } from "react-redux";
-import { hasAnyPermission, type PermissionRequirement } from "@/lib/permissions";
-import type { RootState } from "@/store/store";
-import { useRouter } from "next/navigation";
 import { useEffect, useMemo } from "react";
+import { useRouter } from "next/navigation";
+import { useSelector } from "react-redux";
+import { isAdminRole } from "@/lib/permissions";
+import type { RootState } from "@/store/store";
 
-export default function RequirePermission({
-  permission,
-  children,
-}: {
-  permission: PermissionRequirement;
-  children: React.ReactNode;
-}) {
+export default function RequireAdmin({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { token, user, hydrated, status } = useSelector((s: RootState) => s.auth);
-  const perms = useMemo(() => user?.permissions || [], [user]);
-  const allowed = useMemo(() => hasAnyPermission(perms, permission), [perms, permission]);
+  const roles = useMemo(() => user?.roles ?? [], [user]);
+  const allowed = useMemo(() => isAdminRole(roles), [roles]);
   const waitingForUser = Boolean(token) && !user && (status === "loading" || status === "idle");
 
   useEffect(() => {

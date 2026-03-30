@@ -63,6 +63,11 @@ function setLs(key: string, value: string): void {
   window.localStorage.setItem(key, value);
 }
 
+function removeLs(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
+}
+
 function getLsNum(key: string): number | null {
   const raw = getLs(key);
   if (!raw) return null;
@@ -351,7 +356,12 @@ export async function customersPullToLocal(): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
   const shouldRunImageBackfill = !getLs(IMAGE_BACKFILL_KEY);
-  const since = shouldRunImageBackfill ? null : getLs(CURSOR_KEY);
+  const cachedSince = shouldRunImageBackfill ? null : getLs(CURSOR_KEY);
+  const localCount = await db.customers.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    removeLs(CURSOR_KEY);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();

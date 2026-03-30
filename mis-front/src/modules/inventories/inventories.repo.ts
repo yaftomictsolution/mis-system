@@ -65,6 +65,8 @@ export type MaterialInput = {
   material_type?: string | null;
   unit: string;
   quantity: number;
+  reference_unit_price?: number | null;
+  opening_warehouse_id?: number | null;
   supplier_id?: number | null;
   batch_no?: string | null;
   serial_no?: string | null;
@@ -78,11 +80,13 @@ export type CompanyAssetInput = {
   asset_code: string;
   asset_name: string;
   asset_type: string;
+  quantity: number;
   supplier_id?: number | null;
   serial_no?: string | null;
   status?: string;
   current_employee_id?: number | null;
   current_project_id?: number | null;
+  current_warehouse_id?: number | null;
   notes?: string | null;
 };
 
@@ -115,6 +119,11 @@ function lsGet(key: string): string | null {
 function lsSet(key: string, value: string): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(key, value);
+}
+
+function lsRemove(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
 }
 
 function lsNum(key: string): number | null {
@@ -270,6 +279,12 @@ async function getVendorSnapshot(vendorId: number): Promise<VendorRow | undefine
   return db.vendors.where("updated_at").above(0).filter((item) => Number(item.id) === vendorId).first();
 }
 
+async function getWarehouseSnapshot(warehouseId: number): Promise<WarehouseRow | undefined> {
+  const direct = await db.warehouses.filter((item) => Number(item.id) === warehouseId).first();
+  if (direct) return direct;
+  return db.warehouses.where("updated_at").above(0).filter((item) => Number(item.id) === warehouseId).first();
+}
+
 async function getEmployeeSnapshot(employeeId: number): Promise<EmployeeRow | undefined> {
   const direct = await db.employees.filter((item) => Number(item.id) === employeeId).first();
   if (direct) return direct;
@@ -280,6 +295,27 @@ async function getProjectSnapshot(projectId: number): Promise<ProjectRow | undef
   const direct = await db.projects.filter((item) => Number(item.id) === projectId).first();
   if (direct) return direct;
   return db.projects.where("updated_at").above(0).filter((item) => Number(item.id) === projectId).first();
+}
+
+async function getWarehouseDecorators(warehouseId: number | null): Promise<{
+  current_warehouse_id: number | null;
+  current_warehouse_uuid: string | null;
+  current_warehouse_name: string | null;
+}> {
+  if (!warehouseId || warehouseId <= 0) {
+    return { current_warehouse_id: null, current_warehouse_uuid: null, current_warehouse_name: null };
+  }
+
+  const warehouse = await getWarehouseSnapshot(warehouseId);
+  if (!warehouse) {
+    return { current_warehouse_id: warehouseId, current_warehouse_uuid: null, current_warehouse_name: null };
+  }
+
+  return {
+    current_warehouse_id: warehouseId,
+    current_warehouse_uuid: warehouse.uuid || null,
+    current_warehouse_name: warehouse.name || null,
+  };
 }
 
 async function getVendorDecorators(vendorId: number | null): Promise<{
@@ -378,6 +414,7 @@ function matchesCompanyAssetSearch(row: CompanyAssetRow, query: string): boolean
     row.supplier_name,
     row.current_employee_name,
     row.current_project_name,
+    row.current_warehouse_name,
     row.serial_no,
     row.status,
   ].some((value) => String(value ?? "").toLowerCase().includes(query));
@@ -445,6 +482,12 @@ function sanitizeMaterial(input: unknown): MaterialRow {
     material_type: trimOrNull(record.material_type, 255),
     unit: trimText(record.unit, 100),
     quantity: Math.max(0, toMoney(record.quantity)),
+    reference_unit_price:
+      record.reference_unit_price === null || record.reference_unit_price === undefined || String(record.reference_unit_price).trim() === ""
+        ? null
+        : Math.max(0, toMoney(record.reference_unit_price)),
+    has_warehouse_stock: Boolean(record.has_warehouse_stock),
+    legacy_quantity: Math.max(0, toMoney(record.legacy_quantity)),
     supplier_id: toNullableId(record.supplier_id),
     supplier_uuid: trimOrNull(record.supplier_uuid, 100),
     supplier_name: trimOrNull(record.supplier_name, 255),
@@ -468,6 +511,11 @@ function sanitizeCompanyAsset(input: unknown): CompanyAssetRow {
     asset_code: trimText(record.asset_code, 100),
     asset_name: trimText(record.asset_name, 255),
     asset_type: normalizeAssetType(record.asset_type),
+    quantity: Math.max(0, toMoney(record.quantity)),
+    allocated_quantity: Math.max(0, toMoney(record.allocated_quantity)),
+    maintenance_quantity: Math.max(0, toMoney(record.maintenance_quantity)),
+    damaged_quantity: Math.max(0, toMoney(record.damaged_quantity)),
+    retired_quantity: Math.max(0, toMoney(record.retired_quantity)),
     supplier_id: toNullableId(record.supplier_id),
     supplier_uuid: trimOrNull(record.supplier_uuid, 100),
     supplier_name: trimOrNull(record.supplier_name, 255),
@@ -479,6 +527,9 @@ function sanitizeCompanyAsset(input: unknown): CompanyAssetRow {
     current_project_id: toNullableId(record.current_project_id),
     current_project_uuid: trimOrNull(record.current_project_uuid, 100),
     current_project_name: trimOrNull(record.current_project_name, 255),
+    current_warehouse_id: toNullableId(record.current_warehouse_id),
+    current_warehouse_uuid: trimOrNull(record.current_warehouse_uuid, 100),
+    current_warehouse_name: trimOrNull(record.current_warehouse_name, 255),
     notes: trimOrNull(record.notes, 5000),
     created_at: toTs(record.created_at ?? record.updated_at),
     updated_at: toTs(record.updated_at ?? record.created_at),
@@ -500,11 +551,14 @@ async function decorateCompanyAsset(row: CompanyAssetRow): Promise<CompanyAssetR
     row.current_employee_name && row.current_employee_uuid ? {} : await getEmployeeDecorators(row.current_employee_id ?? null);
   const projectDecorators =
     row.current_project_name && row.current_project_uuid ? {} : await getProjectDecorators(row.current_project_id ?? null);
+  const warehouseDecorators =
+    row.current_warehouse_name && row.current_warehouse_uuid ? {} : await getWarehouseDecorators(row.current_warehouse_id ?? null);
   return {
     ...row,
     ...supplierDecorators,
     ...employeeDecorators,
     ...projectDecorators,
+    ...warehouseDecorators,
   };
 }
 async function listLocal<Row extends { uuid: string; updated_at: number }>(
@@ -559,7 +613,12 @@ async function pullToLocal<Row extends { uuid: string; updated_at: number }>(
 ): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = lsGet(config.cursorKey);
+  const cachedSince = lsGet(config.cursorKey);
+  const localCount = await config.table.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    lsRemove(config.cursorKey);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();
@@ -613,6 +672,7 @@ async function createEntity<Row extends { uuid: string }, Payload extends Obj>(o
   payload: Payload;
   sanitizeSaved: (input: unknown) => Promise<Row> | Row;
   label: string;
+  notify?: boolean;
 }): Promise<Row> {
   if (!isOnline()) {
     await options.table.put(options.row);
@@ -623,7 +683,9 @@ async function createEntity<Row extends { uuid: string }, Payload extends Obj>(o
       action: "create",
       payload: options.payload,
     });
-    notifySuccess(`${options.label} saved offline. It will sync when online.`);
+    if (options.notify !== false) {
+      notifySuccess(`${options.label} saved offline. It will sync when online.`);
+    }
     return options.row;
   }
 
@@ -631,12 +693,16 @@ async function createEntity<Row extends { uuid: string }, Payload extends Obj>(o
     const response = await api.post(options.endpoint, { uuid: options.row.uuid, ...options.payload });
     const saved = await options.sanitizeSaved(obj(response.data).data ?? options.row);
     await options.table.put(saved);
-    notifySuccess(`${options.label} created successfully.`);
+    if (options.notify !== false) {
+      notifySuccess(`${options.label} created successfully.`);
+    }
     return saved;
   } catch (error: unknown) {
     if (isValidationError(getApiStatus(error))) {
       const message = getApiErrorMessage(error);
-      notifyError(message);
+      if (options.notify !== false) {
+        notifyError(message);
+      }
       throw new Error(message);
     }
 
@@ -648,7 +714,9 @@ async function createEntity<Row extends { uuid: string }, Payload extends Obj>(o
       action: "create",
       payload: options.payload,
     });
-    notifyInfo(`${options.label} saved locally. Server sync will retry later.`);
+    if (options.notify !== false) {
+      notifyInfo(`${options.label} saved locally. Server sync will retry later.`);
+    }
     return options.row;
   }
 }
@@ -753,6 +821,13 @@ function validateMaterialInput(input: MaterialInput): void {
   if (!Number.isFinite(input.min_stock_level ?? 0) || (input.min_stock_level ?? 0) < 0) {
     throw new Error("Minimum stock level must be 0 or greater.");
   }
+  if (
+    input.reference_unit_price !== null &&
+    input.reference_unit_price !== undefined &&
+    (!Number.isFinite(input.reference_unit_price) || input.reference_unit_price < 0)
+  ) {
+    throw new Error("Reference unit price must be 0 or greater.");
+  }
 }
 
 function validateCompanyAssetInput(input: CompanyAssetInput): void {
@@ -764,6 +839,9 @@ function validateCompanyAssetInput(input: CompanyAssetInput): void {
   }
   if (!["vehicle", "machine", "tool", "IT"].includes(input.asset_type)) {
     throw new Error("Asset type is invalid.");
+  }
+  if (!Number.isFinite(input.quantity) || input.quantity < 0) {
+    throw new Error("Asset quantity must be 0 or greater.");
   }
 }
 function toVendorPayload(input: VendorInput): Obj {
@@ -790,6 +868,11 @@ function toMaterialPayload(input: MaterialInput): Obj {
     material_type: trimOrNull(input.material_type, 255),
     unit: trimText(input.unit, 100),
     quantity: Math.max(0, toMoney(input.quantity)),
+    reference_unit_price:
+      input.reference_unit_price === null || input.reference_unit_price === undefined
+        ? null
+        : Math.max(0, toMoney(input.reference_unit_price)),
+    opening_warehouse_id: toNullableId(input.opening_warehouse_id),
     supplier_id: toNullableId(input.supplier_id),
     batch_no: trimOrNull(input.batch_no, 255),
     serial_no: trimOrNull(input.serial_no, 255),
@@ -805,11 +888,13 @@ function toCompanyAssetPayload(input: CompanyAssetInput): Obj {
     asset_code: trimText(input.asset_code, 100),
     asset_name: trimText(input.asset_name, 255),
     asset_type: input.asset_type === "IT" ? "IT" : String(input.asset_type).trim().toLowerCase(),
+    quantity: Math.max(0, toMoney(input.quantity)),
     supplier_id: toNullableId(input.supplier_id),
     serial_no: trimOrNull(input.serial_no, 255),
     status: normalizeAssetStatus(input.status),
     current_employee_id: toNullableId(input.current_employee_id),
     current_project_id: toNullableId(input.current_project_id),
+    current_warehouse_id: toNullableId(input.current_warehouse_id),
     notes: trimOrNull(input.notes, 5000),
   };
 }
@@ -1087,7 +1172,32 @@ export async function materialDelete(uuid: string): Promise<void> {
   });
 }
 
-export async function companyAssetCreate(input: CompanyAssetInput): Promise<CompanyAssetRow> {
+export async function materialAssignLegacyStock(
+  uuid: string,
+  warehouseId: number,
+  notes?: string | null,
+): Promise<MaterialRow> {
+  if (!isOnline()) {
+    throw new Error("Assigning legacy stock to a warehouse requires an online connection.");
+  }
+
+  try {
+    const response = await api.post(`/api/materials/${uuid}/assign-stock`, {
+      warehouse_id: toId(warehouseId),
+      notes: trimOrNull(notes, 5000),
+    });
+    const saved = await decorateMaterial(sanitizeMaterial(obj(response.data).data));
+    await db.materials.put(saved);
+    notifySuccess("Legacy material stock assigned to warehouse successfully.");
+    return saved;
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
+async function createCompanyAssetInternal(input: CompanyAssetInput, options?: { notify?: boolean }): Promise<CompanyAssetRow> {
   validateCompanyAssetInput(input);
   const uuid = crypto.randomUUID();
   const payload = toCompanyAssetPayload(input);
@@ -1109,7 +1219,12 @@ export async function companyAssetCreate(input: CompanyAssetInput): Promise<Comp
     payload,
     sanitizeSaved: async (value) => decorateCompanyAsset(sanitizeCompanyAsset(value)),
     label: "Company asset",
+    notify: options?.notify,
   });
+}
+
+export async function companyAssetCreate(input: CompanyAssetInput): Promise<CompanyAssetRow> {
+  return createCompanyAssetInternal(input);
 }
 
 export async function companyAssetUpdate(uuid: string, input: CompanyAssetInput): Promise<CompanyAssetRow> {

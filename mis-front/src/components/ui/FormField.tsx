@@ -15,6 +15,7 @@ interface FormFieldProps {
   placeholder?: string
   required?: boolean
   rows?: number
+  disabled?: boolean
 }
 
 const baseInputClasses =
@@ -30,7 +31,10 @@ export function FormField({
   placeholder,
   required,
   rows = 3,
+  disabled = false,
 }: FormFieldProps) {
+  const inputClasses = `${baseInputClasses} ${disabled ? 'cursor-not-allowed opacity-60' : ''}`
+
   return (
     <div className="space-y-1.5">
       <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
@@ -41,7 +45,8 @@ export function FormField({
           <select
             value={value}
             onChange={(e) => onChange(e.target.value)}
-            className={`${baseInputClasses} appearance-none cursor-pointer`}
+            className={`${inputClasses} appearance-none ${disabled ? '' : 'cursor-pointer'}`}
+            disabled={disabled}
           >
             <option value="" disabled>
               {placeholder || 'Select an option'}
@@ -64,7 +69,8 @@ export function FormField({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           rows={rows}
-          className={baseInputClasses}
+          className={inputClasses}
+          disabled={disabled}
         />
       ) : (
         <input
@@ -72,7 +78,8 @@ export function FormField({
           value={value}
           onChange={(e) => onChange(type === 'number' ? Number(e.target.value) : e.target.value)}
           placeholder={placeholder}
-          className={baseInputClasses}
+          className={inputClasses}
+          disabled={disabled}
         />
       )}
       {error && <p className="text-xs text-red-500 mt-1">{error}</p>}

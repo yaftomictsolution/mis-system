@@ -10,13 +10,14 @@ import { listDynamicCacheRoutes, warmRouteForOffline } from "@/pwa/cacheWarm";
 export function usePrecacheRoutes() {
   const token = useSelector((s: RootState) => s.auth.token);
   const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
+  const roles = useSelector((s: RootState) => s.auth.user?.roles ?? []);
   const router = useRouter();
 
   useEffect(() => {
     if (!token) return;
 
     const warm = async () => {
-      const staticRoutes = getCacheRoutesForPermissions(permissions);
+      const staticRoutes = getCacheRoutesForPermissions(permissions, roles);
       const dynamicRoutes = await listDynamicCacheRoutes(permissions).catch(() => []);
       const allPaths = [...new Set([...staticRoutes.map((route) => route.path), ...dynamicRoutes.map((route) => route.path)])];
 
@@ -42,5 +43,5 @@ export function usePrecacheRoutes() {
       window.removeEventListener("sync:complete", onSyncComplete as EventListener);
       window.removeEventListener("online", onOnline);
     };
-  }, [permissions, router, token]);
+  }, [permissions, roles, router, token]);
 }

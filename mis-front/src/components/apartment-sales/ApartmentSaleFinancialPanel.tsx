@@ -126,9 +126,9 @@ export default function ApartmentSaleFinancialPanel({
   companyInstallmentRows,
   companyInstallmentLoading,
 }: ApartmentSaleFinancialPanelProps) {
+  const [receiptModalOpen, setReceiptModalOpen] = useState(false);
   if (!open) return null;
 
-  const [receiptModalOpen, setReceiptModalOpen] = useState(false);
   const remainingMunicipality = Number(financial?.remaining_municipality ?? 0);
   const canAddReceipt = Number.isFinite(remainingMunicipality) && remainingMunicipality > 0;
 

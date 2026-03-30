@@ -2,6 +2,7 @@
 
 import { db } from "@/db/localDB";
 import type { CacheRoute } from "@/config/cacheRoutes";
+import { hasAnyPermission } from "@/lib/permissions";
 
 function normalizePath(path: string): string {
   if (!path) return "/";
@@ -28,14 +29,10 @@ async function waitForServiceWorkerReady(timeoutMs = 8000): Promise<void> {
   });
 }
 
-function hasPermission(permissions: string[], permission: string): boolean {
-  return permissions.includes(permission);
-}
-
 export async function listDynamicCacheRoutes(permissions: string[] = []): Promise<CacheRoute[]> {
   const routeMap = new Map<string, string>();
 
-  if (hasPermission(permissions, "customers.view")) {
+  if (hasAnyPermission(permissions, "customers.view")) {
     const customers = await db.customers.toArray();
     for (const customer of customers) {
       const uuid = String(customer.uuid ?? "").trim();
@@ -45,7 +42,7 @@ export async function listDynamicCacheRoutes(permissions: string[] = []): Promis
     }
   }
 
-  if (hasPermission(permissions, "sales.create")) {
+  if (hasAnyPermission(permissions, "sales.create")) {
     const sales = await db.apartment_sales.toArray();
     for (const sale of sales) {
       const uuid = String(sale.uuid ?? "").trim();
@@ -57,7 +54,7 @@ export async function listDynamicCacheRoutes(permissions: string[] = []): Promis
     }
   }
 
-  if (hasPermission(permissions, "payroll.view")) {
+  if (hasAnyPermission(permissions, "payroll.view")) {
     const salaryPayments = await db.salary_payments.toArray();
     for (const payment of salaryPayments) {
       const uuid = String(payment.uuid ?? "").trim();
@@ -67,7 +64,7 @@ export async function listDynamicCacheRoutes(permissions: string[] = []): Promis
     }
   }
 
-  if (hasPermission(permissions, "inventory.request")) {
+  if (hasAnyPermission(permissions, ["material_requests.view", "inventory.request"])) {
     const materialRequests = await db.material_requests.toArray();
     for (const request of materialRequests) {
       const uuid = String(request.uuid ?? "").trim();
