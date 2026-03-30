@@ -9,9 +9,8 @@ import { DataTable, type Column } from "@/components/ui/DataTable";
 import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
-import type { CompanyAssetRow, EmployeeRow, MaterialRow, ProjectRow, VendorRow, WarehouseRow } from "@/db/localDB";
+import type { CompanyAssetRow, MaterialRow, VendorRow, WarehouseRow } from "@/db/localDB";
 import { notifyError } from "@/lib/notify";
-import { employeePullToLocal, employeesListLocal } from "@/modules/employees/employees.repo";
 import {
   companyAssetCreate,
   companyAssetDelete,
@@ -38,20 +37,14 @@ import {
   type VendorInput,
   type WarehouseInput,
 } from "@/modules/inventories/inventories.repo";
-import { projectsListLocal, projectsPullToLocal } from "@/modules/projects/projects.repo";
 
 type InventoryTab = "materials" | "assets" | "warehouses" | "vendors";
-type InventorySyncEntity = "vendors" | "warehouses" | "materials" | "company_assets" | "employees" | "projects";
+type InventorySyncEntity = "vendors" | "warehouses" | "materials" | "company_assets";
 
 type SyncCompleteDetail = {
   syncedAny?: boolean;
   cleaned?: boolean;
   entities?: string[];
-};
-
-type EmployeeOption = {
-  id: number;
-  label: string;
 };
 
 type VendorFormState = {
@@ -73,9 +66,12 @@ type MaterialFormState = {
   material_type: string;
   unit: string;
   quantity: string;
+  reference_unit_price: string;
+  opening_warehouse_id: string;
   supplier_id: string;
   batch_no: string;
   serial_no: string;
+  track_expiry: "yes" | "no";
   expiry_date: string;
   min_stock_level: string;
   status: "active" | "inactive";
@@ -86,11 +82,13 @@ type AssetFormState = {
   asset_code: string;
   asset_name: string;
   asset_type: "vehicle" | "machine" | "tool" | "IT";
+  quantity: string;
   supplier_id: string;
   serial_no: string;
   status: "available" | "allocated" | "maintenance" | "damaged" | "retired";
   current_employee_id: string;
   current_project_id: string;
+  current_warehouse_id: string;
   notes: string;
 };
 
@@ -106,8 +104,6 @@ const INVENTORY_SYNC_ENTITIES = new Set<InventorySyncEntity>([
   "warehouses",
   "materials",
   "company_assets",
-  "employees",
-  "projects",
 ]);
 
 function formatDate(value?: number | null): string {
@@ -117,6 +113,15 @@ function formatDate(value?: number | null): string {
 
 function formatQuantity(value: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(Number(value || 0));
+}
+
+function formatUsd(value?: number | null): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(value || 0));
 }
 
 function createEmptyVendorForm(): VendorFormState {
@@ -133,9 +138,12 @@ function createEmptyMaterialForm(): MaterialFormState {
     material_type: "",
     unit: "pcs",
     quantity: "0",
+    reference_unit_price: "",
+    opening_warehouse_id: "",
     supplier_id: "",
     batch_no: "",
     serial_no: "",
+    track_expiry: "no",
     expiry_date: "",
     min_stock_level: "0",
     status: "active",
@@ -148,11 +156,13 @@ function createEmptyAssetForm(): AssetFormState {
     asset_code: "",
     asset_name: "",
     asset_type: "tool",
+    quantity: "0",
     supplier_id: "",
     serial_no: "",
     status: "available",
     current_employee_id: "",
     current_project_id: "",
+    current_warehouse_id: "",
     notes: "",
   };
 }
@@ -181,9 +191,13 @@ function normalizeMaterialForm(row: MaterialRow): MaterialFormState {
     material_type: row.material_type || "",
     unit: row.unit || "pcs",
     quantity: String(row.quantity ?? 0),
+    reference_unit_price:
+      row.reference_unit_price !== null && row.reference_unit_price !== undefined ? String(row.reference_unit_price) : "",
+    opening_warehouse_id: "",
     supplier_id: row.supplier_id ? String(row.supplier_id) : "",
     batch_no: row.batch_no || "",
     serial_no: row.serial_no || "",
+    track_expiry: row.expiry_date ? "yes" : "no",
     expiry_date: row.expiry_date ? new Date(row.expiry_date).toISOString().slice(0, 10) : "",
     min_stock_level: String(row.min_stock_level ?? 0),
     status: row.status === "inactive" ? "inactive" : "active",
@@ -203,16 +217,19 @@ function normalizeAssetForm(row: CompanyAssetRow): AssetFormState {
     asset_code: row.asset_code || "",
     asset_name: row.asset_name || "",
     asset_type: assetType,
+    quantity: String(row.quantity ?? 0),
     supplier_id: row.supplier_id ? String(row.supplier_id) : "",
     serial_no: row.serial_no || "",
     status,
     current_employee_id: row.current_employee_id ? String(row.current_employee_id) : "",
     current_project_id: row.current_project_id ? String(row.current_project_id) : "",
+    current_warehouse_id: row.current_warehouse_id ? String(row.current_warehouse_id) : "",
     notes: row.notes || "",
   };
 }
 
 function materialBadge(row: MaterialRow) {
+  if (Number(row.legacy_quantity ?? 0) > 0) return <Badge color="amber">assign warehouse stock</Badge>;
   const isLowStock = Number(row.quantity ?? 0) <= Number(row.min_stock_level ?? 0) && Number(row.min_stock_level ?? 0) > 0;
   if (row.status === "inactive") return <Badge color="slate">inactive</Badge>;
   return isLowStock ? <Badge color="amber">low stock</Badge> : <Badge color="emerald">available</Badge>;
@@ -231,12 +248,10 @@ export default function InventoriesPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [vendors, setVendors] = useState<VendorRow[]>([]);
   const [warehouses, setWarehouses] = useState<WarehouseRow[]>([]);
   const [materials, setMaterials] = useState<MaterialRow[]>([]);
   const [assets, setAssets] = useState<CompanyAssetRow[]>([]);
-  const [projects, setProjects] = useState<ProjectRow[]>([]);
 
   const [vendorFormOpen, setVendorFormOpen] = useState(false);
   const [warehouseFormOpen, setWarehouseFormOpen] = useState(false);
@@ -260,36 +275,23 @@ export default function InventoriesPage() {
   const [pendingDelete, setPendingDelete] = useState<DeleteState | null>(null);
 
   const loadLocal = useCallback(async () => {
-    const [employeePage, vendorPage, warehousePage, materialPage, assetPage, projectPage] = await Promise.all([
-      employeesListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+    const [vendorPage, warehousePage, materialPage, assetPage] = await Promise.all([
       vendorsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       warehousesListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       materialsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       companyAssetsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
-      projectsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
     ]);
-
-    const employeeOptions = employeePage.items
-      .filter((item) => Number(item.id) > 0)
-      .map((item: EmployeeRow) => ({
-        id: Number(item.id),
-        label: [item.first_name, item.last_name].filter(Boolean).join(" ").trim() || item.email,
-      }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-
-    setEmployees(employeeOptions);
     setVendors(vendorPage.items);
     setWarehouses(warehousePage.items);
     setMaterials(materialPage.items);
     setAssets(assetPage.items);
-    setProjects(projectPage.items);
   }, []);
 
   const refresh = useCallback(
     async (options?: { showLoader?: boolean; showFailureToast?: boolean; entitiesToPull?: InventorySyncEntity[] }) => {
       const showLoader = options?.showLoader ?? true;
       const showFailureToast = options?.showFailureToast ?? true;
-      const entitiesToPull = options?.entitiesToPull ?? ["vendors", "warehouses", "employees", "materials", "company_assets", "projects"];
+      const entitiesToPull = options?.entitiesToPull ?? ["vendors", "warehouses", "materials", "company_assets"];
 
       if (showLoader) {
         setLoading(true);
@@ -305,17 +307,15 @@ export default function InventoriesPage() {
         try {
           if (entitiesToPull.includes("vendors")) await vendorsPullToLocal();
           if (entitiesToPull.includes("warehouses")) await warehousesPullToLocal();
-          if (entitiesToPull.includes("employees")) await employeePullToLocal();
           if (entitiesToPull.includes("materials")) await materialsPullToLocal();
           if (entitiesToPull.includes("company_assets")) await companyAssetsPullToLocal();
-          if (entitiesToPull.includes("projects")) await projectsPullToLocal();
         } catch {
           pullFailed = true;
         }
 
         await loadLocal();
 
-        if (showFailureToast && pullFailed && vendors.length === 0 && warehouses.length === 0 && materials.length === 0 && assets.length === 0 && projects.length === 0) {
+        if (showFailureToast && pullFailed && vendors.length === 0 && warehouses.length === 0 && materials.length === 0 && assets.length === 0) {
           notifyError("Unable to refresh inventory data from server. Using local data only.");
         }
       } finally {
@@ -324,7 +324,7 @@ export default function InventoriesPage() {
         }
       }
     },
-    [assets.length, loadLocal, materials.length, projects.length, vendors.length, warehouses.length]
+    [assets.length, loadLocal, materials.length, vendors.length, warehouses.length]
   );
 
   useEffect(() => {
@@ -359,22 +359,19 @@ export default function InventoriesPage() {
     [vendors]
   );
 
-  const projectOptions = useMemo(
-    () => projects.map((item) => ({ value: String(item.id ?? ""), label: item.name })),
-    [projects]
-  );
-
-  const employeeOptions = useMemo(
-    () => employees.map((item) => ({ value: String(item.id), label: item.label })),
-    [employees]
-  );
-
   const summary = useMemo(() => {
     const lowStockCount = materials.filter(
       (item) => Number(item.min_stock_level ?? 0) > 0 && Number(item.quantity ?? 0) <= Number(item.min_stock_level ?? 0)
     ).length;
-    const availableAssets = assets.filter((item) => item.status === "available").length;
-    const attentionAssets = assets.filter((item) => ["allocated", "maintenance", "damaged"].includes(item.status)).length;
+    const availableAssets = assets.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
+    const attentionAssets = assets.reduce(
+      (sum, item) =>
+        sum +
+        Number(item.allocated_quantity ?? 0) +
+        Number(item.maintenance_quantity ?? 0) +
+        Number(item.damaged_quantity ?? 0),
+      0
+    );
 
     return {
       vendorCount: vendors.length,
@@ -543,10 +540,12 @@ export default function InventoriesPage() {
         material_type: materialForm.material_type,
         unit: materialForm.unit,
         quantity: Number(materialForm.quantity || 0),
+        reference_unit_price: materialForm.reference_unit_price === "" ? null : Number(materialForm.reference_unit_price || 0),
+        opening_warehouse_id: materialForm.opening_warehouse_id ? Number(materialForm.opening_warehouse_id) : null,
         supplier_id: materialForm.supplier_id ? Number(materialForm.supplier_id) : null,
         batch_no: materialForm.batch_no,
         serial_no: materialForm.serial_no,
-        expiry_date: materialForm.expiry_date || null,
+        expiry_date: materialForm.track_expiry === "yes" ? materialForm.expiry_date || null : null,
         min_stock_level: Number(materialForm.min_stock_level || 0),
         status: materialForm.status,
         notes: materialForm.notes,
@@ -572,15 +571,18 @@ export default function InventoriesPage() {
     setSaving(true);
     setAssetFormError(null);
     try {
+      const quantity = Math.max(0, Number(assetForm.quantity || 0));
       const payload: CompanyAssetInput = {
         asset_code: assetForm.asset_code,
         asset_name: assetForm.asset_name,
         asset_type: assetForm.asset_type,
+        quantity,
         supplier_id: assetForm.supplier_id ? Number(assetForm.supplier_id) : null,
         serial_no: assetForm.serial_no,
         status: assetForm.status,
         current_employee_id: assetForm.current_employee_id ? Number(assetForm.current_employee_id) : null,
         current_project_id: assetForm.current_project_id ? Number(assetForm.current_project_id) : null,
+        current_warehouse_id: assetForm.current_warehouse_id ? Number(assetForm.current_warehouse_id) : null,
         notes: assetForm.notes,
       };
 
@@ -645,9 +647,10 @@ export default function InventoriesPage() {
       { key: "material_type", label: "Type", render: (item) => item.material_type || "-" },
       { key: "supplier_name", label: "Supplier", render: (item) => item.supplier_name || "-" },
       { key: "unit", label: "Unit", render: (item) => item.unit || "-" },
+      { key: "reference_unit_price", label: "Ref. Price", render: (item) => (item.reference_unit_price != null ? formatUsd(item.reference_unit_price) : "-") },
       { key: "quantity", label: "Quantity", render: (item) => formatQuantity(Number(item.quantity ?? 0)) },
       { key: "stock_status", label: "Stock Status", render: (item) => materialBadge(item) },
-      { key: "expiry_date", label: "Expiry", render: (item) => formatDate(item.expiry_date) },
+      { key: "expiry_date", label: "Expiry", render: (item) => (item.expiry_date ? formatDate(item.expiry_date) : "No expiry") },
     ],
     []
   );
@@ -658,8 +661,10 @@ export default function InventoriesPage() {
       { key: "asset_name", label: "Asset", render: (item) => item.asset_name || "-" },
       { key: "asset_type", label: "Type", render: (item) => item.asset_type || "-" },
       { key: "supplier_name", label: "Supplier", render: (item) => item.supplier_name || "-" },
-      { key: "current_employee_name", label: "Assigned To", render: (item) => item.current_employee_name || "-" },
-      { key: "current_project_name", label: "Project", render: (item) => item.current_project_name || "-" },
+      { key: "current_warehouse_name", label: "Warehouse", render: (item) => item.current_warehouse_name || "-" },
+      { key: "quantity", label: "Available Qty", render: (item) => formatQuantity(Number(item.quantity ?? 0)) },
+      { key: "allocated_quantity", label: "Allocated Qty", render: (item) => formatQuantity(Number(item.allocated_quantity ?? 0)) },
+      { key: "damaged_quantity", label: "Damaged Qty", render: (item) => formatQuantity(Number(item.damaged_quantity ?? 0)) },
       { key: "status", label: "Status", render: (item) => assetBadge(item.status) },
       { key: "updated_at", label: "Updated", render: (item) => formatDate(item.updated_at) },
     ],
@@ -705,7 +710,7 @@ export default function InventoriesPage() {
           loading={loading}
           onEdit={openAssetEdit}
           onDelete={(row) => setPendingDelete({ tab: "assets", row })}
-          searchKeys={["asset_code", "asset_name", "asset_type", "supplier_name", "current_employee_name", "current_project_name", "status"]}
+          searchKeys={["asset_code", "asset_name", "asset_type", "supplier_name", "current_warehouse_name", "current_employee_name", "current_project_name", "status"]}
           pageSize={TABLE_PAGE_SIZE}
           compact
         />
@@ -742,7 +747,7 @@ export default function InventoriesPage() {
   ]);
 
   return (
-    <RequirePermission permission="inventory.request">
+    <RequirePermission permission={["inventory_master.view", "inventory.request"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader
           title="Inventory & Assets"
@@ -872,7 +877,30 @@ export default function InventoriesPage() {
             <FormField label="Material Name" value={materialForm.name} onChange={(value) => setMaterialForm((prev) => ({ ...prev, name: String(value) }))} required />
             <FormField label="Type" value={materialForm.material_type} onChange={(value) => setMaterialForm((prev) => ({ ...prev, material_type: String(value) }))} placeholder="cement, cable, steel..." />
             <FormField label="Unit" value={materialForm.unit} onChange={(value) => setMaterialForm((prev) => ({ ...prev, unit: String(value) }))} required />
-            <FormField label="Quantity" type="number" value={materialForm.quantity} onChange={(value) => setMaterialForm((prev) => ({ ...prev, quantity: String(value) }))} required />
+            <FormField
+              label="Reference Unit Price (USD)"
+              type="number"
+              value={materialForm.reference_unit_price}
+              onChange={(value) => setMaterialForm((prev) => ({ ...prev, reference_unit_price: String(value) }))}
+              placeholder="Optional"
+            />
+            <FormField
+              label={editingMaterial?.has_warehouse_stock ? "Warehouse Managed Stock" : "Opening Quantity"}
+              type="number"
+              value={materialForm.quantity}
+              onChange={(value) => setMaterialForm((prev) => ({ ...prev, quantity: String(value) }))}
+              disabled={Boolean(editingMaterial?.has_warehouse_stock)}
+              required
+            />
+            <FormField
+              label={editingMaterial?.has_warehouse_stock ? "Opening Warehouse (Locked)" : "Opening Warehouse"}
+              type="select"
+              value={materialForm.opening_warehouse_id}
+              onChange={(value) => setMaterialForm((prev) => ({ ...prev, opening_warehouse_id: String(value) }))}
+              options={warehouses.map((item) => ({ value: String(item.id ?? ""), label: item.name }))}
+              placeholder="Select warehouse"
+              disabled={Boolean(editingMaterial?.has_warehouse_stock)}
+            />
             <FormField label="Min Stock Level" type="number" value={materialForm.min_stock_level} onChange={(value) => setMaterialForm((prev) => ({ ...prev, min_stock_level: String(value) }))} required />
             <FormField
               label="Supplier"
@@ -884,7 +912,30 @@ export default function InventoriesPage() {
             />
             <FormField label="Batch No" value={materialForm.batch_no} onChange={(value) => setMaterialForm((prev) => ({ ...prev, batch_no: String(value) }))} />
             <FormField label="Serial No" value={materialForm.serial_no} onChange={(value) => setMaterialForm((prev) => ({ ...prev, serial_no: String(value) }))} />
-            <FormField label="Expiry Date" type="date" value={materialForm.expiry_date} onChange={(value) => setMaterialForm((prev) => ({ ...prev, expiry_date: String(value) }))} />
+            <FormField
+              label="Expiry Tracking"
+              type="select"
+              value={materialForm.track_expiry}
+              onChange={(value) =>
+                setMaterialForm((prev) => ({
+                  ...prev,
+                  track_expiry: String(value) === "yes" ? "yes" : "no",
+                  expiry_date: String(value) === "yes" ? prev.expiry_date : "",
+                }))
+              }
+              options={[
+                { value: "no", label: "No Expiry" },
+                { value: "yes", label: "Track Expiry" },
+              ]}
+              required
+            />
+            <FormField
+              label={materialForm.track_expiry === "yes" ? "Expiry Date" : "Expiry Date (Not Needed)"}
+              type="date"
+              value={materialForm.expiry_date}
+              onChange={(value) => setMaterialForm((prev) => ({ ...prev, expiry_date: String(value) }))}
+              disabled={materialForm.track_expiry !== "yes"}
+            />
             <FormField
               label="Status"
               type="select"
@@ -897,6 +948,25 @@ export default function InventoriesPage() {
               required
             />
           </div>
+          <p className="text-xs text-slate-500">
+            Use <span className="font-semibold">No Expiry</span> for materials like brick, block, sand, gravel, steel, and similar items.
+          </p>
+          {editingMaterial?.has_warehouse_stock ? (
+            <p className="text-xs text-slate-500">
+              This material now uses warehouse stock records. Change stock through purchase receipts, issue flows, or warehouse assignment instead of editing the quantity here.
+            </p>
+          ) : Number(editingMaterial?.legacy_quantity ?? 0) > 0 ? (
+            <p className="text-xs text-amber-600">
+              This material still has {formatQuantity(Number(editingMaterial?.legacy_quantity ?? 0))} units of legacy stock. Choose the warehouse where that stock is actually stored and save once to assign it.
+            </p>
+          ) : (
+            <p className="text-xs text-slate-500">
+              For new materials with starting stock, choose the warehouse where that opening quantity is physically stored.
+            </p>
+          )}
+          <p className="text-xs text-slate-500">
+            Reference unit price is a procurement default for autofill. The actual purchase price can still change on each purchase request and again at receive time.
+          </p>
           <FormField label="Notes" type="textarea" value={materialForm.notes} onChange={(value) => setMaterialForm((prev) => ({ ...prev, notes: String(value) }))} rows={4} />
           {materialFormError && <p className="text-sm text-red-600">{materialFormError}</p>}
           <div className="flex justify-end gap-3">
@@ -908,8 +978,17 @@ export default function InventoriesPage() {
 
       <Modal isOpen={assetFormOpen} onClose={closeAssetForm} title={editingAsset ? "Edit Company Asset" : "Create Company Asset"} size="xl">
         <div className="space-y-4">
+          <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-100">
+            Company assets now work like reusable stock lines. One row can represent a large available quantity such as <span className="font-semibold">Desktop = 5000</span>, while request and allocation flows move quantities in and out of that stock.
+          </div>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-            <FormField label="Asset Code" value={assetForm.asset_code} onChange={(value) => setAssetForm((prev) => ({ ...prev, asset_code: String(value) }))} required />
+            <FormField
+              label="Asset Code"
+              value={assetForm.asset_code}
+              onChange={(value) => setAssetForm((prev) => ({ ...prev, asset_code: String(value).toUpperCase() }))}
+              placeholder="DESKTOP-STOCK"
+              required
+            />
             <FormField label="Asset Name" value={assetForm.asset_name} onChange={(value) => setAssetForm((prev) => ({ ...prev, asset_name: String(value) }))} required />
             <FormField
               label="Asset Type"
@@ -925,6 +1004,13 @@ export default function InventoriesPage() {
               required
             />
             <FormField
+              label="Available Quantity"
+              type="number"
+              value={assetForm.quantity}
+              onChange={(value) => setAssetForm((prev) => ({ ...prev, quantity: String(value) }))}
+              required
+            />
+            <FormField
               label="Supplier"
               type="select"
               value={assetForm.supplier_id}
@@ -932,7 +1018,7 @@ export default function InventoriesPage() {
               options={vendorOptions}
               placeholder="Select supplier"
             />
-            <FormField label="Serial No" value={assetForm.serial_no} onChange={(value) => setAssetForm((prev) => ({ ...prev, serial_no: String(value) }))} />
+            <FormField label="Serial / Model No" value={assetForm.serial_no} onChange={(value) => setAssetForm((prev) => ({ ...prev, serial_no: String(value) }))} />
             <FormField
               label="Status"
               type="select"
@@ -948,22 +1034,17 @@ export default function InventoriesPage() {
               required
             />
             <FormField
-              label="Assigned Employee"
+              label="Warehouse"
               type="select"
-              value={assetForm.current_employee_id}
-              onChange={(value) => setAssetForm((prev) => ({ ...prev, current_employee_id: String(value) }))}
-              options={employeeOptions}
-              placeholder="Select employee"
-            />
-            <FormField
-              label="Project"
-              type="select"
-              value={assetForm.current_project_id}
-              onChange={(value) => setAssetForm((prev) => ({ ...prev, current_project_id: String(value) }))}
-              options={projectOptions}
-              placeholder="Select project"
+              value={assetForm.current_warehouse_id}
+              onChange={(value) => setAssetForm((prev) => ({ ...prev, current_warehouse_id: String(value) }))}
+              options={warehouses.map((item) => ({ value: String(item.id ?? ""), label: item.name }))}
+              placeholder="Select warehouse"
             />
           </div>
+          <p className="text-xs text-slate-500">
+            Example: create one row with <span className="font-semibold">Asset Code = DESKTOP-STOCK</span> and <span className="font-semibold">Available Quantity = 5000</span>. Allocation and return workflows will move quantities against this stock instead of creating 5000 separate rows.
+          </p>
           <FormField label="Notes" type="textarea" value={assetForm.notes} onChange={(value) => setAssetForm((prev) => ({ ...prev, notes: String(value) }))} rows={4} />
           {assetFormError && <p className="text-sm text-red-600">{assetFormError}</p>}
           <div className="flex justify-end gap-3">

@@ -128,7 +128,10 @@ export default function OfflinePolicyCountdowns({ variant = "topbar" }: Props) {
   }, []);
 
   useEffect(() => {
-    void refreshPolicy();
+    const timer = window.setTimeout(() => {
+      void refreshPolicy();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [refreshPolicy]);
 
   useEffect(() => {

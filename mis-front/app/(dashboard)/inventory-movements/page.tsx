@@ -476,7 +476,7 @@ export default function InventoryMovementsPage() {
   ], []);
 
   return (
-    <RequirePermission permission="inventory.request">
+    <RequirePermission permission={["stock_movements.view", "inventory.request"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Inventory Movements" subtitle="Project-aware movement reports, warehouse stock summary, and printable material records.">
           <button

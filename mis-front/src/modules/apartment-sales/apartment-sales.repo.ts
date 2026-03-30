@@ -544,7 +544,12 @@ export async function apartmentSaleGetLocal(uuid: string): Promise<ApartmentSale
 export async function apartmentSalePullToLocal(): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = typeof window === "undefined" ? null : window.localStorage.getItem(CURSOR_KEY);
+  const cachedSince = typeof window === "undefined" ? null : window.localStorage.getItem(CURSOR_KEY);
+  const localCount = await db.apartment_sales.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince && typeof window !== "undefined") {
+    window.localStorage.removeItem(CURSOR_KEY);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = new Date().toISOString();

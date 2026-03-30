@@ -63,6 +63,11 @@ function lsSet(key: string, value: string): void {
   window.localStorage.setItem(key, value);
 }
 
+function lsRemove(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
+}
+
 function lsNum(key: string): number | null {
   const raw = lsGet(key);
   if (!raw) return null;
@@ -249,7 +254,12 @@ async function retentionCleanupIfDue(config: PullConfig<ProjectRow>): Promise<nu
 async function pullToLocal(config: PullConfig<ProjectRow>): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = lsGet(config.cursorKey);
+  const cachedSince = lsGet(config.cursorKey);
+  const localCount = await config.table.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    lsRemove(config.cursorKey);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();

@@ -289,6 +289,11 @@ function setLs(key: string, value: string): void {
   window.localStorage.setItem(key, value);
 }
 
+function removeLs(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
+}
+
 function getLsNumber(key: string): number | null {
   const raw = getLs(key);
   if (!raw) return null;
@@ -370,7 +375,12 @@ export async function installmentsPaidTotalsBySaleUuidLocal(
 export async function installmentsPullToLocal(): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = getLs(CURSOR_KEY);
+  const cachedSince = getLs(CURSOR_KEY);
+  const localCount = await db.installments.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    removeLs(CURSOR_KEY);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = new Date().toISOString();

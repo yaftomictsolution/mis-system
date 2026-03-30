@@ -69,6 +69,11 @@ function lsSet(key: string, value: string): void {
   window.localStorage.setItem(key, value);
 }
 
+function lsRemove(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
+}
+
 function lsNum(key: string): number | null {
   const raw = lsGet(key);
   if (!raw) return null;
@@ -465,7 +470,12 @@ export async function salaryPaymentsRetentionCleanupIfDue(): Promise<number> {
 export async function salaryAdvancesPullToLocal(): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = lsGet(ADVANCES_CURSOR_KEY);
+  const cachedSince = lsGet(ADVANCES_CURSOR_KEY);
+  const localCount = await db.salary_advances.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    lsRemove(ADVANCES_CURSOR_KEY);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();
@@ -510,7 +520,12 @@ export async function salaryAdvancesPullToLocal(): Promise<{ pulled: number }> {
 export async function salaryPaymentsPullToLocal(): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = lsGet(PAYMENTS_CURSOR_KEY);
+  const cachedSince = lsGet(PAYMENTS_CURSOR_KEY);
+  const localCount = await db.salary_payments.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    lsRemove(PAYMENTS_CURSOR_KEY);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();

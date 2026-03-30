@@ -14,6 +14,10 @@ import { api } from "@/lib/api";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { companyAssetsPullToLocal, materialsPullToLocal } from "@/modules/inventories/inventories.repo";
+import {
+  projectMaterialStocksPullToLocal,
+  warehouseMaterialStocksPullToLocal,
+} from "@/modules/material-stocks/material-stocks.repo";
 import { stockMovementsPullToLocal } from "@/modules/stock-movements/stock-movements.repo";
 import { enqueueSync } from "@/sync/queue";
 
@@ -82,6 +86,7 @@ export type AssetRequestInput = {
   requested_by_employee_id: number;
   requested_asset_id?: number | null;
   asset_type?: string | null;
+  quantity_requested: number;
   reason?: string | null;
   notes?: string | null;
 };
@@ -94,6 +99,7 @@ export type MaterialIssueInput = {
 
 export type AssetAllocationInput = {
   asset_id: number;
+  quantity_allocated: number;
   assigned_date: string;
   condition_on_issue?: string | null;
   notes?: string | null;
@@ -102,6 +108,8 @@ export type AssetAllocationInput = {
 export type AssetReturnInput = {
   return_date: string;
   return_status: "returned" | "damaged" | "lost";
+  quantity_returned?: number | null;
+  warehouse_id?: number | null;
   condition_on_return?: string | null;
   notes?: string | null;
 };
@@ -118,6 +126,11 @@ function lsGet(key: string): string | null {
 function lsSet(key: string, value: string): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(key, value);
+}
+
+function lsRemove(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
 }
 
 function lsNum(key: string): number | null {
@@ -415,6 +428,8 @@ function sanitizeAssetRequest(input: unknown): AssetRequestRow {
     requested_asset_code: trimOrNull(record.requested_asset_code, 100),
     requested_asset_name: trimOrNull(record.requested_asset_name, 255),
     asset_type: trimOrNull(record.asset_type, 50),
+    quantity_requested: Math.max(0, toMoney(record.quantity_requested, 1)),
+    quantity_allocated: Math.max(0, toMoney(record.quantity_allocated, 0)),
     status: trimText(record.status, 50) || "pending",
     reason: trimOrNull(record.reason, 5000),
     approved_by_user_id: toNullableId(record.approved_by_user_id),
@@ -430,6 +445,7 @@ function sanitizeAssetRequest(input: unknown): AssetRequestRow {
     assignment_status: trimOrNull(record.assignment_status, 50),
     assigned_date: toNullableTs(record.assigned_date),
     return_date: toNullableTs(record.return_date),
+    assigned_quantity: record.assigned_quantity === null || record.assigned_quantity === undefined ? null : Math.max(0, toMoney(record.assigned_quantity)),
     assigned_asset_id: toNullableId(record.assigned_asset_id),
     assigned_asset_uuid: trimOrNull(record.assigned_asset_uuid, 100),
     assigned_asset_code: trimOrNull(record.assigned_asset_code, 100),
@@ -513,7 +529,12 @@ async function retentionCleanupIfDue<Row extends { uuid: string; updated_at: num
 async function pullToLocal<Row extends { uuid: string; updated_at: number }>(config: PullConfig<Row>): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = lsGet(config.cursorKey);
+  const cachedSince = lsGet(config.cursorKey);
+  const localCount = await config.table.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    lsRemove(config.cursorKey);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();
@@ -589,6 +610,9 @@ function validateAssetRequestInput(input: AssetRequestInput): void {
   if ((!input.requested_asset_id || input.requested_asset_id <= 0) && !trimText(input.asset_type, 50)) {
     throw new Error("Select a requested asset or provide an asset type.");
   }
+  if (!Number.isFinite(input.quantity_requested) || input.quantity_requested <= 0) {
+    throw new Error("Requested quantity must be greater than 0.");
+  }
 }
 
 function validateMaterialIssueInput(input: MaterialIssueInput): void {
@@ -610,6 +634,9 @@ function validateAssetAllocationInput(input: AssetAllocationInput): void {
   if (!Number.isFinite(input.asset_id) || input.asset_id <= 0) {
     throw new Error("Allocated asset is required.");
   }
+  if (!Number.isFinite(input.quantity_allocated) || input.quantity_allocated <= 0) {
+    throw new Error("Allocated quantity must be greater than 0.");
+  }
   if (!trimText(input.assigned_date, 50)) {
     throw new Error("Assigned date is required.");
   }
@@ -618,6 +645,14 @@ function validateAssetAllocationInput(input: AssetAllocationInput): void {
 function validateAssetReturnInput(input: AssetReturnInput): void {
   if (!trimText(input.return_date, 50)) {
     throw new Error("Return date is required.");
+  }
+  if (input.quantity_returned !== null && input.quantity_returned !== undefined) {
+    if (!Number.isFinite(input.quantity_returned) || Number(input.quantity_returned) <= 0) {
+      throw new Error("Returned quantity must be greater than 0.");
+    }
+  }
+  if (input.return_status !== "lost" && (!Number.isFinite(input.warehouse_id) || Number(input.warehouse_id) <= 0)) {
+    throw new Error("Return warehouse is required.");
   }
 }
 
@@ -643,6 +678,7 @@ function toAssetRequestPayload(input: AssetRequestInput): Obj {
     requested_by_employee_id: toId(input.requested_by_employee_id),
     requested_asset_id: toNullableId(input.requested_asset_id),
     asset_type: trimOrNull(input.asset_type, 50),
+    quantity_requested: Math.max(0, toMoney(input.quantity_requested)),
     reason: trimOrNull(input.reason, 5000),
     notes: trimOrNull(input.notes, 5000),
   };
@@ -662,6 +698,7 @@ function toMaterialIssuePayload(input: MaterialIssueInput): Obj {
 function toAssetAllocationPayload(input: AssetAllocationInput): Obj {
   return {
     asset_id: toId(input.asset_id),
+    quantity_allocated: Math.max(0, toMoney(input.quantity_allocated)),
     assigned_date: trimText(input.assigned_date, 50),
     condition_on_issue: trimOrNull(input.condition_on_issue, 255),
     notes: trimOrNull(input.notes, 5000),
@@ -672,6 +709,11 @@ function toAssetReturnPayload(input: AssetReturnInput): Obj {
   return {
     return_date: trimText(input.return_date, 50),
     return_status: input.return_status,
+    quantity_returned:
+      input.quantity_returned === null || input.quantity_returned === undefined
+        ? null
+        : Math.max(0, toMoney(input.quantity_returned)),
+    warehouse_id: input.return_status === "lost" ? null : toNullableId(input.warehouse_id),
     condition_on_return: trimOrNull(input.condition_on_return, 255),
     notes: trimOrNull(input.notes, 5000),
   };
@@ -879,6 +921,7 @@ export async function materialRequestApprove(uuid: string): Promise<MaterialRequ
     const response = await api.post(`${materialRequestsConfig.endpoint}/${uuid}/approve`);
     const saved = await decorateMaterialRequest(sanitizeMaterialRequest(obj(response.data).data));
     await db.material_requests.put(saved);
+    await warehouseMaterialStocksPullToLocal();
     notifySuccess("Material request approved.");
     return saved;
   } catch (error: unknown) {
@@ -917,7 +960,12 @@ export async function materialRequestIssue(uuid: string, input: MaterialIssueInp
     const response = await api.post(`${materialRequestsConfig.endpoint}/${uuid}/issue`, toMaterialIssuePayload(input));
     const saved = await decorateMaterialRequest(sanitizeMaterialRequest(obj(response.data).data));
     await db.material_requests.put(saved);
-    await Promise.all([materialsPullToLocal(), stockMovementsPullToLocal()]);
+    await Promise.all([
+      materialsPullToLocal(),
+      stockMovementsPullToLocal(),
+      warehouseMaterialStocksPullToLocal(),
+      projectMaterialStocksPullToLocal(),
+    ]);
     notifySuccess("Material request issued successfully.");
     return saved;
   } catch (error: unknown) {

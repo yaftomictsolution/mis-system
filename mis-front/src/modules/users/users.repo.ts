@@ -40,6 +40,11 @@ function lsGet(key: string): string | null {
   return window.localStorage.getItem(key);
 }
 
+function lsRemove(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
+}
+
 function isDeletedRecord(input: unknown): boolean {
   const r = asObj(input);
   return r.deleted_at !== null && r.deleted_at !== undefined && String(r.deleted_at).trim() !== "";
@@ -223,7 +228,12 @@ export async function userPullToLocal(): Promise<{ pulled: number }> {
 
   await cleanupBrokenDuplicateUsers();
 
-  const since = lsGet(CURSOR_KEY);
+  const cachedSince = lsGet(CURSOR_KEY);
+  const localCount = await db.users.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    lsRemove(CURSOR_KEY);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();

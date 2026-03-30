@@ -204,7 +204,7 @@ export default function ProjectsPage() {
   ], []);
 
   return (
-    <RequirePermission permission="inventory.request">
+    <RequirePermission permission={["projects.view", "inventory.request"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Projects" subtitle="Offline-first project master data for inventory and asset workflows.">
           <div className="flex flex-wrap gap-2">

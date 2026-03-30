@@ -10,9 +10,18 @@ type ManagedModuleKey =
   | "apartments"
   | "apartment_sales"
   | "employees"
+  | "salary_advances"
+  | "salary_payments"
   | "users"
   | "roles"
-  | "rentals";
+  | "projects"
+  | "vendors"
+  | "warehouses"
+  | "materials"
+  | "company_assets"
+  | "material_requests"
+  | "purchase_requests"
+  | "asset_requests";
 
 type OrderKey = "deleted_desc" | "deleted_asc" | "updated_desc" | "updated_asc" | "title_asc" | "title_desc";
 
@@ -194,6 +203,30 @@ function recordFromApi(moduleKey: ManagedModuleKey, row: Record<string, unknown>
     };
   }
 
+  if (moduleKey === "salary_advances") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.employee_name, `Advance ${uuid}`),
+      subtitle: `Amount: ${String(row.amount ?? 0)}`,
+      detail: stringOrFallback(row.status, stringOrFallback(row.reason, "Salary advance")),
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "salary_payments") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.employee_name, `Payment ${uuid}`),
+      subtitle: `Period: ${stringOrFallback(row.period, "-")}`,
+      detail: `Net salary ${String(row.net_salary ?? 0)} / ${stringOrFallback(row.status, "Salary payment")}`,
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
   if (moduleKey === "users") {
     const roles = Array.isArray(row.roles)
       ? row.roles.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(", ")
@@ -219,6 +252,102 @@ function recordFromApi(moduleKey: ManagedModuleKey, row: Record<string, unknown>
       title: stringOrFallback(row.name, uuid),
       subtitle: stringOrFallback(row.guard_name, "Role"),
       detail: `${permissionsCount} permissions`,
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "projects") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.name, uuid),
+      subtitle: stringOrFallback(row.location, "No location"),
+      detail: stringOrFallback(row.status, "Project"),
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "vendors") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.name, uuid),
+      subtitle: stringOrFallback(row.phone, stringOrFallback(row.email, "No contact info")),
+      detail: stringOrFallback(row.address, stringOrFallback(row.status, "Vendor")),
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "warehouses") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.name, uuid),
+      subtitle: stringOrFallback(row.location, "No location"),
+      detail: stringOrFallback(row.status, "Warehouse"),
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "materials") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.name, uuid),
+      subtitle: `${stringOrFallback(row.material_type, "Material")} / ${stringOrFallback(row.unit, "-")}`,
+      detail: stringOrFallback(row.supplier_name, stringOrFallback(row.status, "Material")),
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "company_assets") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.asset_name, uuid),
+      subtitle: `${stringOrFallback(row.asset_code, "-")} / ${stringOrFallback(row.asset_type, "-")}`,
+      detail: `${stringOrFallback(row.status, "Company asset")} / Qty ${String(row.quantity ?? 0)}`,
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "material_requests") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.request_no, uuid),
+      subtitle: stringOrFallback(row.requested_by_employee_name, "No requester"),
+      detail: `${stringOrFallback(row.status, "Material request")} / ${stringOrFallback(row.warehouse_name, "No warehouse")}`,
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "purchase_requests") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.request_no, uuid),
+      subtitle: `${stringOrFallback(row.request_type, "purchase")} / ${stringOrFallback(row.vendor_name, "No supplier")}`,
+      detail: `${stringOrFallback(row.status, "Purchase request")} / ${stringOrFallback(row.warehouse_name, "No warehouse")}`,
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
+  if (moduleKey === "asset_requests") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.request_no, uuid),
+      subtitle: stringOrFallback(row.requested_by_employee_name, "No requester"),
+      detail: `${stringOrFallback(row.status, "Asset request")} / ${stringOrFallback(row.requested_asset_name, stringOrFallback(row.asset_type, "No asset"))}`,
       updatedAt: toTimestamp(row.updated_at),
       deletedAt,
     };
@@ -252,6 +381,18 @@ const MODULE_CONFIG: Record<ManagedModuleKey, ModuleConfig> = {
     deletePath: (uuid) => `/api/employees/${uuid}/force`,
     supportsSoftDelete: true,
   },
+  salary_advances: {
+    label: "Salary Advances",
+    listPath: "/api/salary-advances",
+    deletePath: (uuid) => `/api/salary-advances/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  salary_payments: {
+    label: "Salary Payments",
+    listPath: "/api/salary-payments",
+    deletePath: (uuid) => `/api/salary-payments/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
   users: {
     label: "Users",
     listPath: "/api/users",
@@ -264,11 +405,53 @@ const MODULE_CONFIG: Record<ManagedModuleKey, ModuleConfig> = {
     deletePath: (uuid) => `/api/roles/${uuid}/force`,
     supportsSoftDelete: true,
   },
-  rentals: {
-    label: "Rentals",
-    listPath: "/api/rentals",
-    deletePath: (uuid) => `/api/rentals/${uuid}/force`,
-    supportsSoftDelete: false,
+  projects: {
+    label: "Projects",
+    listPath: "/api/projects",
+    deletePath: (uuid) => `/api/projects/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  vendors: {
+    label: "Vendors",
+    listPath: "/api/vendors",
+    deletePath: (uuid) => `/api/vendors/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  warehouses: {
+    label: "Warehouses",
+    listPath: "/api/warehouses",
+    deletePath: (uuid) => `/api/warehouses/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  materials: {
+    label: "Materials",
+    listPath: "/api/materials",
+    deletePath: (uuid) => `/api/materials/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  company_assets: {
+    label: "Company Assets",
+    listPath: "/api/company-assets",
+    deletePath: (uuid) => `/api/company-assets/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  material_requests: {
+    label: "Material Requests",
+    listPath: "/api/material-requests",
+    deletePath: (uuid) => `/api/material-requests/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  purchase_requests: {
+    label: "Purchase Requests",
+    listPath: "/api/purchase-requests",
+    deletePath: (uuid) => `/api/purchase-requests/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  asset_requests: {
+    label: "Asset Requests",
+    listPath: "/api/asset-requests",
+    deletePath: (uuid) => `/api/asset-requests/${uuid}/force`,
+    supportsSoftDelete: true,
   },
 };
 

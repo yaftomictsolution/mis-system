@@ -9,10 +9,10 @@ import { DataTable, type Column } from "@/components/ui/DataTable";
 import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
-import type { AssetRequestRow, CompanyAssetRow, EmployeeRow, ProjectRow } from "@/db/localDB";
+import type { AssetRequestRow, CompanyAssetRow, EmployeeRow, ProjectRow, WarehouseRow } from "@/db/localDB";
 import { notifyError } from "@/lib/notify";
 import { employeePullToLocal, employeesListLocal } from "@/modules/employees/employees.repo";
-import { companyAssetsListLocal, companyAssetsPullToLocal } from "@/modules/inventories/inventories.repo";
+import { companyAssetsListLocal, companyAssetsPullToLocal, warehousesListLocal, warehousesPullToLocal } from "@/modules/inventories/inventories.repo";
 import {
   assetRequestAllocate,
   assetRequestApprove,
@@ -30,18 +30,20 @@ import {
 import { projectsListLocal, projectsPullToLocal } from "@/modules/projects/projects.repo";
 import type { RootState } from "@/store/store";
 
-type AssetRequestSyncEntity = "asset_requests" | "company_assets" | "employees" | "projects";
+type AssetRequestSyncEntity = "asset_requests" | "company_assets" | "employees" | "projects" | "warehouses";
 type SyncCompleteDetail = { syncedAny?: boolean; cleaned?: boolean; entities?: string[] };
 type AssetRequestFormState = {
   project_id: string;
   requested_by_employee_id: string;
   requested_asset_id: string;
   asset_type: string;
+  quantity_requested: string;
   reason: string;
   notes: string;
 };
 type AssetAllocateFormState = {
   asset_id: string;
+  quantity_allocated: string;
   assigned_date: string;
   condition_on_issue: string;
   notes: string;
@@ -49,6 +51,8 @@ type AssetAllocateFormState = {
 type AssetReturnFormState = {
   return_date: string;
   return_status: "returned" | "damaged" | "lost";
+  quantity_returned: string;
+  warehouse_id: string;
   condition_on_return: string;
   notes: string;
 };
@@ -56,7 +60,7 @@ type AssetRequestTableRow = AssetRequestRow & { search_assets: string; project_l
 
 const LOCAL_PAGE_SIZE = 500;
 const TABLE_PAGE_SIZE = 10;
-const SYNC_ENTITIES = new Set<AssetRequestSyncEntity>(["asset_requests", "company_assets", "employees", "projects"]);
+const SYNC_ENTITIES = new Set<AssetRequestSyncEntity>(["asset_requests", "company_assets", "employees", "projects", "warehouses"]);
 const today = () => new Date().toISOString().slice(0, 10);
 const actionBtn = "rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors";
 
@@ -71,6 +75,7 @@ function createEmptyForm(): AssetRequestFormState {
     requested_by_employee_id: "",
     requested_asset_id: "",
     asset_type: "",
+    quantity_requested: "1",
     reason: "",
     notes: "",
   };
@@ -79,6 +84,7 @@ function createEmptyForm(): AssetRequestFormState {
 function createAllocateForm(row: AssetRequestRow): AssetAllocateFormState {
   return {
     asset_id: row.requested_asset_id ? String(row.requested_asset_id) : "",
+    quantity_allocated: String(Math.max(0, Number(row.quantity_requested ?? 0) - Number(row.quantity_allocated ?? 0)) || 1),
     assigned_date: today(),
     condition_on_issue: "",
     notes: "",
@@ -89,6 +95,8 @@ function createReturnForm(): AssetReturnFormState {
   return {
     return_date: today(),
     return_status: "returned",
+    quantity_returned: "1",
+    warehouse_id: "",
     condition_on_return: "",
     notes: "",
   };
@@ -100,6 +108,7 @@ function normalizeForm(row: AssetRequestRow): AssetRequestFormState {
     requested_by_employee_id: String(row.requested_by_employee_id || ""),
     requested_asset_id: row.requested_asset_id ? String(row.requested_asset_id) : "",
     asset_type: row.asset_type || "",
+    quantity_requested: String(row.quantity_requested ?? 1),
     reason: row.reason || "",
     notes: row.notes || "",
   };
@@ -121,6 +130,7 @@ export default function AssetRequestsPage() {
   const [assets, setAssets] = useState<CompanyAssetRow[]>([]);
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseRow[]>([]);
   const [formOpen, setFormOpen] = useState(false);
   const [allocateOpen, setAllocateOpen] = useState(false);
   const [returnOpen, setReturnOpen] = useState(false);
@@ -143,23 +153,25 @@ export default function AssetRequestsPage() {
   const canIssue = permissions.includes("inventory.issue") || (!hasExplicitWorkflowPerms && permissions.includes("inventory.request"));
 
   const loadLocal = useCallback(async () => {
-    const [requestPage, assetPage, employeePage, projectPage] = await Promise.all([
+    const [requestPage, assetPage, employeePage, projectPage, warehousePage] = await Promise.all([
       assetRequestsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       companyAssetsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       employeesListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       projectsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+      warehousesListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
     ]);
 
     setRows(requestPage.items);
     setAssets(assetPage.items);
     setEmployees(employeePage.items);
     setProjects(projectPage.items);
+    setWarehouses(warehousePage.items);
   }, []);
 
   const refresh = useCallback(async (options?: { showLoader?: boolean; showFailureToast?: boolean; entitiesToPull?: AssetRequestSyncEntity[] }) => {
     const showLoader = options?.showLoader ?? true;
     const showFailureToast = options?.showFailureToast ?? true;
-    const entitiesToPull = options?.entitiesToPull ?? ["asset_requests", "company_assets", "employees", "projects"];
+    const entitiesToPull = options?.entitiesToPull ?? ["asset_requests", "company_assets", "employees", "projects", "warehouses"];
 
     if (showLoader) setLoading(true);
     try {
@@ -173,6 +185,7 @@ export default function AssetRequestsPage() {
         if (entitiesToPull.includes("company_assets")) tasks.push(companyAssetsPullToLocal());
         if (entitiesToPull.includes("employees")) tasks.push(employeePullToLocal());
         if (entitiesToPull.includes("projects")) tasks.push(projectsPullToLocal());
+        if (entitiesToPull.includes("warehouses")) tasks.push(warehousesPullToLocal());
         await Promise.all(tasks);
       } catch {
         pullFailed = true;
@@ -214,15 +227,29 @@ export default function AssetRequestsPage() {
     [employees]
   );
   const assetOptions = useMemo(
-    () => assets.map((item) => ({ value: String(item.id ?? ""), label: `${item.asset_code} - ${item.asset_name}` })),
+    () =>
+      assets.map((item) => ({
+        value: String(item.id ?? ""),
+        label: `${item.asset_code} - ${item.asset_name} (available ${Number(item.quantity ?? 0)})`,
+      })),
     [assets]
   );
   const projectOptions = useMemo(
     () => projects.map((item) => ({ value: String(item.id ?? ""), label: item.name })),
     [projects]
   );
+  const warehouseOptions = useMemo(
+    () => warehouses.map((item) => ({ value: String(item.id ?? ""), label: item.name })),
+    [warehouses]
+  );
   const availableAssetOptions = useMemo(
-    () => assets.filter((item) => item.status === "available").map((item) => ({ value: String(item.id ?? ""), label: `${item.asset_code} - ${item.asset_name}` })),
+    () =>
+      assets
+        .filter((item) => Number(item.quantity ?? 0) > 0)
+        .map((item) => ({
+          value: String(item.id ?? ""),
+          label: `${item.asset_code} - ${item.asset_name} (available ${Number(item.quantity ?? 0)})`,
+        })),
     [assets]
   );
 
@@ -276,7 +303,10 @@ export default function AssetRequestsPage() {
 
   const openReturn = useCallback((row: AssetRequestRow) => {
     setReturnTarget(row);
-    setReturnForm(createReturnForm());
+    setReturnForm({
+      ...createReturnForm(),
+      quantity_returned: String(row.assigned_quantity ?? row.quantity_allocated ?? 1),
+    });
     setReturnError(null);
     setReturnOpen(true);
   }, []);
@@ -298,6 +328,7 @@ export default function AssetRequestsPage() {
         requested_by_employee_id: Number(form.requested_by_employee_id),
         requested_asset_id: form.requested_asset_id ? Number(form.requested_asset_id) : null,
         asset_type: form.asset_type || null,
+        quantity_requested: Number(form.quantity_requested || 0),
         reason: form.reason,
         notes: form.notes,
       };
@@ -324,6 +355,7 @@ export default function AssetRequestsPage() {
     try {
       const payload: AssetAllocationInput = {
         asset_id: Number(allocateForm.asset_id),
+        quantity_allocated: Number(allocateForm.quantity_allocated || 0),
         assigned_date: allocateForm.assigned_date,
         condition_on_issue: allocateForm.condition_on_issue,
         notes: allocateForm.notes,
@@ -346,6 +378,8 @@ export default function AssetRequestsPage() {
       const payload: AssetReturnInput = {
         return_date: returnForm.return_date,
         return_status: returnForm.return_status,
+        quantity_returned: Number(returnForm.quantity_returned || 0),
+        warehouse_id: returnForm.warehouse_id ? Number(returnForm.warehouse_id) : null,
         condition_on_return: returnForm.condition_on_return,
         notes: returnForm.notes,
       };
@@ -392,7 +426,9 @@ export default function AssetRequestsPage() {
     { key: "request_no", label: "Request", render: (item) => <span className="font-semibold">{item.request_no}</span> },
     { key: "requested_by_employee_name", label: "Requested By", render: (item) => item.requested_by_employee_name || "-" },
     { key: "requested_asset_name", label: "Requested Asset", render: (item) => item.requested_asset_name || item.asset_type || "-" },
+    { key: "quantity_requested", label: "Requested Qty", render: (item) => String(item.quantity_requested ?? "-") },
     { key: "assigned_asset_name", label: "Assigned Asset", render: (item) => item.assigned_asset_name || "-" },
+    { key: "quantity_allocated", label: "Allocated Qty", render: (item) => String(item.quantity_allocated ?? "-") },
     { key: "project_label", label: "Project", render: (item) => item.project_label },
     { key: "status", label: "Status", render: (item) => statusBadge(item.status) },
     { key: "requested_at", label: "Requested", render: (item) => toDateLabel(item.requested_at) },
@@ -421,7 +457,7 @@ export default function AssetRequestsPage() {
   ], [canApprove, canIssue, handleApprove, handleReject, openAllocate, openEdit, openReturn]);
 
   return (
-    <RequirePermission permission="inventory.request">
+    <RequirePermission permission={["asset_requests.view", "inventory.request"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Asset Requests" subtitle="Local-first request entry with online allocation and return workflow.">
           <div className="flex flex-wrap gap-2">
@@ -459,6 +495,8 @@ export default function AssetRequestsPage() {
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <div><div className="text-xs uppercase tracking-wide text-slate-500">Requested Asset</div><div className="mt-1 font-medium text-slate-900 dark:text-white">{row.requested_asset_code ? `${row.requested_asset_code} - ${row.requested_asset_name}` : row.asset_type || "-"}</div></div>
                   <div><div className="text-xs uppercase tracking-wide text-slate-500">Assigned Asset</div><div className="mt-1 font-medium text-slate-900 dark:text-white">{row.assigned_asset_code ? `${row.assigned_asset_code} - ${row.assigned_asset_name}` : "-"}</div></div>
+                  <div><div className="text-xs uppercase tracking-wide text-slate-500">Requested Qty</div><div className="mt-1 font-medium text-slate-900 dark:text-white">{row.quantity_requested ?? "-"}</div></div>
+                  <div><div className="text-xs uppercase tracking-wide text-slate-500">Assigned Qty</div><div className="mt-1 font-medium text-slate-900 dark:text-white">{row.assigned_quantity ?? row.quantity_allocated ?? "-"}</div></div>
                   <div><div className="text-xs uppercase tracking-wide text-slate-500">Assignment Status</div><div className="mt-1 font-medium text-slate-900 dark:text-white">{row.assignment_status || "-"}</div></div>
                   <div><div className="text-xs uppercase tracking-wide text-slate-500">Receipt</div><div className="mt-1 font-medium text-slate-900 dark:text-white">{row.allocation_receipt_no || "-"}</div></div>
                 </div>
@@ -487,6 +525,7 @@ export default function AssetRequestsPage() {
               setForm((prev) => ({ ...prev, requested_asset_id: String(value), asset_type: asset?.asset_type || prev.asset_type }));
             }} options={assetOptions} placeholder="Optional exact asset" />
             <FormField label="Asset Type" type="select" value={form.asset_type} onChange={(value) => setForm((prev) => ({ ...prev, asset_type: String(value) }))} options={[{ value: "vehicle", label: "Vehicle" }, { value: "machine", label: "Machine" }, { value: "tool", label: "Tool" }, { value: "IT", label: "IT Equipment" }]} placeholder="Optional type" />
+            <FormField label="Requested Quantity" type="number" value={form.quantity_requested} onChange={(value) => setForm((prev) => ({ ...prev, quantity_requested: String(value) }))} required />
           </div>
           <FormField label="Reason" type="textarea" value={form.reason} onChange={(value) => setForm((prev) => ({ ...prev, reason: String(value) }))} rows={3} />
           <FormField label="Notes" type="textarea" value={form.notes} onChange={(value) => setForm((prev) => ({ ...prev, notes: String(value) }))} rows={3} />
@@ -504,6 +543,7 @@ export default function AssetRequestsPage() {
             <FormField label="Asset" type="select" value={allocateForm.asset_id} onChange={(value) => setAllocateForm((prev) => ({ ...prev, asset_id: String(value) }))} options={availableAssetOptions} required />
             <FormField label="Assigned Date" type="date" value={allocateForm.assigned_date} onChange={(value) => setAllocateForm((prev) => ({ ...prev, assigned_date: String(value) }))} required />
           </div>
+          <FormField label="Allocate Quantity" type="number" value={allocateForm.quantity_allocated} onChange={(value) => setAllocateForm((prev) => ({ ...prev, quantity_allocated: String(value) }))} required />
           <FormField label="Condition On Issue" value={allocateForm.condition_on_issue} onChange={(value) => setAllocateForm((prev) => ({ ...prev, condition_on_issue: String(value) }))} placeholder="good, serviced, etc." />
           <FormField label="Notes" type="textarea" value={allocateForm.notes} onChange={(value) => setAllocateForm((prev) => ({ ...prev, notes: String(value) }))} rows={3} />
           {allocateError && <p className="text-sm text-red-600">{allocateError}</p>}
@@ -520,6 +560,16 @@ export default function AssetRequestsPage() {
             <FormField label="Return Date" type="date" value={returnForm.return_date} onChange={(value) => setReturnForm((prev) => ({ ...prev, return_date: String(value) }))} required />
             <FormField label="Return Status" type="select" value={returnForm.return_status} onChange={(value) => setReturnForm((prev) => ({ ...prev, return_status: String(value) as AssetReturnFormState["return_status"] }))} options={[{ value: "returned", label: "Returned" }, { value: "damaged", label: "Damaged" }, { value: "lost", label: "Lost" }]} required />
           </div>
+          <FormField label="Return Quantity" type="number" value={returnForm.quantity_returned} onChange={(value) => setReturnForm((prev) => ({ ...prev, quantity_returned: String(value) }))} required />
+          <FormField
+            label={returnForm.return_status === "lost" ? "Warehouse (Not Needed)" : "Return Warehouse"}
+            type="select"
+            value={returnForm.warehouse_id}
+            onChange={(value) => setReturnForm((prev) => ({ ...prev, warehouse_id: String(value) }))}
+            options={warehouseOptions}
+            placeholder="Select warehouse"
+            disabled={returnForm.return_status === "lost"}
+          />
           <FormField label="Condition On Return" value={returnForm.condition_on_return} onChange={(value) => setReturnForm((prev) => ({ ...prev, condition_on_return: String(value) }))} placeholder="good, damaged, missing parts..." />
           <FormField label="Notes" type="textarea" value={returnForm.notes} onChange={(value) => setReturnForm((prev) => ({ ...prev, notes: String(value) }))} rows={3} />
           {returnError && <p className="text-sm text-red-600">{returnError}</p>}

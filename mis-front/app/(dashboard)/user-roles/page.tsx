@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useCallback, useEffect } from "react";
-import RequirePermission from "@/components/auth/RequirePermission";
+import RequireAdmin from "@/components/auth/RequireAdmin";
 import { DataTable, type Column } from "@/components/ui/DataTable";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Plus } from "lucide-react";
@@ -189,7 +189,7 @@ export default function UserRolesPage() {
   );
 
   return (
-    <RequirePermission permission="customers.view">
+    <RequireAdmin>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="User Roles" subtitle="Create role and assign permissions">
           <button
@@ -300,6 +300,6 @@ export default function UserRolesPage() {
           message={`Are you sure you want to delete role ${current.name ?? ""}? This action cannot be undone.`}
         />
       </div>
-    </RequirePermission>
+    </RequireAdmin>
   );
 }

@@ -47,7 +47,8 @@ export default function CacheStatus() {
   const pathname = usePathname();
   const router = useRouter();
   const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
-  const [routes, setRoutes] = useState(() => getCacheRoutesForPermissions(permissions));
+  const roles = useSelector((s: RootState) => s.auth.user?.roles ?? []);
+  const [routes, setRoutes] = useState(() => getCacheRoutesForPermissions(permissions, roles));
   const [status, setStatus] = useState<Record<string, boolean>>({});
   const [dataStatuses, setDataStatuses] = useState<OfflineDataStatus[]>([]);
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null);
@@ -92,7 +93,7 @@ export default function CacheStatus() {
 
   const loadRoutes = useCallback(async () => {
     try {
-      const staticRoutes = getCacheRoutesForPermissions(permissions);
+      const staticRoutes = getCacheRoutesForPermissions(permissions, roles);
       const dynamicRoutes = await listDynamicCacheRoutes(permissions);
       const merged = [...staticRoutes, ...dynamicRoutes];
       const routeMap = new Map<string, (typeof merged)[number]>();
@@ -103,11 +104,11 @@ export default function CacheStatus() {
       setRoutes(nextRoutes);
       return nextRoutes;
     } catch {
-      const fallbackRoutes = getCacheRoutesForPermissions(permissions);
+      const fallbackRoutes = getCacheRoutesForPermissions(permissions, roles);
       setRoutes(fallbackRoutes);
       return fallbackRoutes;
     }
-  }, [permissions]);
+  }, [permissions, roles]);
 
   const collectStatus = useCallback(
     async (routeList = routes): Promise<CacheSnapshot> => {
@@ -297,113 +298,143 @@ export default function CacheStatus() {
       </button>
 
       {open ? (
-        <div className="absolute right-0 top-[calc(100%+8px)] z-50 w-72 rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-[#2a2a3e] dark:bg-[#12121a]">
-          <div className="mb-2 flex items-center justify-between">
-            <strong className="text-sm">Cached Routes</strong>
-            <div className="flex items-center gap-2">
-              <button className="text-xs text-blue-600" onClick={() => void checkAll()}>
-                Refresh
-              </button>
-              <button
-                className="text-xs text-emerald-600 disabled:opacity-60"
-                onClick={() => void resyncNow()}
-                disabled={syncing}
-              >
-                {syncing ? "Syncing..." : "Resync"}
-              </button>
+        <div className="absolute right-0 top-[calc(100%+10px)] z-50 w-[min(92vw,420px)] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2a3e] dark:bg-[#12121a]">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-12 bg-gradient-to-b from-white via-white/90 to-transparent dark:from-[#12121a] dark:via-[#12121a]/90" />
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-white via-white/90 to-transparent dark:from-[#12121a] dark:via-[#12121a]/90" />
+
+          <div className="relative flex max-h-[min(78vh,720px)] flex-col">
+            <div className="border-b border-slate-200 px-4 py-3 dark:border-[#2a2a3e]">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <strong className="text-sm text-slate-900 dark:text-slate-100">Cached Routes</strong>
+                  <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    Offline pages and local module readiness
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button className="text-xs font-medium text-blue-600" onClick={() => void checkAll()}>
+                    Refresh
+                  </button>
+                  <button
+                    className="text-xs font-medium text-emerald-600 disabled:opacity-60"
+                    onClick={() => void resyncNow()}
+                    disabled={syncing}
+                  >
+                    {syncing ? "Syncing..." : "Resync"}
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
 
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <button
-              className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 disabled:opacity-60"
-              onClick={() => void cacheAllPages()}
-              disabled={syncing}
-            >
-              {syncing ? "Caching..." : "Cache All App Pages"}
-            </button>
-            {progress ? (
-              <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                {progress.current}/{progress.total} {progress.label}
-              </span>
-            ) : null}
-          </div>
-
-          <div className="mb-2 grid grid-cols-2 gap-2 text-[11px]">
-            <div className="rounded border border-slate-200 px-2 py-2 text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
-              <div className="font-semibold text-slate-800 dark:text-slate-100">Missing Core Pages</div>
-              <div className={missingCoreRoutes.length ? "text-rose-600" : "text-emerald-600"}>{missingCoreRoutes.length}</div>
+            <div className="border-b border-slate-200 px-4 py-3 dark:border-[#2a2a3e]">
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-[11px] font-medium text-blue-700 disabled:opacity-60"
+                  onClick={() => void cacheAllPages()}
+                  disabled={syncing}
+                >
+                  {syncing ? "Caching..." : "Cache All App Pages"}
+                </button>
+                {progress ? (
+                  <span className="text-right text-[10px] text-slate-500 dark:text-slate-400">
+                    {progress.current}/{progress.total} {progress.label}
+                  </span>
+                ) : null}
+              </div>
             </div>
-            <div className="rounded border border-slate-200 px-2 py-2 text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
-              <div className="font-semibold text-slate-800 dark:text-slate-100">Data Not Ready</div>
-              <div className={missingDataStatuses.length ? "text-rose-600" : "text-emerald-600"}>{missingDataStatuses.length}</div>
+
+            <div className="border-b border-slate-200 px-4 py-3 dark:border-[#2a2a3e]">
+              <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <div className="rounded-xl border border-slate-200 px-3 py-2 text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
+                  <div className="font-semibold text-slate-800 dark:text-slate-100">Missing Core Pages</div>
+                  <div className={missingCoreRoutes.length ? "text-rose-600" : "text-emerald-600"}>{missingCoreRoutes.length}</div>
+                </div>
+                <div className="rounded-xl border border-slate-200 px-3 py-2 text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
+                  <div className="font-semibold text-slate-800 dark:text-slate-100">Data Not Ready</div>
+                  <div className={missingDataStatuses.length ? "text-rose-600" : "text-emerald-600"}>{missingDataStatuses.length}</div>
+                </div>
+              </div>
             </div>
-          </div>
 
-          {missingDynamicRoutes.length ? (
-            <div className="mb-2 rounded border border-slate-200 px-2 py-2 text-[11px] text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
-              <div className="font-semibold text-slate-800 dark:text-slate-100">Dynamic Pages Not Warmed</div>
-              <div className="text-amber-600">{missingDynamicRoutes.length}</div>
-            </div>
-          ) : null}
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-[#2a2a3e] scrollbar-track-transparent">
+              {missingDynamicRoutes.length ? (
+                <div className="mb-3 rounded-xl border border-slate-200 px-3 py-2 text-[11px] text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
+                  <div className="font-semibold text-slate-800 dark:text-slate-100">Dynamic Pages Not Warmed</div>
+                  <div className="text-amber-600">{missingDynamicRoutes.length}</div>
+                </div>
+              ) : null}
 
-          <div className="mb-2 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
-            Current: <span className="font-medium">{currentPath}</span>{" "}
-            <span className={currentCached ? "text-emerald-600" : "text-rose-600"}>
-              {currentCached ? "(Cached)" : "(Not cached)"}
-            </span>
-          </div>
+              <div className="mb-3 rounded-xl border border-slate-200 px-3 py-2 text-[11px] text-slate-600 dark:border-[#2a2a3e] dark:text-slate-300">
+                Current: <span className="font-medium">{currentPath}</span>{" "}
+                <span className={currentCached ? "text-emerald-600" : "text-rose-600"}>
+                  {currentCached ? "(Cached)" : "(Not cached)"}
+                </span>
+              </div>
 
-          {missingDataStatuses.length ? (
-            <div className="mb-2 rounded border border-amber-200 bg-amber-50 px-2 py-2 text-[11px] text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
-              <div className="mb-1 font-semibold">Modules Not Synced Locally</div>
-              <ul className="space-y-1">
-                {missingDataStatuses.slice(0, 4).map((item) => (
-                  <li key={item.key} className="flex items-center justify-between gap-2">
-                    <span>{item.label}</span>
-                    <span className="text-[10px]">{item.detail}</span>
-                  </li>
-                ))}
+              {missingDataStatuses.length ? (
+                <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
+                  <div className="mb-2 font-semibold">Modules Not Synced Locally</div>
+                  <ul className="space-y-1.5">
+                    {missingDataStatuses.slice(0, 4).map((item) => (
+                      <li key={item.key} className="flex items-center justify-between gap-2">
+                        <span>{item.label}</span>
+                        <span className="text-[10px]">{item.detail}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div className="mb-2 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                <span>Route list</span>
+                <span>{routes.length} total</span>
+              </div>
+
+              <ul className="space-y-2">
+                {routes.map((r) => {
+                  const isCached = !!status[r.path];
+                  return (
+                    <li
+                      key={r.path}
+                      className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2.5 dark:border-[#2a2a3e]"
+                    >
+                      <div className="flex min-w-0 items-center gap-3">
+                        <span
+                          className={`h-2.5 w-2.5 rounded-full ${isCached ? "bg-emerald-500" : "bg-rose-400"}`}
+                        />
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{r.label}</div>
+                          <div className="truncate text-[11px] text-slate-500">{r.path}</div>
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {isCached ? (
+                          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                            Cached
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
+                            Missing
+                          </span>
+                        )}
+
+                        {!isCached ? (
+                          <button
+                            onClick={() => {
+                              void cacheNow(r.path);
+                            }}
+                            className="rounded-lg bg-blue-50 px-2 py-1 text-xs font-medium text-blue-600 dark:bg-blue-500/10 dark:text-blue-300"
+                          >
+                            Cache
+                          </button>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
-          ) : null}
-
-          <ul className="space-y-2">
-            {routes.map((r) => {
-              const isCached = !!status[r.path];
-              return (
-                <li key={r.path} className="flex items-center justify-between">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <span
-                      className={`h-2 w-2 rounded-full ${isCached ? "bg-emerald-500" : "bg-rose-400"}`}
-                    />
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{r.label}</div>
-                      <div className="truncate text-[11px] text-slate-500">{r.path}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {isCached ? (
-                      <span className="text-xs text-emerald-600 bg-emerald-50 text-emerald-700">Cached</span>
-                    ) : (
-                      <span className="text-xs text-rose-600 bg-rose-50 text-rose-700" />
-                    )}
-
-                    {!isCached ? (
-                      <button
-                        onClick={() => {
-                          void cacheNow(r.path);
-                        }}
-                        className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-600"
-                      >
-                        Cache
-                      </button>
-                    ) : null}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+          </div>
         </div>
       ) : null}
     </div>

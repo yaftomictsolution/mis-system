@@ -44,6 +44,11 @@ function lsSet(key: string, value: string): void {
   window.localStorage.setItem(key, value);
 }
 
+function lsRemove(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
+}
+
 function lsNum(key: string): number | null {
   const raw = lsGet(key);
   if (!raw) return null;
@@ -260,7 +265,12 @@ export async function employeeGetLocal(uuid: string): Promise<EmployeeRow | unde
 export async function employeePullToLocal(): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
-  const since = lsGet(CURSOR_KEY);
+  const cachedSince = lsGet(CURSOR_KEY);
+  const localCount = await db.employees.count();
+  const since = localCount > 0 ? cachedSince : null;
+  if (localCount === 0 && cachedSince) {
+    lsRemove(CURSOR_KEY);
+  }
   let page = 1;
   let pulled = 0;
   let serverTime = nowIso();

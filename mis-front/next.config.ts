@@ -17,6 +17,8 @@ const STATIC_APP_ROUTES = [
   "/employees",
   "/inventory-requests",
   "/inventory-movements",
+  "/purchase-requests",
+  "/warehouse-stock",
   "/installments",
   "/inventories",
   "/payroll",
