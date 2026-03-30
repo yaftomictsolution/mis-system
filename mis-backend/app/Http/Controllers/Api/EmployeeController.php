@@ -118,25 +118,21 @@ class EmployeeController extends Controller
                 $matches->push($matchByUuid);
             }
         }
-
         if ($email !== '') {
             $matchByEmail = Employee::withTrashed()->where('email', $email)->first();
             if ($matchByEmail) {
                 $matches->push($matchByEmail);
             }
         }
-
         $uniqueMatches = $matches->unique('id')->values();
         if ($uniqueMatches->count() > 1) {
             return response()->json([
                 'message' => 'Conflicting identifiers for employee create request.',
             ], 409);
         }
-
         $employee = $uniqueMatches->first();
         $created = false;
         $restored = false;
-
         if (!$employee) {
             $employee = new Employee();
             $employee->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
@@ -238,6 +234,7 @@ class EmployeeController extends Controller
             'deleted_at',
         ]);
     }
+
 }
 
 
