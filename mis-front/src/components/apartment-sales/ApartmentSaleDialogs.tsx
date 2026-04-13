@@ -15,6 +15,12 @@ type ApartmentSaleDialogsProps = {
   pendingDelete: ApartmentSaleRow | null;
   onCloseDelete: () => void;
   onConfirmDelete: () => void;
+  pendingApprove: ApartmentSaleRow | null;
+  onCloseApprove: () => void;
+  onConfirmApprove: () => void;
+  pendingReject: ApartmentSaleRow | null;
+  onCloseReject: () => void;
+  onConfirmReject: () => void;
   pendingHandover: ApartmentSaleRow | null;
   handoverSubmitting: boolean;
   handoverError: string | null;
@@ -45,6 +51,12 @@ export function ApartmentSaleDialogs({
   pendingDelete,
   onCloseDelete,
   onConfirmDelete,
+  pendingApprove,
+  onCloseApprove,
+  onConfirmApprove,
+  pendingReject,
+  onCloseReject,
+  onConfirmReject,
   pendingHandover,
   handoverSubmitting,
   handoverError,
@@ -75,6 +87,25 @@ export function ApartmentSaleDialogs({
         onConfirm={onConfirmDelete}
         title="Delete Sale"
         message={`Are you sure you want to delete sale ${pendingDelete?.sale_id ?? pendingDelete?.uuid ?? ""}? This action cannot be undone.`}
+      />
+
+      <ConfirmDialog
+        isOpen={Boolean(pendingApprove)}
+        onClose={onCloseApprove}
+        onConfirm={onConfirmApprove}
+        title="Approve Sale"
+        message={`Approve sale ${pendingApprove?.sale_id ?? pendingApprove?.uuid ?? ""}? This will unlock payment, municipality, and the rest of the sale workflow.`}
+        confirmLabel="Approve Sale"
+        confirmVariant="success"
+      />
+
+      <ConfirmDialog
+        isOpen={Boolean(pendingReject)}
+        onClose={onCloseReject}
+        onConfirm={onConfirmReject}
+        title="Reject Sale"
+        message={`Reject sale ${pendingReject?.sale_id ?? pendingReject?.uuid ?? ""}? This will cancel the sale and block payment workflow.`}
+        confirmLabel="Reject Sale"
       />
 
       <Modal isOpen={Boolean(pendingHandover)} onClose={onCloseHandover} title="Handover Apartment Key" size="sm">
@@ -216,4 +247,3 @@ export function ApartmentSaleDialogs({
     </>
   );
 }
-

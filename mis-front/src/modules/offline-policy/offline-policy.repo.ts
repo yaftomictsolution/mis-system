@@ -32,6 +32,10 @@ export const OFFLINE_POLICY_MODULES = [
   "employees",
   "salary_advances",
   "salary_payments",
+  "accounts",
+  "account_transactions",
+  "exchange_rates",
+  "employee_salary_histories",
 ] as const;
 
 export type OfflineModuleKey = (typeof OFFLINE_POLICY_MODULES)[number];
@@ -73,6 +77,10 @@ export const DEFAULT_OFFLINE_POLICY: OfflinePolicy = {
     rental_payments: DEFAULT_RETENTION_DAYS,
     salary_advances: DEFAULT_RETENTION_DAYS,
     salary_payments: DEFAULT_RETENTION_DAYS,
+    accounts: DEFAULT_RETENTION_DAYS,
+    account_transactions: DEFAULT_RETENTION_DAYS,
+    exchange_rates: DEFAULT_RETENTION_DAYS,
+    employee_salary_histories: DEFAULT_RETENTION_DAYS,
   },
 };
 
@@ -126,6 +134,10 @@ export function normalizeOfflinePolicy(input: unknown): OfflinePolicy {
       rental_payments: toDays(moduleRetention.rental_payments),
       salary_advances: toDays(moduleRetention.salary_advances),
       salary_payments: toDays(moduleRetention.salary_payments),
+      accounts: toDays(moduleRetention.accounts),
+      account_transactions: toDays(moduleRetention.account_transactions),
+      exchange_rates: toDays(moduleRetention.exchange_rates),
+      employee_salary_histories: toDays(moduleRetention.employee_salary_histories),
     },
   };
 }
@@ -371,4 +383,8 @@ export const OFFLINE_POLICY_MODULE_LABELS: Record<OfflineModuleKey, string> = {
   rental_payments: "Rental Payments",
   salary_advances: "Salary Advances",
   salary_payments: "Salary Payments",
+  accounts: "Accounts",
+  account_transactions: "Account Transactions",
+  exchange_rates: "Exchange Rates",
+  employee_salary_histories: "Employee Salary Histories",
 };

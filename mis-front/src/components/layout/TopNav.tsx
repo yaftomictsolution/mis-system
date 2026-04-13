@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Clock,
   FileText,
+  CheckCircle2,
   LogOut,
   Menu,
   Moon,
@@ -98,6 +99,21 @@ function mapApiNotification(item: AdminNotificationRow): DashboardNotification {
   if (category === "sale_deed_eligible") {
     tone = unread ? "warning" : "success";
     icon = AlertTriangle;
+  } else if (category === "sale_approval_required") {
+    tone = unread ? "warning" : "info";
+    icon = FileText;
+  } else if (category === "sale_approved") {
+    tone = unread ? "success" : "info";
+    icon = CheckCircle2;
+  } else if (category === "sale_rejected") {
+    tone = unread ? "warning" : "info";
+    icon = AlertTriangle;
+  } else if (category === "sale_deed_issued") {
+    tone = unread ? "success" : "info";
+    icon = FileText;
+  } else if (category === "sale_payment_received") {
+    tone = unread ? "success" : "info";
+    icon = CheckCircle2;
   }
 
   return {
@@ -114,7 +130,6 @@ function mapApiNotification(item: AdminNotificationRow): DashboardNotification {
 }
 
 export default function TopNav() {
-  
   const router = useRouter();
   const dispatch = useDispatch();
   const user = useSelector((state: RootState) => state.auth.user);
@@ -139,8 +154,12 @@ export default function TopNav() {
 
   const unreadCount = useMemo(() => notifications.filter((item) => item.unread).length, [notifications]);
   const readCount = useMemo(() => notifications.filter((item) => !item.unread).length, [notifications]);
-  const unreadEligibleCount = useMemo(
-    () => notifications.filter((item) => item.unread && item.category === "sale_deed_eligible").length,
+  const unreadApprovalCount = useMemo(
+    () =>
+      notifications.filter(
+        (item) =>
+          item.unread && (item.category === "sale_deed_eligible" || item.category === "sale_approval_required")
+      ).length,
     [notifications]
   );
 
@@ -160,7 +179,17 @@ export default function TopNav() {
         setNotifications(mapped);
 
         if (showAdminToast && canApproveSales) {
+          const saleApprovalCount = mapped.filter(
+            (item) => item.unread && item.category === "sale_approval_required"
+          ).length;
           const deedCount = mapped.filter((item) => item.unread && item.category === "sale_deed_eligible").length;
+          if (saleApprovalCount > 0) {
+            const key = `sale-approval-alert-${user.id}-${new Date().toDateString()}`;
+            if (!sessionStorage.getItem(key)) {
+              notifyInfo(`${saleApprovalCount} apartment sale(s) are waiting for admin approval.`);
+              sessionStorage.setItem(key, "1");
+            }
+          }
           if (deedCount > 0) {
             const key = `deed-alert-${user.id}-${new Date().toDateString()}`;
             if (!sessionStorage.getItem(key)) {
@@ -293,6 +322,14 @@ export default function TopNav() {
     }
 
     setIsNotificationsOpen(false);
+    if (item.category === "sale_approval_required") {
+      router.push("/apartment-sales?tab=pending-approval");
+      return;
+    }
+    if (item.category === "sale_deed_issued" && item.saleUuid) {
+      router.push(`/apartment-sales/${item.saleUuid}/history`);
+      return;
+    }
     if (item.saleUuid) {
       router.push(`/apartment-sales/${item.saleUuid}/financial`);
     }
@@ -335,7 +372,8 @@ export default function TopNav() {
   };
 
   return (
-    <header className="h-16 flex items-center justify-between px-4 lg:px-8 border-b border-slate-200 dark:border-[#2a2a3e] bg-white/80 dark:bg-[#12121a]/50 backdrop-blur-md sticky top-0 z-30 transition-colors duration-300">
+    <div className="sticky top-0 z-30">
+      <header className="h-16 flex items-center justify-between px-4 lg:px-8 border-b border-slate-200 dark:border-[#2a2a3e] bg-white/80 dark:bg-[#12121a]/50 backdrop-blur-md transition-colors duration-300">
       <div className="flex items-center gap-4">
         <button
           onClick={() => dispatch(toggleSidebar())}
@@ -434,7 +472,7 @@ export default function TopNav() {
                     <p className="text-xs font-semibold text-slate-800 dark:text-slate-100">Notifications</p>
                     <p className="text-[10px] text-slate-500 mt-1">
                       {unreadCount} unread updates
-                      {canApproveSales && unreadEligibleCount > 0 ? ` | ${unreadEligibleCount} deed approvals` : ""}
+                      {canApproveSales && unreadApprovalCount > 0 ? ` | ${unreadApprovalCount} approval alerts` : ""}
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -591,5 +629,6 @@ export default function TopNav() {
         </div>
       </div>
     </header>
+    </div>
   );
 }

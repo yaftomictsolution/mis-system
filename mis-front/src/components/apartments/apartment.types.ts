@@ -17,6 +17,10 @@ export type ApartmentFormData = {
   area_sqm: string;
   apartment_shape: string;
   corridor: string;
+  north_boundary: string;
+  south_boundary: string;
+  east_boundary: string;
+  west_boundary: string;
   status: ApartmentStatus;
   qr_code: string;
   additional_info: string;
@@ -36,6 +40,10 @@ export const createEmptyApartmentForm = (): ApartmentFormData => ({
   area_sqm: "",
   apartment_shape: "",
   corridor: "",
+  north_boundary: "",
+  south_boundary: "",
+  east_boundary: "",
+  west_boundary: "",
   status: "available",
   qr_code: "",
   additional_info: "",

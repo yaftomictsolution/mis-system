@@ -12,6 +12,7 @@ type ManagedModuleKey =
   | "employees"
   | "salary_advances"
   | "salary_payments"
+  | "accounts"
   | "users"
   | "roles"
   | "projects"
@@ -227,6 +228,21 @@ function recordFromApi(moduleKey: ManagedModuleKey, row: Record<string, unknown>
     };
   }
 
+  if (moduleKey === "accounts") {
+    return {
+      id: uuid,
+      deleteKey: uuid,
+      title: stringOrFallback(row.name, uuid),
+      subtitle: `${stringOrFallback(row.account_type, "account")} / ${stringOrFallback(row.currency, "USD")}`,
+      detail: stringOrFallback(
+        row.delete_blocked_reason,
+        `${stringOrFallback(row.status, "Account")} / Balance ${String(row.current_balance ?? 0)}`
+      ),
+      updatedAt: toTimestamp(row.updated_at),
+      deletedAt,
+    };
+  }
+
   if (moduleKey === "users") {
     const roles = Array.isArray(row.roles)
       ? row.roles.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(", ")
@@ -391,6 +407,12 @@ const MODULE_CONFIG: Record<ManagedModuleKey, ModuleConfig> = {
     label: "Salary Payments",
     listPath: "/api/salary-payments",
     deletePath: (uuid) => `/api/salary-payments/${uuid}/force`,
+    supportsSoftDelete: true,
+  },
+  accounts: {
+    label: "Accounts",
+    listPath: "/api/accounts",
+    deletePath: (uuid) => `/api/accounts/${uuid}/force`,
     supportsSoftDelete: true,
   },
   users: {

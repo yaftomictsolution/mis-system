@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MIS Database Design - Client Version</title>
+  <style>
+    :root {
+      --ink: #132238;
+      --muted: #5f6e7d;
+      --line: #dbe3ea;
+      --panel: #f6f8fb;
+      --brand: #0c5a75;
+      --accent: #d99b24;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      color: var(--ink);
+      background: #fff;
+      line-height: 1.55;
+    }
+
+    .page {
+      width: 100%;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 36px 40px 56px;
+    }
+
+    .hero {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      border-bottom: 3px solid var(--brand);
+      padding-bottom: 18px;
+      margin-bottom: 28px;
+    }
+
+    .hero img {
+      width: 78px;
+      height: 78px;
+      object-fit: contain;
+      border-radius: 16px;
+      background: #fff;
+      border: 1px solid var(--line);
+      padding: 8px;
+    }
+
+    .eyebrow {
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.15;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    h2 {
+      margin: 34px 0 12px;
+      font-size: 22px;
+      color: var(--brand);
+      border-left: 5px solid var(--accent);
+      padding-left: 10px;
+    }
+
+    h3 {
+      margin: 22px 0 8px;
+      font-size: 17px;
+      color: var(--ink);
+    }
+
+    p {
+      margin: 10px 0;
+    }
+
+    ul, ol {
+      margin: 8px 0 12px 22px;
+    }
+
+    li {
+      margin: 5px 0;
+    }
+
+    .summary {
+      background: linear-gradient(135deg, #f6fbff, #fff7e9);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px 20px;
+      margin-bottom: 22px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 18px;
+      font-size: 13px;
+    }
+
+    th, td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--panel);
+      color: var(--brand);
+      font-weight: 700;
+    }
+
+    .module {
+      margin-bottom: 24px;
+      page-break-inside: avoid;
+    }
+
+    .erd {
+      white-space: pre-wrap;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12.5px;
+      background: #0f1720;
+      color: #eff5fb;
+      border-radius: 14px;
+      padding: 18px;
+      overflow: hidden;
+      line-height: 1.55;
+    }
+
+    .note {
+      background: #fff9ef;
+      border-left: 4px solid var(--accent);
+      padding: 12px 14px;
+      border-radius: 8px;
+      margin: 12px 0;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @media print {
+      .page {
+        padding: 18px 18px 28px;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      h2, h3, table, .summary, .erd, .note, .module {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <img src="../logo-shadab-zafa.png" alt="Shadab Zafa logo">
+      <div>
+        <div class="eyebrow">Management Information System</div>
+        <h1>Database Design Document</h1>
+        <p class="subtitle">Client-friendly explanation of how the MIS database is organized, what each section stores, and how the business data connects together.</p>
+      </div>
+    </header>
+
+    <section class="summary">
+      <p><strong>Simple explanation:</strong> the database is like a set of connected registers. One register stores customers, another stores apartments, another stores sales, another stores employees, another stores warehouse stock, and so on. These registers are connected so the system can follow the full business process from customer management to sales, rentals, payroll, inventory, procurement, and approvals.</p>
+      <p><strong>Main design goal:</strong> one system should support property operations, customer records, employee work, project usage, stock control, company assets, payments, and reporting without duplicating data.</p>
+    </section>
+
+    <h2>1. Core Idea Of The Database</h2>
+    <p>The system is divided into business sections. Each section contains tables that store one type of information. The most important sections are:</p>
+    <ol>
+      <li>User access and security</li>
+      <li>Customers and apartments</li>
+      <li>Apartment sales and installment payments</li>
+      <li>Apartment rentals and rental payments</li>
+      <li>Employees and payroll</li>
+      <li>Projects, warehouses, materials, and company assets</li>
+      <li>Purchase requests, material requests, and asset requests</li>
+      <li>Documents, CRM messages, approvals, notifications, and offline sync support</li>
+    </ol>
+
+    <h2>2. Client-Friendly Module Design</h2>
+
+    <section class="module">
+      <h3>A. User And Access Control</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>users</td><td>People who can log into the system</td></tr>
+        <tr><td>roles</td><td>User groups such as Admin, Sales, Accountant, Storekeeper</td></tr>
+        <tr><td>permissions</td><td>Actions that each role is allowed to perform</td></tr>
+        <tr><td>model_has_roles / model_has_permissions / role_has_permissions</td><td>Connection tables that assign roles and permissions</td></tr>
+        <tr><td>sessions / personal_access_tokens / password_reset_tokens</td><td>Login and token support tables</td></tr>
+      </table>
+      <p><strong>Logic:</strong> these tables control who can enter the system and what they are allowed to do.</p>
+    </section>
+
+    <section class="module">
+      <h3>B. Customers And Apartments</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>customers</td><td>People or organizations that buy or rent units</td></tr>
+        <tr><td>apartments</td><td>The apartment, shop, or unit register</td></tr>
+      </table>
+      <p><strong>Logic:</strong> a customer can buy an apartment or rent an apartment. Apartments are the main property units inside the system.</p>
+    </section>
+
+    <section class="module">
+      <h3>C. Apartment Sales</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>apartment_sales</td><td>Main sale contract</td></tr>
+        <tr><td>installments</td><td>Installment schedule of the sale</td></tr>
+        <tr><td>installment_payments</td><td>Actual installment payments received</td></tr>
+        <tr><td>apartment_sale_financials</td><td>Financial summary of the sale</td></tr>
+        <tr><td>municipality_payment_letters</td><td>Letter issued for municipality payment</td></tr>
+        <tr><td>municipality_receipts</td><td>Proof of municipality payments</td></tr>
+        <tr><td>apartment_sale_possession_logs</td><td>History of key handover or possession actions</td></tr>
+        <tr><td>apartment_sale_terminations</td><td>Sale cancellation/termination details</td></tr>
+      </table>
+      <p><strong>Logic:</strong> one sale belongs to one customer and one apartment. A sale can have many installments and many payments. The system also keeps the municipality share, financial balance, deed progress, and possession history.</p>
+    </section>
+
+    <section class="module">
+      <h3>D. Apartment Rentals</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>apartment_rentals</td><td>Rental agreement between tenant and apartment</td></tr>
+        <tr><td>rental_payments</td><td>Rent dues or billing rows</td></tr>
+        <tr><td>rental_payment_receipts</td><td>Actual rental payment receipts</td></tr>
+      </table>
+      <p><strong>Logic:</strong> a rental connects one tenant to one apartment for a contract period. The system tracks advance payment, monthly rent, payment status, and receipts.</p>
+    </section>
+
+    <section class="module">
+      <h3>E. Employees And Payroll</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>employees</td><td>Employee register</td></tr>
+        <tr><td>salary_advances</td><td>Salary taken in advance</td></tr>
+        <tr><td>salary_payments</td><td>Actual salary payment record</td></tr>
+      </table>
+      <p><strong>Logic:</strong> each employee can have many salary advances and many salary payments over time.</p>
+    </section>
+
+    <section class="module">
+      <h3>F. Projects, Warehouses, Materials, And Company Assets</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>projects</td><td>Project register</td></tr>
+        <tr><td>vendors</td><td>Supplier or vendor register</td></tr>
+        <tr><td>warehouses</td><td>Warehouse register</td></tr>
+        <tr><td>materials</td><td>Consumable goods such as cement, brick, paint, cable</td></tr>
+        <tr><td>warehouse_material_stocks</td><td>How much material is in each warehouse</td></tr>
+        <tr><td>project_material_stocks</td><td>How much material has already been issued to each project</td></tr>
+        <tr><td>stock_movements</td><td>Full history of materials moving in and out</td></tr>
+        <tr><td>company_assets</td><td>Reusable company-owned stock such as desktops, tools, machinery, vehicles</td></tr>
+      </table>
+      <p><strong>Logic:</strong> materials are consumable stock, while company assets are reusable stock. Warehouses hold both materials and available company assets.</p>
+      <div class="note">
+        <strong>Important current design note:</strong> company assets are currently quantity-based stock lines. For example, one row can represent <em>Desktop stock = 100</em> rather than one separate row for each individual desktop.
+      </div>
+    </section>
+
+    <section class="module">
+      <h3>G. Material, Purchase, And Asset Requests</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>material_requests</td><td>Request header for materials needed by a project/employee</td></tr>
+        <tr><td>material_request_items</td><td>Lines inside the material request</td></tr>
+        <tr><td>purchase_requests</td><td>Purchase request header for buying materials or assets</td></tr>
+        <tr><td>purchase_request_items</td><td>Lines inside the purchase request</td></tr>
+        <tr><td>asset_requests</td><td>Request header for reusable company assets</td></tr>
+        <tr><td>asset_assignments</td><td>Asset allocation and return history</td></tr>
+      </table>
+      <p><strong>Logic:</strong> employees and projects request materials or assets. If warehouse stock is not enough, the system creates a purchase request. When purchases are received, stock is added to the system. Assets are assigned and later returned or marked damaged/lost.</p>
+    </section>
+
+    <section class="module">
+      <h3>H. Documents, CRM, Notifications, Approvals, And Offline Support</h3>
+      <table>
+        <tr><th>Table</th><th>Meaning</th></tr>
+        <tr><td>documents</td><td>Uploaded files linked to customers, apartments, sales, or other modules</td></tr>
+        <tr><td>crm_messages</td><td>Customer communication history such as reminders</td></tr>
+        <tr><td>notifications</td><td>In-app notifications shown to users</td></tr>
+        <tr><td>approvals</td><td>Approval request header</td></tr>
+        <tr><td>approval_logs</td><td>Approval history</td></tr>
+        <tr><td>system_settings</td><td>System-wide settings</td></tr>
+        <tr><td>sync_inbox</td><td>Offline-first sync safety table</td></tr>
+      </table>
+      <p><strong>Logic:</strong> these tables support the rest of the business modules by handling files, communication, alerts, approvals, settings, and safe offline synchronization.</p>
+    </section>
+
+    <h2>3. Simple Business Workflow</h2>
+
+    <h3>Sales Workflow</h3>
+    <ol>
+      <li>Create customer</li>
+      <li>Create apartment</li>
+      <li>Create apartment sale</li>
+      <li>Create installment schedule if needed</li>
+      <li>Record installment payments</li>
+      <li>Track municipality amount and receipts</li>
+      <li>Track deed progress and key handover</li>
+      <li>If sale is cancelled, keep the termination record</li>
+    </ol>
+
+    <h3>Rental Workflow</h3>
+    <ol>
+      <li>Create rental contract between customer and apartment</li>
+      <li>Generate rental payment rows</li>
+      <li>Record rental receipts when payments are received</li>
+      <li>Track key handover and contract ending</li>
+    </ol>
+
+    <h3>Material Workflow</h3>
+    <ol>
+      <li>Create material master record</li>
+      <li>Receive stock into a warehouse</li>
+      <li>Employee creates material request for a project</li>
+      <li>Approver approves the request</li>
+      <li>Warehouse stock is reserved</li>
+      <li>Storekeeper issues material to the project</li>
+      <li>Warehouse stock decreases and project stock increases</li>
+      <li>Movement is saved in stock history</li>
+    </ol>
+
+    <h3>Purchase Workflow</h3>
+    <ol>
+      <li>If warehouse stock is not enough, create purchase request</li>
+      <li>Purchase request can be for material or company asset</li>
+      <li>Approver approves the request</li>
+      <li>Goods are received into the warehouse</li>
+      <li>Material stock or company asset stock increases</li>
+    </ol>
+
+    <h3>Company Asset Workflow</h3>
+    <ol>
+      <li>Create company asset stock line</li>
+      <li>Employee or project requests asset</li>
+      <li>Approver approves request</li>
+      <li>Allocator assigns quantity from company asset stock</li>
+      <li>Assignment history is saved</li>
+      <li>On return, stock comes back or moves into damaged/lost quantities</li>
+    </ol>
+
+    <h2>4. Main Relationships In Plain Language</h2>
+    <ul>
+      <li>One customer can have many apartment sales</li>
+      <li>One customer can have many apartment rentals</li>
+      <li>One apartment can appear in sales or rentals over time</li>
+      <li>One sale can have many installments and many payment records</li>
+      <li>One rental can have many payment rows and many receipts</li>
+      <li>One warehouse can store many materials and many company assets</li>
+      <li>One material can exist in many warehouses</li>
+      <li>One project can use many materials</li>
+      <li>One purchase request can contain many line items</li>
+      <li>One asset request can create one or more asset assignment records</li>
+      <li>One employee can create many requests and receive many payroll records</li>
+    </ul>
+
+    <h2>5. Simple ERD Diagram</h2>
+    <div class="erd">USERS
+  ├─ manage access through ROLES and PERMISSIONS
+  ├─ approve or process SALES, PURCHASES, ASSET REQUESTS, PAYMENTS
+  └─ receive NOTIFICATIONS
+
+CUSTOMERS
+  ├─ buy through APARTMENT_SALES
+  ├─ rent through APARTMENT_RENTALS
+  ├─ receive CRM_MESSAGES
+  └─ can have DOCUMENTS
+
+APARTMENTS
+  ├─ are sold through APARTMENT_SALES
+  ├─ are rented through APARTMENT_RENTALS
+  └─ can have DOCUMENTS
+
+APARTMENT_SALES
+  ├─ have INSTALLMENTS
+  ├─ have INSTALLMENT_PAYMENTS
+  ├─ have APARTMENT_SALE_FINANCIALS
+  ├─ have MUNICIPALITY_PAYMENT_LETTERS
+  ├─ have MUNICIPALITY_RECEIPTS
+  ├─ have APARTMENT_SALE_POSSESSION_LOGS
+  └─ may have APARTMENT_SALE_TERMINATIONS
+
+APARTMENT_RENTALS
+  ├─ have RENTAL_PAYMENTS
+  └─ have RENTAL_PAYMENT_RECEIPTS
+
+EMPLOYEES
+  ├─ receive SALARY_ADVANCES
+  ├─ receive SALARY_PAYMENTS
+  ├─ create MATERIAL_REQUESTS
+  ├─ create PURCHASE_REQUESTS
+  └─ create ASSET_REQUESTS
+
+WAREHOUSES
+  ├─ hold WAREHOUSE_MATERIAL_STOCKS
+  └─ hold COMPANY_ASSETS
+
+MATERIALS
+  ├─ exist in WAREHOUSE_MATERIAL_STOCKS
+  ├─ move to PROJECT_MATERIAL_STOCKS
+  ├─ appear in MATERIAL_REQUEST_ITEMS
+  ├─ appear in PURCHASE_REQUEST_ITEMS
+  └─ create STOCK_MOVEMENTS
+
+COMPANY_ASSETS
+  ├─ are requested in ASSET_REQUESTS
+  ├─ are assigned in ASSET_ASSIGNMENTS
+  └─ may be increased by PURCHASE_REQUEST_ITEMS
+
+PURCHASE_REQUESTS
+  └─ contain PURCHASE_REQUEST_ITEMS for MATERIALS or COMPANY_ASSETS
+
+PROJECTS
+  ├─ use MATERIALS
+  ├─ use COMPANY_ASSETS
+  ├─ receive MATERIAL_REQUESTS
+  └─ receive ASSET_REQUESTS</div>
+
+    <h2>6. Final Client Summary</h2>
+    <p>The database is designed to support one complete management system for the business. It connects customers, apartments, sales, rentals, employees, payroll, projects, warehouses, materials, company assets, purchase requests, approvals, files, notifications, and offline sync. This allows the company to avoid duplicate data and follow every important business activity from start to finish.</p>
+
+    <p class="small">Prepared from the implemented database structure in the current MIS backend codebase.</p>
+  </div>
+</body>
+</html>

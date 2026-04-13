@@ -9,7 +9,7 @@ const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
 const PULL_PAGE_SIZE = 200;
-const CURSOR_KEY = "user_sync_cursor";
+const CURSOR_KEY = "user_sync_cursor_v2";
 const CLEANUP_KEY = "users_last_cleanup_ms";
 const ROLE_OPTIONS_KEY = "roles_options_keys";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -67,17 +67,24 @@ function parseRolesPayload(payload: unknown): { list: Obj[]; hasMore: boolean; s
     };
   }
 
-  const paged = asObj(top);
-  const nested = paged.data;
-  if (Array.isArray(nested)) {
-    const current = Number(paged.current_page ?? 1);
-    const last = Number(paged.last_page ?? 1);
+  if (top && typeof top === "object") {
+    const paged = asObj(top);
+    const nested = paged.data;
+    
+    if (Array.isArray(nested)) {
+      const current = Number(paged.current_page ?? 1);
+      const last = Number(paged.last_page ?? 1);
+      return {
+        list: nested.map(asObj),
+        hasMore: current < last,
+        serverTime: String(meta.server_time ?? nowIso()),
+      };
+    }
+  }
 
-    return {
-      list: nested.map(asObj),
-      hasMore: current < last,
-      serverTime: String(meta.server_time ?? nowIso()),
-    };
+  const users = root.users ?? root.items ?? root.records;
+  if (Array.isArray(users)) {
+    return { list: users.map(asObj), hasMore: false, serverTime: nowIso() };
   }
 
   return { list: [], hasMore: false, serverTime: nowIso() };
@@ -177,12 +184,16 @@ function normalizeUserRoles(value: unknown): string[] {
 function sanitizeRole(input: unknown): UserRow {
   const r = asObj(input);
   const name = String(r.name ?? r.full_name ?? "").trim();
+  const customerId = Number(r.customer_id ?? 0);
   return {
     uuid: String(r.uuid ?? ""),
     name: name.slice(0, 255),
     password: "",
     email: toEmail(r.email),
     roles: normalizeUserRoles(r.roles ?? r.role),
+    customer_id: Number.isFinite(customerId) && customerId > 0 ? Math.trunc(customerId) : null,
+    customer_uuid: typeof r.customer_uuid === "string" ? r.customer_uuid.trim() || null : null,
+    customer_name: typeof r.customer_name === "string" ? r.customer_name.trim() || null : null,
     updated_at: toTs(r.updated_at ?? r.server_updated_at),
   };
 }
@@ -239,7 +250,7 @@ export async function userPullToLocal(): Promise<{ pulled: number }> {
   let serverTime = nowIso();
 
   while (true) {
-    const params: Record<string, string | number> = { offline: 1, page, per_page: PULL_PAGE_SIZE };
+    const params: Record<string, string | number> = { page, per_page: PULL_PAGE_SIZE };
     if (since && page === 1) params.since = since;
 
     const res = await api.get("/api/users", { params });
@@ -295,6 +306,7 @@ export async function UserListLocal(query: UserRoleLocalQuery = {}): Promise<Use
 
   const c = db.users.orderBy("updated_at").reverse().filter((row) => {
     if (row.name.toLowerCase().includes(q)) return true;
+    if ((row.customer_name ?? "").toLowerCase().includes(q)) return true;
     return (row.roles ?? []).some((roles) => roles.toLowerCase().includes(q));
   });
   const total = await c.count();
@@ -317,18 +329,77 @@ function readRoleOptionsCache(): string[] {
 }
 
 export async function userRoleOptions(): Promise<string[]> {
-  
   if (!isOnline()) {
     return readRoleOptionsCache();
   }
 
   try {
     const res = await api.get("/api/users/role-options");
-    const names = normalizePermissions(asObj(res.data).data);
-    lsSet(ROLE_OPTIONS_KEY, JSON.stringify(names));
+    const data = asObj(res.data).data;
+    let names: string[];
+    
+    if (Array.isArray(data)) {
+      names = normalizePermissions(data);
+    } else if (Array.isArray(res.data)) {
+      names = normalizePermissions(res.data);
+    } else {
+      names = [];
+    }
+    
+    if (names.length > 0) {
+      lsSet(ROLE_OPTIONS_KEY, JSON.stringify(names));
+    }
     return names;
   } catch {
     return readRoleOptionsCache();
+  }
+}
+
+export async function getRolesForDropdown(): Promise<string[]> {
+  const localRoles = await db.roles.toArray();
+  if (localRoles.length > 0) {
+    const names = localRoles.map((r) => r.name).filter(Boolean);
+    if (names.length > 0) {
+      lsSet(ROLE_OPTIONS_KEY, JSON.stringify(names));
+    }
+    return names;
+  }
+
+  const cached = readRoleOptionsCache();
+  if (cached.length > 0) {
+    return cached;
+  }
+
+  if (!isOnline()) {
+    return [];
+  }
+
+  try {
+    const res = await api.get("/api/roles");
+    const data = res.data;
+    let roleNames: string[] = [];
+
+    if (Array.isArray(data)) {
+      roleNames = data.map((r: unknown) => {
+        const obj = asObj(r);
+        return String(obj.name ?? "").trim();
+      }).filter(Boolean);
+    } else {
+      const root = asObj(data);
+      const arr = Array.isArray(root.data) ? root.data : 
+                  Array.isArray(root.roles) ? root.roles : [];
+      roleNames = arr.map((r: unknown) => {
+        const obj = asObj(r);
+        return String(obj.name ?? "").trim();
+      }).filter(Boolean);
+    }
+
+    if (roleNames.length > 0) {
+      lsSet(ROLE_OPTIONS_KEY, JSON.stringify(roleNames));
+    }
+    return roleNames;
+  } catch {
+    return [];
   }
 }
 
@@ -344,26 +415,40 @@ function getApiStatus(error: unknown): number | undefined {
 function sanitizeUser(input: unknown): UserRow {
   const r = obj(input);
   const name = String(r.name ?? r.full_name ?? "").trim();
+  const customerId = Number(r.customer_id ?? 0);
   return {
     uuid: String(r.uuid ?? ""),
     name: name.slice(0, 255),
     password: String(r.password ?? "").trim().slice(0, 255),
     roles: normalizeUserRoles(r.roles ?? r.role),
     email: toEmail(r.email),
+    customer_id: Number.isFinite(customerId) && customerId > 0 ? Math.trunc(customerId) : null,
+    customer_uuid: typeof r.customer_uuid === "string" ? r.customer_uuid.trim() || null : null,
+    customer_name: typeof r.customer_name === "string" ? r.customer_name.trim() || null : null,
     updated_at: toTs(r.updated_at ?? r.server_updated_at),
   };
 }
 
 async function assertNoDuplicate(row: UserRow, ignoreUuid?: string): Promise<void> {
+  if (row.email) {
+    const email = row.email.toLowerCase();
+    const emailDup = await db.users
+      .filter((item) => (item.email ?? "").toLowerCase() === email && item.uuid !== ignoreUuid)
+      .first();
 
-  if (!row.email) return;
-  const email = row.email.toLowerCase();
-  const emailDup = await db.users
-    .filter((item) => (item.email ?? "").toLowerCase() === email && item.uuid !== ignoreUuid)
-    .first();
+    if (emailDup) {
+      throw new Error("This email already exists.");
+    }
+  }
 
-  if (emailDup) {
-    throw new Error("This email already exists.");
+  if (row.customer_id && row.customer_id > 0) {
+    const customerDup = await db.users
+      .filter((item) => Number(item.customer_id ?? 0) === Number(row.customer_id) && item.uuid !== ignoreUuid)
+      .first();
+
+    if (customerDup) {
+      throw new Error("This customer is already linked to another user.");
+    }
   }
 }
 const isValidationError = (status?: number) => status === 409 || status === 422;
@@ -394,6 +479,7 @@ function toUserApiPayload(row: UserRow): Obj {
     password: row.password,
     role,
     roles: row.roles ?? [],
+    customer_id: row.customer_id ?? null,
     updated_at: row.updated_at,
   };
 }
@@ -406,6 +492,9 @@ function sanitizeUserWithFallback(input: unknown, fallback: UserRow): UserRow {
     password: saved.password || fallback.password,
     roles: saved.roles && saved.roles.length ? saved.roles : fallback.roles,
     email: saved.email ?? fallback.email,
+    customer_id: saved.customer_id ?? fallback.customer_id ?? null,
+    customer_uuid: saved.customer_uuid ?? fallback.customer_uuid ?? null,
+    customer_name: saved.customer_name ?? fallback.customer_name ?? null,
     updated_at: saved.updated_at || fallback.updated_at,
   };
 }

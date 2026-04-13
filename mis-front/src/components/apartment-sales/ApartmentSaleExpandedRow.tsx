@@ -24,7 +24,7 @@ export function ApartmentSaleExpandedRow({
   customerRemaining,
   municipalityRemaining,
 }: ApartmentSaleExpandedRowProps) {
-  const municipalityShare = toMoney2(Number(row.total_price ?? 0) * 0.15);
+  const municipalityShare = toMoney2(Number(row.net_price ?? Number(row.total_price ?? 0) - Number(row.discount ?? 0)) * 0.15);
   const actualNetRevenue = toMoney2(Number(row.actual_net_revenue ?? 0));
   const deedStatus = String(row.deed_status ?? "not_issued").replaceAll("_", " ");
   const possessionStatus = String(row.key_handover_status ?? "not_handed_over").replaceAll("_", " ");
@@ -79,4 +79,3 @@ export function ApartmentSaleExpandedRow({
     </div>
   );
 }
-

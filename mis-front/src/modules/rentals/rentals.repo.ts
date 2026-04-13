@@ -1,7 +1,8 @@
-import { db, type ApartmentRentalRow, type RentalPaymentRow } from "@/db/localDB";
+﻿import { db, type ApartmentRentalRow, type RentalPaymentRow } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { emitAppEvent } from "@/lib/appEvents";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { accountTransactionsPullToLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
@@ -49,6 +50,7 @@ export type RentalCreateInput = {
   advance_months: number;
   initial_advance_paid?: number;
   initial_payment_method?: string;
+  initial_account_id?: number | null;
   notes?: string;
 };
 
@@ -67,6 +69,7 @@ export type RentalPaymentInput = {
   period_month?: string;
   payment_method?: string;
   reference_no?: string;
+  account_id: number;
   notes?: string;
 };
 
@@ -83,6 +86,7 @@ export type RentalFinanceApproveInput = {
   payment_date?: string;
   payment_method?: string;
   reference_no?: string;
+  account_id: number;
   notes?: string;
 };
 
@@ -303,6 +307,10 @@ function createPayload(input: RentalCreateInput): Obj {
     advance_months: Math.max(1, Math.min(12, Math.trunc(input.advance_months || 3))),
     initial_advance_paid: toMoney(input.initial_advance_paid ?? 0),
     initial_payment_method: (input.initial_payment_method ?? "cash").trim() || "cash",
+    initial_account_id:
+      input.initial_account_id !== null && input.initial_account_id !== undefined && Number.isFinite(Number(input.initial_account_id)) && Number(input.initial_account_id) > 0
+        ? Math.trunc(Number(input.initial_account_id))
+        : null,
     notes: (input.notes ?? "").trim() || null,
   };
 }
@@ -397,10 +405,17 @@ export async function rentalCreate(input: RentalCreateInput): Promise<ApartmentR
     throw new Error("Rental creation requires internet connection.");
   }
 
+  if (toMoney(input.initial_advance_paid ?? 0) > 0 && (!Number.isFinite(Number(input.initial_account_id)) || Number(input.initial_account_id) <= 0)) {
+    throw new Error("Payment account is required when initial advance is received.");
+  }
+
   try {
     const res = await api.post("/api/rentals", createPayload(input));
     const row = sanitizeRental(asObj(res.data).data);
     await db.rentals.put(row);
+    if (toMoney(input.initial_advance_paid ?? 0) > 0) {
+      await Promise.all([accountsPullToLocal(), accountTransactionsPullToLocal()]);
+    }
     notifySuccess("Rental contract created.");
     emitRentalsChanged(row.uuid);
     return row;
@@ -451,6 +466,9 @@ export async function rentalAddPayment(uuid: string, input: RentalPaymentInput):
   if (!isOnline()) {
     throw new Error("Payment requires internet connection.");
   }
+  if (!Number.isFinite(Number(input.account_id)) || Number(input.account_id) <= 0) {
+    throw new Error("Payment account is required.");
+  }
 
   try {
     const payload: Obj = {
@@ -462,6 +480,7 @@ export async function rentalAddPayment(uuid: string, input: RentalPaymentInput):
       period_month: (input.period_month ?? "").trim() || undefined,
       payment_method: (input.payment_method ?? "cash").trim() || "cash",
       reference_no: (input.reference_no ?? "").trim() || undefined,
+      account_id: Math.trunc(Number(input.account_id)),
       notes: (input.notes ?? "").trim() || undefined,
     };
 
@@ -486,6 +505,7 @@ export async function rentalAddPayment(uuid: string, input: RentalPaymentInput):
     }
 
     await db.rentals.put(rental);
+    await Promise.all([accountsPullToLocal(), accountTransactionsPullToLocal()]);
     notifySuccess("Rental payment saved.");
     emitRentalsChanged(rental.uuid);
     return rental;
@@ -541,6 +561,9 @@ export async function rentalApprovePayment(
   if (!isOnline()) {
     throw new Error("Finance approval requires internet connection.");
   }
+  if (!Number.isFinite(Number(input.account_id)) || Number(input.account_id) <= 0) {
+    throw new Error("Payment account is required.");
+  }
 
   try {
     const payload: Obj = {
@@ -548,6 +571,7 @@ export async function rentalApprovePayment(
       payment_date: input.payment_date || undefined,
       payment_method: (input.payment_method ?? "cash").trim() || "cash",
       reference_no: (input.reference_no ?? "").trim() || undefined,
+      account_id: Math.trunc(Number(input.account_id)),
       notes: (input.notes ?? "").trim() || undefined,
     };
     const res = await api.post(`/api/rental-payments/${paymentUuid}/approve`, payload);
@@ -562,6 +586,7 @@ export async function rentalApprovePayment(
       await db.rental_payments.put(payment);
     }
 
+    await Promise.all([accountsPullToLocal(), accountTransactionsPullToLocal()]);
     notifySuccess("Payment approved by finance.");
     emitRentalsChanged(rental.uuid);
     return { rental, payment };
@@ -644,3 +669,7 @@ export async function rentalPaymentsListLocal(query: RentalPaymentsLocalQuery = 
   const items = rows.slice(offset, offset + pageSize);
   return { items, page, pageSize, total, hasMore: offset + items.length < total };
 }
+
+
+
+

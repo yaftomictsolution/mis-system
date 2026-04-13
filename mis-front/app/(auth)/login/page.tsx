@@ -1,6 +1,6 @@
 "use client";
-import { useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, type FormEvent } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch, RootState } from "@/store/store";
 import { login, hydrateAuth } from "@/store/auth/authSlice";
@@ -8,12 +8,20 @@ import { computeCredHash } from "@/lib/crypto";
 import { isOfflineAccessExpired, isOfflineSystemBlocked } from "@/modules/offline-policy/offline-policy.repo";
 import { ArrowRight, Building2, Eye, EyeOff, LockKeyhole, Mail } from "lucide-react";
 
-export default function LoginPage() {
+function normalizeRedirectPath(raw: string | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("/")) return null;
+  if (trimmed.startsWith("//")) return null;
+  return trimmed;
+}
 
-  
+function LoginPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const dispatch = useDispatch<AppDispatch>();
   const { status, error } = useSelector((s: RootState) => s.auth);
+  const redirectTarget = normalizeRedirectPath(searchParams.get("redirect"));
 
   const [email, setEmail] = useState("admin@example.com");
   const [password, setPassword] = useState("password123");
@@ -31,13 +39,25 @@ export default function LoginPage() {
     dispatch(hydrateAuth({ token, user: user as RootState["auth"]["user"] }));
   };
 
-  const redirectAfterLogin = async () => {
+  const resolveDefaultRoute = (user: RootState["auth"]["user"] | null): string => {
+    if (redirectTarget) return redirectTarget;
+    if (Number(user?.customer_id ?? 0) > 0) return "/customer-portal";
+    return "/";
+  };
+
+  const redirectAfterLogin = async (user: RootState["auth"]["user"] | null) => {
+    const target = resolveDefaultRoute(user);
     if (navigator.onLine) {
-      router.replace("/");
+      router.replace(target);
       return;
     }
 
     try {
+      const hasTarget = await caches.match(target);
+      if (hasTarget) {
+        router.replace(target);
+        return;
+      }
       const hasRoot = await caches.match("/");
       router.replace(hasRoot ? "/" : "/offline");
     } catch {
@@ -84,7 +104,7 @@ export default function LoginPage() {
       }
 
       saveSession(tokenToUse, userToUse);
-      await redirectAfterLogin();
+      await redirectAfterLogin(userToUse as RootState["auth"]["user"]);
       return true;
     } catch {
       rejectLogin("Offline login failed");
@@ -96,7 +116,7 @@ export default function LoginPage() {
     try {
       const result = await dispatch(login({ email, password }));
       if (!login.fulfilled.match(result)) return false;
-      router.replace("/");
+      router.replace(resolveDefaultRoute(result.payload.user));
       return true;
     } catch {
       return false;
@@ -196,5 +216,21 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center bg-slate-100 p-4 dark:bg-[#0a0a0f]">
+          <div className="rounded-2xl border border-slate-200 bg-white px-6 py-4 text-sm text-slate-500 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a] dark:text-slate-300">
+            Loading login...
+          </div>
+        </main>
+      }
+    >
+      <LoginPageContent />
+    </Suspense>
   );
 }

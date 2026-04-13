@@ -27,7 +27,8 @@ import {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const POLICY_REFRESH_MS = 5 * 60 * 1000;
-const POLICY_ENFORCE_MS = 5 * 1000;
+const POLICY_ENFORCE_MS = 60 * 1000;
+const POLICY_VISIBLE_REFRESH_COOLDOWN_MS = 30 * 1000;
 
 type ModuleCleanupConfig = {
   getTable: () =>
@@ -72,6 +73,10 @@ const MODULE_CONFIG: Record<OfflineModuleKey, ModuleCleanupConfig> = {
   rental_payments: { getTable: () => db.rental_payments },
   salary_advances: { getTable: () => db.salary_advances, entity: "salary_advances" },
   salary_payments: { getTable: () => db.salary_payments, entity: "salary_payments" },
+  accounts: { getTable: () => db.accounts, entity: "accounts" },
+  account_transactions: { getTable: () => db.account_transactions },
+  exchange_rates: { getTable: () => db.exchange_rates, entity: "exchange_rates" },
+  employee_salary_histories: { getTable: () => db.employee_salary_histories },
 };
 
 const ROLLBACK_ENTITY_TABLES: Record<string, (() => RollbackTable | undefined) | undefined> = {
@@ -93,6 +98,8 @@ const ROLLBACK_ENTITY_TABLES: Record<string, (() => RollbackTable | undefined) |
   users: () => db.users as unknown as RollbackTable,
   salary_advances: () => db.salary_advances as unknown as RollbackTable,
   salary_payments: () => db.salary_payments as unknown as RollbackTable,
+  accounts: () => db.accounts as unknown as RollbackTable,
+  exchange_rates: () => db.exchange_rates as unknown as RollbackTable,
 };
 
 let maintenanceInProgress = false;
@@ -348,6 +355,8 @@ export async function runOfflinePolicyMaintenance(): Promise<void> {
 
 export function useOfflinePolicyGuard(): void {
   useEffect(() => {
+    let lastVisibleTickAt = 0;
+
     const refreshPolicy = async () => {
       if (typeof navigator === "undefined" || !navigator.onLine) return;
       try {
@@ -368,25 +377,41 @@ export function useOfflinePolicyGuard(): void {
       await runOfflinePolicyMaintenance();
     };
 
-    void tick(true);
+    const runTick = (refreshRemote: boolean, reason: "initial" | "enforce" | "refresh" | "online" | "offline" | "visible") => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden" && reason !== "offline") {
+        return;
+      }
+
+      if (reason === "visible") {
+        const now = Date.now();
+        if (now - lastVisibleTickAt < POLICY_VISIBLE_REFRESH_COOLDOWN_MS) {
+          return;
+        }
+        lastVisibleTickAt = now;
+      }
+
+      void tick(refreshRemote);
+    };
+
+    runTick(true, "initial");
 
     const enforceTimer = window.setInterval(() => {
-      void tick(false);
+      runTick(false, "enforce");
     }, POLICY_ENFORCE_MS);
 
     const refreshTimer = window.setInterval(() => {
-      void tick(true);
+      runTick(true, "refresh");
     }, POLICY_REFRESH_MS);
 
     const onOnline = () => {
-      void tick(true);
+      runTick(true, "online");
     };
     const onOffline = () => {
       if (isOfflineSystemBlocked() || isOfflineAccessExpired()) {
         window.location.replace("/login");
         return;
       }
-      void tick(false);
+      runTick(false, "offline");
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") {
@@ -394,7 +419,7 @@ export function useOfflinePolicyGuard(): void {
           window.location.replace("/login");
           return;
         }
-        void tick(navigator.onLine);
+        runTick(navigator.onLine, "visible");
       }
     };
 

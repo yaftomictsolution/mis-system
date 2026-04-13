@@ -25,6 +25,11 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    if (Number(user?.customer_id ?? 0) > 0) {
+      router.replace("/customer-portal");
+      return;
+    }
+
     if (!user && status !== "loading") {
       void dispatch(fetchMe());
     }

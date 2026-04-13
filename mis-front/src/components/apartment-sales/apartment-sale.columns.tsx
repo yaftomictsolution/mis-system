@@ -40,6 +40,9 @@ type SalesColumnOptions = {
   municipalityRemainingBySaleUuid?: ReadonlyMap<string, number>;
   installmentPaidBySaleUuid?: ReadonlyMap<string, number>;
   canManageSales?: boolean;
+  canApproveSale?: boolean;
+  onApproveSale?: (row: ApartmentSaleRow) => void;
+  onRejectSale?: (row: ApartmentSaleRow) => void;
   onHandoverKey?: (row: ApartmentSaleRow) => void;
   onTerminate?: (row: ApartmentSaleRow) => void;
 };
@@ -54,6 +57,9 @@ export function createApartmentSalesColumns(options: SalesColumnOptions = {}): C
   const municipalityRemainingBySaleUuid = options.municipalityRemainingBySaleUuid;
   const installmentPaidBySaleUuid = options.installmentPaidBySaleUuid;
   const canManageSales = Boolean(options.canManageSales);
+  const canApproveSale = Boolean(options.canApproveSale && options.onApproveSale);
+  const onApproveSale = options.onApproveSale;
+  const onRejectSale = options.onRejectSale;
   const onHandoverKey = options.onHandoverKey;
   const onTerminate = options.onTerminate;
 
@@ -67,19 +73,29 @@ export function createApartmentSalesColumns(options: SalesColumnOptions = {}): C
     if (typeof fromMap === "number" && Number.isFinite(fromMap)) {
       return Math.max(0, toNumber(fromMap));
     }
+    const customerReceivable = Math.max(
+      0,
+      toNumber((item.net_price ?? toNumber(item.total_price) - toNumber(item.discount)) ?? 0) * 0.85
+    );
+    if (item.payment_type !== "installment" && Number(item.installments_count ?? 0) <= 0) {
+      return normalizeStatus(item.status) === "completed"
+        ? Math.max(0, customerReceivable)
+        : 0;
+    }
     return Math.max(0, toNumber(item.installments_paid_total));
   };
 
   const remainingAmount = (item: ApartmentSaleRow): number => {
     const net = toNumber(item.net_price ?? toNumber(item.total_price) - toNumber(item.discount));
+    const customerReceivable = Math.max(0, net * 0.85);
     const status = normalizeStatus(item.status);
     if (status === "terminated" || status === "defaulted") {
       return Math.max(0, toNumber(item.remaining_debt_after_termination));
     }
-    if (item.payment_type !== "installment") {
-      return status === "completed" ? 0 : Math.max(0, net);
+    if (item.payment_type !== "installment" && Number(item.installments_count ?? 0) <= 0) {
+      return status === "completed" ? 0 : Math.max(0, customerReceivable);
     }
-    return Math.max(0, net - paidAmount(item));
+    return Math.max(0, customerReceivable - paidAmount(item));
   };
 
   const columns: Column<ApartmentSaleRow>[] = [
@@ -112,7 +128,7 @@ export function createApartmentSalesColumns(options: SalesColumnOptions = {}): C
       render: (item) => (
         <div className="leading-5">
           <div>{money(item.total_price)}</div>
-          <div className="text-xs text-slate-500">{`Disc: ${money(item.discount)} | Net: ${money((item.net_price ?? item.total_price - item.discount) || 0)}`}</div>
+          <div className="text-xs text-slate-500">{`Net: ${money((item.net_price ?? item.total_price - item.discount) || 0)}`}</div>
         </div>
       ),
     },
@@ -144,14 +160,36 @@ export function createApartmentSalesColumns(options: SalesColumnOptions = {}): C
         );
       },
     },
-    {
-      key: "status",
-      label: "Status",
-      render: (item) => {
-        const status = normalizeStatus(item.status);
-        return <Badge color={statusColor[status]}>{status}</Badge>;
+      {
+        key: "status",
+        label: "Status",
+        render: (item) => {
+          const status = normalizeStatus(item.status);
+          return (
+            <div className="space-y-1">
+              <Badge color={statusColor[status]}>{status}</Badge>
+              {status === "pending" && canApproveSale && (
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onApproveSale?.(item)}
+                    className="inline-flex items-center rounded-lg border border-emerald-300 px-2 py-1 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-50"
+                  >
+                    Approve Sale
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRejectSale?.(item)}
+                    className="inline-flex items-center rounded-lg border border-red-300 px-2 py-1 text-[11px] font-medium text-red-700 transition-colors hover:bg-red-50"
+                  >
+                    Reject Sale
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        },
       },
-    },
     {
       key: "possession",
       label: "Possession",

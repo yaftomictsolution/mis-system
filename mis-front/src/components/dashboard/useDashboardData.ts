@@ -109,6 +109,7 @@ type DashboardRefreshOptions = {
 const DASHBOARD_CACHE_PREFIX = "dashboard_summary_v1";
 const DASHBOARD_CACHE_TTL_SECONDS = 300;
 const REMOTE_REFRESH_MIN_INTERVAL_MS = 30_000;
+const VISIBLE_REFRESH_MIN_INTERVAL_MS = 30_000;
 
 const EMPTY_SUMMARY: DashboardSummary = {
   totalApartments: 0,
@@ -516,7 +517,25 @@ async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
     return diff >= 0 && diff <= 7 * 24 * 60 * 60 * 1000;
   }).length;
 
-  const latestDeedNotificationBySaleUuid = new Map<string, (typeof notifications)[number]>();
+  const latestNotificationBySaleCategory = (
+    category: string,
+  ): Map<string, (typeof notifications)[number]> => {
+    const map = new Map<string, (typeof notifications)[number]>();
+    const rows = [...notifications]
+      .filter((row) => safeStatus(row.category) === category)
+      .sort((a, b) => timestampOf(b.created_at) - timestampOf(a.created_at));
+
+    for (const notification of rows) {
+      const saleUuid = String(notification.sale_uuid ?? "").trim();
+      if (!saleUuid || map.has(saleUuid)) continue;
+      map.set(saleUuid, notification);
+    }
+
+    return map;
+  };
+
+  const latestSaleApprovalNotificationBySaleUuid = latestNotificationBySaleCategory("sale_approval_required");
+  const latestDeedNotificationBySaleUuid = latestNotificationBySaleCategory("sale_deed_eligible");
   const deedNotifications = [...notifications]
     .filter((row) => safeStatus(row.category) === "sale_deed_eligible")
     .sort((a, b) => timestampOf(b.created_at) - timestampOf(a.created_at));
@@ -526,6 +545,16 @@ async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
     if (!saleUuid || latestDeedNotificationBySaleUuid.has(saleUuid)) continue;
     latestDeedNotificationBySaleUuid.set(saleUuid, notification);
   }
+
+  const pendingSaleApprovals = sales
+    .filter((sale) => safeStatus(sale.status) === "pending")
+    .sort((a, b) => {
+      const notificationA = latestSaleApprovalNotificationBySaleUuid.get(a.uuid);
+      const notificationB = latestSaleApprovalNotificationBySaleUuid.get(b.uuid);
+      const timeA = timestampOf(notificationA?.created_at) || timestampOf(a.updated_at) || timestampOf(a.sale_date);
+      const timeB = timestampOf(notificationB?.created_at) || timestampOf(b.updated_at) || timestampOf(b.sale_date);
+      return timeB - timeA;
+    });
 
   const pendingApprovalSales = sales
     .filter((sale) => isSalePendingDeedApproval(sale, financialBySaleUuid.get(sale.uuid)))
@@ -556,20 +585,47 @@ async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
       };
     });
 
-  const approvals = pendingApprovalSales.slice(0, 6).map((sale) => {
-    const notification = latestDeedNotificationBySaleUuid.get(sale.uuid);
-    const saleId = String(sale.sale_id ?? "").trim() || sale.uuid.slice(0, 8).toUpperCase();
-    const customerName = customerById.get(Number(sale.customer_id ?? 0)) || "Customer";
-    const apartmentName = apartmentById.get(Number(sale.apartment_id ?? 0)) || "Apartment";
+  const approvals = [
+    ...pendingSaleApprovals.map((sale) => {
+      const notification = latestSaleApprovalNotificationBySaleUuid.get(sale.uuid);
+      const saleId = String(sale.sale_id ?? "").trim() || sale.uuid.slice(0, 8).toUpperCase();
+      const customerName = customerById.get(Number(sale.customer_id ?? 0)) || "Customer";
+      const apartmentName = apartmentById.get(Number(sale.apartment_id ?? 0)) || "Apartment";
 
-    return {
-      id: sale.uuid,
-      desc: notification?.title || `Deed approval required for ${apartmentName}`,
-      requester: `${customerName} - Sale ${saleId}`,
-      time: relativeTime(notification?.created_at ?? sale.updated_at ?? sale.sale_date),
-      href: `/apartment-sales/${sale.uuid}/financial`,
-    };
-  });
+      return {
+        id: sale.uuid,
+        desc: notification?.title || `Sale approval required for ${apartmentName}`,
+        requester: `${customerName} - Sale ${saleId}`,
+        time: relativeTime(notification?.created_at ?? sale.updated_at ?? sale.sale_date),
+        href: "/apartment-sales?tab=pending-approval",
+        sortTs: timestampOf(notification?.created_at) || timestampOf(sale.updated_at) || timestampOf(sale.sale_date),
+      };
+    }),
+    ...pendingApprovalSales.map((sale) => {
+      const notification = latestDeedNotificationBySaleUuid.get(sale.uuid);
+      const saleId = String(sale.sale_id ?? "").trim() || sale.uuid.slice(0, 8).toUpperCase();
+      const customerName = customerById.get(Number(sale.customer_id ?? 0)) || "Customer";
+      const apartmentName = apartmentById.get(Number(sale.apartment_id ?? 0)) || "Apartment";
+
+      return {
+        id: sale.uuid,
+        desc: notification?.title || `Deed approval required for ${apartmentName}`,
+        requester: `${customerName} - Sale ${saleId}`,
+        time: relativeTime(notification?.created_at ?? sale.updated_at ?? sale.sale_date),
+        href: `/apartment-sales/${sale.uuid}/financial`,
+        sortTs: timestampOf(notification?.created_at) || timestampOf(sale.updated_at) || timestampOf(sale.sale_date),
+      };
+    }),
+  ]
+    .sort((a, b) => b.sortTs - a.sortTs)
+    .slice(0, 6)
+    .map((row): DashboardApproval => ({
+      id: row.id,
+      desc: row.desc,
+      requester: row.requester,
+      time: row.time,
+      href: row.href,
+    }));
 
   const totalRentalCount = rentals.length;
   const rentalStatusCounts = {
@@ -705,7 +761,7 @@ async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
       totalRevenue,
       currentMonthRevenue,
       previousMonthRevenue,
-      pendingApprovals: pendingApprovalSales.length,
+      pendingApprovals: pendingSaleApprovals.length + pendingApprovalSales.length,
       overdueInstallments: overdueRows.length,
       overdueAmount,
       municipalityPending,
@@ -729,6 +785,7 @@ export function useDashboardData(): DashboardData {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(EMPTY_SNAPSHOT);
   const [snapshotOwner, setSnapshotOwner] = useState("");
   const lastRemoteFetchRef = useRef(0);
+  const lastVisibleRefreshRef = useRef(0);
 
   const refresh = useCallback(async (options: DashboardRefreshOptions = {}): Promise<void> => {
     const { force = false, silent = false, preferLocal = false } = options;
@@ -822,6 +879,11 @@ export function useDashboardData(): DashboardData {
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") {
+        const now = Date.now();
+        if (now - lastVisibleRefreshRef.current < VISIBLE_REFRESH_MIN_INTERVAL_MS) {
+          return;
+        }
+        lastVisibleRefreshRef.current = now;
         runRefresh({ silent: true });
       }
     };

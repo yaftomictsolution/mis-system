@@ -42,38 +42,41 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function renderThumbnail(image: HTMLImageElement): string | null {
+function renderThumbnail(image: HTMLImageElement, size = THUMB_SIZE): string | null {
   if (!isBrowser()) return null;
 
   const canvas = document.createElement("canvas");
-  canvas.width = THUMB_SIZE;
-  canvas.height = THUMB_SIZE;
+  canvas.width = size;
+  canvas.height = size;
 
   const context = canvas.getContext("2d");
   if (!context) return null;
 
-  const sourceWidth = image.naturalWidth || image.width || THUMB_SIZE;
-  const sourceHeight = image.naturalHeight || image.height || THUMB_SIZE;
-  const scale = Math.max(THUMB_SIZE / sourceWidth, THUMB_SIZE / sourceHeight);
+  const sourceWidth = image.naturalWidth || image.width || size;
+  const sourceHeight = image.naturalHeight || image.height || size;
+  const scale = Math.max(size / sourceWidth, size / sourceHeight);
   const drawWidth = sourceWidth * scale;
   const drawHeight = sourceHeight * scale;
-  const offsetX = (THUMB_SIZE - drawWidth) / 2;
-  const offsetY = (THUMB_SIZE - drawHeight) / 2;
+  const offsetX = (size - drawWidth) / 2;
+  const offsetY = (size - drawHeight) / 2;
 
   context.fillStyle = "#f1f5f9";
-  context.fillRect(0, 0, THUMB_SIZE, THUMB_SIZE);
+  context.fillRect(0, 0, size, size);
   context.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
 
   return canvas.toDataURL("image/jpeg", 0.82);
 }
 
-export async function createImageThumbFromBlob(file: File | Blob | null | undefined): Promise<string | null> {
+export async function createImageThumbFromBlob(
+  file: File | Blob | null | undefined,
+  size = THUMB_SIZE,
+): Promise<string | null> {
   if (!isBrowser() || !isImageFile(file) || !file) return null;
 
   const objectUrl = URL.createObjectURL(file as Blob);
   try {
     const image = await loadImage(objectUrl);
-    return renderThumbnail(image);
+    return renderThumbnail(image, size);
   } catch {
     return null;
   } finally {
@@ -81,7 +84,7 @@ export async function createImageThumbFromBlob(file: File | Blob | null | undefi
   }
 }
 
-export async function createImageThumbFromUrl(url: string | null | undefined): Promise<string | null> {
+export async function createImageThumbFromUrl(url: string | null | undefined, size = THUMB_SIZE): Promise<string | null> {
   const source = String(url ?? "").trim();
   if (!isBrowser() || !source) return null;
   if (!isSameOriginUrl(source)) return null;
@@ -90,7 +93,7 @@ export async function createImageThumbFromUrl(url: string | null | undefined): P
     const response = await fetch(source, { credentials: "include" });
     if (!response.ok) return null;
     const blob = await response.blob();
-    return createImageThumbFromBlob(blob);
+    return createImageThumbFromBlob(blob, size);
   } catch {
     return null;
   }
@@ -99,11 +102,16 @@ export async function createImageThumbFromUrl(url: string | null | undefined): P
 export function resolveOfflineImageSrc(input: {
   customer_image_thumb?: string | null;
   customer_image_url?: string | null;
+  representative_image_thumb?: string | null;
+  representative_image_url?: string | null;
   apartment_image_thumb?: string | null;
   apartment_image_url?: string | null;
 }): string | null {
   const customerThumb = String(input.customer_image_thumb ?? "").trim();
   if (customerThumb) return customerThumb;
+
+  const representativeThumb = String(input.representative_image_thumb ?? "").trim();
+  if (representativeThumb) return representativeThumb;
 
   const apartmentThumb = String(input.apartment_image_thumb ?? "").trim();
   if (apartmentThumb) return apartmentThumb;
@@ -112,6 +120,12 @@ export function resolveOfflineImageSrc(input: {
   if (customerUrl) {
     if (!isBrowser()) return customerUrl;
     if (navigator.onLine || isSameOriginUrl(customerUrl)) return customerUrl;
+  }
+
+  const representativeUrl = String(input.representative_image_url ?? "").trim();
+  if (representativeUrl) {
+    if (!isBrowser()) return representativeUrl;
+    if (navigator.onLine || isSameOriginUrl(representativeUrl)) return representativeUrl;
   }
 
   const apartmentUrl = String(input.apartment_image_url ?? "").trim();

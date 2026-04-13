@@ -1,8 +1,11 @@
 import { db, type ApartmentSaleRow } from "@/db/localDB";
 import { api } from "@/lib/api";
+import { emitAppEvent } from "@/lib/appEvents";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { enqueueSync } from "@/sync/queue";
+import { apartmentsPullToLocal } from "@/modules/apartments/apartments.repo";
+import { installmentsPullToLocal } from "@/modules/installments/installments.repo";
 import {
   apartmentSaleFinancialDeleteBySaleUuid,
   sanitizeApartmentSaleFinancial,
@@ -14,7 +17,7 @@ const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
 const PULL_PAGE_SIZE = 200;
-const CURSOR_KEY = "apartment_sales_sync_cursor";
+const CURSOR_KEY = "apartment_sales_sync_cursor_v2";
 const CLEANUP_KEY = "apartment_sales_last_cleanup_ms";
 
 type Obj = Record<string, unknown>;
@@ -260,6 +263,18 @@ async function resolveLocalEditScope(sale: ApartmentSaleRow): Promise<"full" | "
   if ((status === "pending" || status === "active") && !hasPaid) return "full";
   if (status === "approved" || hasPaid) return "limited";
   return "none";
+}
+
+async function canDeleteLocalSale(sale: ApartmentSaleRow): Promise<boolean> {
+  if (typeof sale.can_delete === "boolean") return sale.can_delete;
+  if (sale.deed_status === "issued") return false;
+
+  const status = String(sale.status ?? "").trim().toLowerCase();
+  const hasPaid = sale.has_paid_installments || (await hasAnyPaidInstallmentLocal(sale));
+
+  if (status === "cancelled") return !hasPaid;
+  if (status === "completed" || status === "terminated" || status === "defaulted" || status === "approved") return false;
+  return status === "pending" || status === "active";
 }
 
 function isEquivalentCustomDates(
@@ -620,11 +635,17 @@ export async function apartmentSalePullToLocal(): Promise<{ pulled: number }> {
 }
 
 export async function apartmentSaleCreate(payload: unknown): Promise<ApartmentSaleRow> {
+  const sourcePayload = asObj(payload);
   const uuid = crypto.randomUUID();
-  const row = sanitizeApartmentSale({ ...asObj(payload), uuid, updated_at: Date.now() });
+  const row = sanitizeApartmentSale({ ...sourcePayload, uuid, updated_at: Date.now() });
+  const receiveFullPaymentNow = Boolean(sourcePayload.receive_full_payment_now);
 
   validateApartmentSale(row);
   await assertNoDuplicateSale(row);
+
+  if (receiveFullPaymentNow) {
+    throw new Error("Apartment sale approval is required before receiving full payment.");
+  }
 
   if (!isOnline()) {
     await db.apartment_sales.put(row);
@@ -641,7 +662,10 @@ export async function apartmentSaleCreate(payload: unknown): Promise<ApartmentSa
   }
 
   try {
-    const res = await api.post("/api/apartment-sales", toApiPayload(row));
+    const apiPayload: Obj = {
+      ...toApiPayload(row),
+    };
+    const res = await api.post("/api/apartment-sales", apiPayload);
     const responseData = asObj(res.data).data;
     const parsed = sanitizeApartmentSale(responseData ?? row);
     const saved = !parsed.uuid || parsed.customer_id <= 0 || parsed.apartment_id <= 0 ? row : parsed;
@@ -658,7 +682,7 @@ export async function apartmentSaleCreate(payload: unknown): Promise<ApartmentSa
     } else {
       await apartmentSaleFinancialUpsertForSale(saved, { queue: false });
     }
-    notifySuccess("Apartment sale created successfully.");
+    notifySuccess("Apartment sale created and sent for admin approval.");
     return saved;
   } catch (error: unknown) {
     if (isValidationError(getApiStatus(error))) {
@@ -753,12 +777,16 @@ export async function apartmentSaleDelete(uuid: string): Promise<void> {
   const existing = await db.apartment_sales.get(uuid);
   if (!existing) throw new Error("Apartment sale not found locally");
 
-  const editScope = await resolveLocalEditScope(existing);
-  if (editScope !== "full") {
-    throw new Error("Sale cannot be deleted after approval, payment, completion, or cancellation.");
+  const canDelete = await canDeleteLocalSale(existing);
+  if (!canDelete) {
+    throw new Error("Sale can only be deleted when it has no recorded payments and no closed workflow history.");
   }
 
   await db.apartment_sales.delete(uuid);
+  await db.installments.where("sale_uuid").equals(uuid).delete();
+  if (typeof existing.id === "number" && existing.id > 0) {
+    await db.installments.where("apartment_sale_id").equals(existing.id).delete();
+  }
   await apartmentSaleFinancialDeleteBySaleUuid(uuid, { queue: false });
   await enqueueSync({
     entity: "apartment_sales",
@@ -770,12 +798,15 @@ export async function apartmentSaleDelete(uuid: string): Promise<void> {
   });
 
   if (!isOnline()) {
+    emitAppEvent("installments:changed", { saleUuid: uuid });
     notifySuccess("Apartment sale deleted offline. It will sync when online.");
     return;
   }
 
   try {
     await api.delete(`/api/apartment-sales/${uuid}`);
+    await Promise.all([apartmentsPullToLocal(), apartmentSalePullToLocal()]);
+    emitAppEvent("installments:changed", { saleUuid: uuid });
     notifySuccess("Apartment sale deleted successfully.");
   } catch {
     notifyInfo("Apartment sale deleted locally. Server sync will retry later.");
@@ -809,6 +840,93 @@ export async function apartmentSaleIssueDeed(uuid: string): Promise<ApartmentSal
     }
 
     notifySuccess("Ownership deed issued successfully.");
+    return saved;
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
+export async function apartmentSaleApprove(uuid: string): Promise<ApartmentSaleRow> {
+  const existing = await db.apartment_sales.get(uuid);
+  if (!existing) throw new Error("Apartment sale not found locally");
+
+  if (!isOnline()) {
+    throw new Error("Sale approval requires internet connection.");
+  }
+
+  try {
+    const res = await api.post(`/api/apartment-sales/${uuid}/approve`);
+    const responseData = asObj(res.data).data;
+    const parsed = sanitizeApartmentSale(responseData ?? existing);
+    const saved = !parsed.uuid || parsed.customer_id <= 0 || parsed.apartment_id <= 0 ? existing : parsed;
+    await db.apartment_sales.put(saved);
+
+    const financialRaw = asObj(asObj(responseData).financial);
+    if (Object.keys(financialRaw).length > 0) {
+      const financial = sanitizeApartmentSaleFinancial({
+        ...financialRaw,
+        sale_uuid: saved.uuid,
+        uuid: String(financialRaw.uuid ?? saved.uuid),
+        apartment_sale_id: financialRaw.apartment_sale_id ?? saved.id,
+      });
+      await db.apartment_sale_financials.put(financial);
+    } else {
+      await apartmentSaleFinancialUpsertForSale(saved, { queue: false });
+    }
+
+    try {
+      await apartmentSalePullToLocal();
+    } catch {
+      // Keep the approved sale locally even if follow-up refresh fails.
+    }
+    emitAppEvent("notifications:changed");
+    notifySuccess("Apartment sale approved successfully.");
+    return saved;
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
+export async function apartmentSaleReject(uuid: string): Promise<ApartmentSaleRow> {
+  const existing = await db.apartment_sales.get(uuid);
+  if (!existing) throw new Error("Apartment sale not found locally");
+
+  if (!isOnline()) {
+    throw new Error("Sale rejection requires internet connection.");
+  }
+
+  try {
+    const res = await api.post(`/api/apartment-sales/${uuid}/reject`);
+    const responseData = asObj(res.data).data;
+    const parsed = sanitizeApartmentSale(responseData ?? existing);
+    const saved = !parsed.uuid || parsed.customer_id <= 0 || parsed.apartment_id <= 0 ? existing : parsed;
+    await db.apartment_sales.put(saved);
+
+    const financialRaw = asObj(asObj(responseData).financial);
+    if (Object.keys(financialRaw).length > 0) {
+      const financial = sanitizeApartmentSaleFinancial({
+        ...financialRaw,
+        sale_uuid: saved.uuid,
+        uuid: String(financialRaw.uuid ?? saved.uuid),
+        apartment_sale_id: financialRaw.apartment_sale_id ?? saved.id,
+      });
+      await db.apartment_sale_financials.put(financial);
+    } else {
+      await apartmentSaleFinancialUpsertForSale(saved, { queue: false });
+    }
+
+    try {
+      await Promise.all([apartmentSalePullToLocal(), installmentsPullToLocal(), apartmentsPullToLocal()]);
+    } catch {
+      // Reject already succeeded on server; keep the saved local state and let later sync refresh the rest.
+    }
+    emitAppEvent("notifications:changed");
+    emitAppEvent("installments:changed", { saleUuid: saved.uuid });
+    notifySuccess("Apartment sale rejected and cancelled successfully.");
     return saved;
   } catch (error: unknown) {
     const message = getApiErrorMessage(error);

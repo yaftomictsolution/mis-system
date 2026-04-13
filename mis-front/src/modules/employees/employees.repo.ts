@@ -1,4 +1,4 @@
-import { db, type EmployeeRow } from "@/db/localDB";
+import { db, type EmployeeRow, type EmployeeSalaryHistoryRow } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { enqueueSync } from "@/sync/queue";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
@@ -15,6 +15,11 @@ const CLEANUP_KEY = "employees_last_cleanup_ms";
 const isValidationError = (status?: number) => status === 409 || status === 422;
 
 type Obj = Record<string, unknown>;
+type EmployeePayloadInput = Obj & {
+  salary_change_reason?: unknown;
+  salary_effective_from?: unknown;
+  salary_history_uuid?: unknown;
+};
 
 export type EmployeeLocalQuery = {
   page?: number;
@@ -128,6 +133,7 @@ function sanitizeEmployee(input: unknown): EmployeeRow {
     job_title: trimOrNull(record.job_title, 100),
     salary_type: normalizeSalaryType(record.salary_type),
     base_salary: toNullableMoney(record.base_salary),
+    salary_currency_code: trimOrNull(record.salary_currency_code, 10)?.toUpperCase() || "USD",
     address: trimOrNull(record.address, 255),
     email: trimText(record.email, 255),
     phone: toNullableInt(record.phone),
@@ -316,9 +322,6 @@ export async function employeePullToLocal(): Promise<{ pulled: number }> {
 
 function validateEmployee(row: EmployeeRow): void {
   if (!row.first_name) throw new Error("First name code is required.");
-  if (!row.last_name) throw new Error("Last name is required.");
-  if (!row.phone) throw new Error("Phone is required.");
-
 }
 
 async function assertNoDuplicate(row: EmployeeRow, ignoreUuid?: string): Promise<void> {
@@ -332,7 +335,12 @@ async function assertNoDuplicate(row: EmployeeRow, ignoreUuid?: string): Promise
   }
 }
 
-function toEmployeeApiPayload(row: EmployeeRow): Obj {
+function toDateOnly(value?: number | null): string | null {
+  if (!value || !Number.isFinite(value)) return null;
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+function toEmployeeApiPayload(row: EmployeeRow, extras?: EmployeePayloadInput): Obj {
   return {
     uuid: row.uuid,
     first_name: row.first_name,
@@ -340,13 +348,51 @@ function toEmployeeApiPayload(row: EmployeeRow): Obj {
     job_title: row.job_title,
     salary_type: row.salary_type,
     base_salary: row.base_salary,
+    salary_currency_code: trimText(row.salary_currency_code ?? "USD", 10).toUpperCase() || "USD",
     address: row.address,
     email: row.email,
-    phone: row.phone,
-    hire_date: row.hire_date,
+    phone: row.phone !== null ? String(row.phone) : null,
+    hire_date: toDateOnly(row.hire_date),
     status: row.status,
     updated_at: row.updated_at,
+    salary_change_reason: trimOrNull(extras?.salary_change_reason, 2000),
+    salary_effective_from: trimOrNull(extras?.salary_effective_from, 50),
+    salary_history_uuid: trimOrNull(extras?.salary_history_uuid, 100),
   };
+}
+
+async function createOptimisticSalaryHistory(
+  employee: EmployeeRow,
+  previousSalary: number | null,
+  previousSalaryCurrency: string | null,
+  extras: EmployeePayloadInput
+): Promise<string | null> {
+  const newSalary = employee.base_salary ?? null;
+  const nextSalaryCurrency = String(employee.salary_currency_code ?? "USD").toUpperCase();
+  const priorSalaryCurrency = String(previousSalaryCurrency ?? nextSalaryCurrency).toUpperCase();
+  if (previousSalary === newSalary && priorSalaryCurrency === nextSalaryCurrency) return null;
+
+  const historyUuid = crypto.randomUUID();
+  const row: EmployeeSalaryHistoryRow = {
+    uuid: historyUuid,
+    employee_id: Number(employee.id ?? 0),
+    employee_uuid: employee.uuid,
+    employee_name: [employee.first_name, employee.last_name].filter(Boolean).join(" ").trim() || employee.first_name,
+    previous_salary: previousSalary,
+    previous_salary_currency_code: previousSalary === null ? null : priorSalaryCurrency,
+    new_salary: newSalary,
+    new_salary_currency_code: newSalary === null ? null : nextSalaryCurrency,
+    effective_from: Date.parse(String(extras.salary_effective_from ?? "")) || Date.now(),
+    reason: trimOrNull(extras.salary_change_reason, 5000),
+    changed_by: null,
+    changed_by_name: null,
+    source: "manual",
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  };
+
+  await db.employee_salary_histories.put(row);
+  return historyUuid;
 }
 
 function getApiErrorMessage(error: unknown): string {
@@ -366,7 +412,7 @@ function getApiErrorMessage(error: unknown): string {
   return "Validation failed on server.";
 }
 function pickSavedOrFallback(saved: EmployeeRow, fallback: EmployeeRow): EmployeeRow {
-  if (!saved.uuid || !saved.first_name || !saved.last_name) {
+  if (!saved.uuid || !saved.first_name) {
     return fallback;
   }
   return saved;
@@ -374,7 +420,8 @@ function pickSavedOrFallback(saved: EmployeeRow, fallback: EmployeeRow): Employe
 
 export async function employeeCreate(payload: unknown): Promise<EmployeeRow> {
   const uuid = crypto.randomUUID();
-  const row = sanitizeEmployee({ ...obj(payload), uuid, updated_at: Date.now() });
+  const extras = obj(payload) as EmployeePayloadInput;
+  const row = sanitizeEmployee({ ...extras, uuid, updated_at: Date.now() });
 
   validateEmployee(row);
   await assertNoDuplicate(row);
@@ -386,14 +433,14 @@ export async function employeeCreate(payload: unknown): Promise<EmployeeRow> {
       uuid,
       localKey: uuid,
       action: "create",
-      payload: toEmployeeApiPayload(row),
+      payload: toEmployeeApiPayload(row, extras),
     });
     notifySuccess("Employee saved offline. It will sync when online.");
     return row;
   }
 
   try {
-    const res = await api.post("/api/employees", toEmployeeApiPayload(row));
+    const res = await api.post("/api/employees", toEmployeeApiPayload(row, extras));
     const saved = pickSavedOrFallback(sanitizeEmployee(obj(res.data).data ?? row), row);
     await db.employees.put(saved);
     notifySuccess("Employee created successfully.");
@@ -412,7 +459,7 @@ export async function employeeCreate(payload: unknown): Promise<EmployeeRow> {
       uuid,
       localKey: uuid,
       action: "create",
-      payload: toEmployeeApiPayload(row),
+      payload: toEmployeeApiPayload(row, extras),
     });
     notifyInfo("Employee saved locally. Server sync will retry later.");
     return row;
@@ -423,18 +470,34 @@ export async function employeeUpdate(uuid: string, patch: unknown): Promise<Empl
   const existing = await db.employees.get(uuid);
   if (!existing) throw new Error("Employee not found locally");
 
-  const updated = sanitizeEmployee({ ...existing, ...obj(patch), uuid, updated_at: Date.now() });
+  const extras = obj(patch) as EmployeePayloadInput;
+  const previousSalary = existing.base_salary ?? null;
+  const previousSalaryCurrency = String(existing.salary_currency_code ?? "USD").toUpperCase();
+  const updated = sanitizeEmployee({ ...existing, ...extras, uuid, updated_at: Date.now() });
 
   validateEmployee(updated);
   await assertNoDuplicate(updated, uuid);
 
   await db.employees.put(updated);
+  const historyUuid = await createOptimisticSalaryHistory(
+    updated,
+    previousSalary,
+    previousSalaryCurrency,
+    {
+      ...extras,
+      salary_effective_from: extras.salary_effective_from ?? toDateOnly(updated.hire_date) ?? new Date().toISOString().slice(0, 10),
+    }
+  );
   await enqueueSync({
     entity: "employees",
     uuid,
     localKey: uuid,
     action: "update",
-    payload: toEmployeeApiPayload(updated),
+    payload: toEmployeeApiPayload(updated, {
+      ...extras,
+      salary_history_uuid: historyUuid,
+      salary_effective_from: extras.salary_effective_from ?? toDateOnly(updated.hire_date) ?? new Date().toISOString().slice(0, 10),
+    }),
     rollbackSnapshot: existing,
   });
 
@@ -444,7 +507,11 @@ export async function employeeUpdate(uuid: string, patch: unknown): Promise<Empl
   }
 
   try {
-    const res = await api.put(`/api/employees/${uuid}`, toEmployeeApiPayload(updated));
+    const res = await api.put(`/api/employees/${uuid}`, toEmployeeApiPayload(updated, {
+      ...extras,
+      salary_history_uuid: historyUuid,
+      salary_effective_from: extras.salary_effective_from ?? toDateOnly(updated.hire_date) ?? new Date().toISOString().slice(0, 10),
+    }));
     const saved = pickSavedOrFallback(sanitizeEmployee(obj(res.data).data ?? updated), updated);
     await db.employees.put(saved);
     notifySuccess("Employee updated successfully.");
@@ -452,6 +519,9 @@ export async function employeeUpdate(uuid: string, patch: unknown): Promise<Empl
   } catch (error: unknown) {
     if (isValidationError(getApiStatus(error))) {
       await db.employees.put(existing);
+      if (historyUuid) {
+        await db.employee_salary_histories.delete(historyUuid);
+      }
       await removeLatestQueueItem(uuid, "update");
       const message = getApiErrorMessage(error);
       notifyError(message);

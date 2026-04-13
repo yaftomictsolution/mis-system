@@ -1,6 +1,7 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSelector } from "react-redux";
 import RequirePermission from "@/components/auth/RequirePermission";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { DataTable, type Column } from "@/components/ui/DataTable";
@@ -8,6 +9,8 @@ import { Badge } from "@/components/ui/Badge";
 import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import type { InstallmentRow } from "@/db/localDB";
+import type { RootState } from "@/store/store";
+import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import {
   installmentPay,
   installmentsListLocal,
@@ -36,6 +39,29 @@ const normalizeStatus = (value: string): "pending" | "paid" | "overdue" | "cance
   return "pending";
 };
 
+const normalizeSaleStatus = (value: string | undefined): "pending" | "approved" | "active" | "completed" | "cancelled" | "terminated" | "defaulted" => {
+  const status = String(value ?? "").trim().toLowerCase();
+  if (
+    status === "pending" ||
+    status === "approved" ||
+    status === "completed" ||
+    status === "cancelled" ||
+    status === "terminated" ||
+    status === "defaulted"
+  ) {
+    return status;
+  }
+  return "active";
+};
+
+const installmentRemaining = (row: InstallmentRow): number => {
+  const explicitRemaining = Number(row.remaining_amount);
+  if (Number.isFinite(explicitRemaining)) {
+    return Math.max(0, Number(explicitRemaining.toFixed(2)));
+  }
+  return Math.max(0, Number((row.amount - row.paid_amount).toFixed(2)));
+};
+
 const dueDateTone = (row: InstallmentRow): "neutral" | "soon" | "overdue" => {
   const status = normalizeStatus(row.status);
   if (status === "paid" || status === "cancelled") return "neutral";
@@ -62,10 +88,16 @@ const statusColor = {
   cancelled: "purple",
 } as const;
 
+type AccountOption = {
+  id: number;
+  label: string;
+};
+
 type PayFormState = {
   installment: InstallmentRow | null;
   amount: string;
   paidDate: string;
+  accountId: string;
   error: string | null;
   submitting: boolean;
 };
@@ -74,18 +106,38 @@ const emptyPayState = (): PayFormState => ({
   installment: null,
   amount: "",
   paidDate: new Date().toISOString().slice(0, 10),
+  accountId: "",
   error: null,
   submitting: false,
 });
 
 export default function InstallmentsPage() {
+  const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
+  const canPayInstallments = permissions.includes("installments.pay");
   const [rows, setRows] = useState<InstallmentRow[]>([]);
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [payForm, setPayForm] = useState<PayFormState>(emptyPayState());
 
   const loadLocal = useCallback(async () => {
-    const local = await installmentsListLocal({ page: 1, pageSize: LOCAL_LIST_PAGE_SIZE });
+    const [local, accountPage] = await Promise.all([
+      installmentsListLocal({ page: 1, pageSize: LOCAL_LIST_PAGE_SIZE }),
+      accountsListLocal({ page: 1, pageSize: LOCAL_LIST_PAGE_SIZE }),
+    ]);
     setRows(local.items.map((item) => ({ ...item })));
+    setAccounts(
+      accountPage.items
+        .filter((item) => item.id && item.status === "active")
+        .map((item) => ({
+          id: Number(item.id),
+          label: `${item.name} (${item.currency}) - ${new Intl.NumberFormat("en-US", {
+            style: "currency",
+            currency: String(item.currency || "USD").toUpperCase(),
+            maximumFractionDigits: 2,
+          }).format(Number(item.current_balance ?? 0))}`,
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label))
+    );
   }, []);
 
   const refresh = useCallback(async () => {
@@ -93,7 +145,7 @@ export default function InstallmentsPage() {
     try {
       await loadLocal();
       try {
-        await installmentsPullToLocal();
+        await Promise.all([installmentsPullToLocal(), accountsPullToLocal()]);
       } catch {
         // Keep local list as fallback.
       }
@@ -118,11 +170,12 @@ export default function InstallmentsPage() {
   }, [refresh]);
 
   const openPayForm = useCallback((row: InstallmentRow) => {
-    const remaining = Math.max(0, Number((row.amount - row.paid_amount).toFixed(2)));
+    const remaining = installmentRemaining(row);
     setPayForm({
       installment: row,
       amount: remaining > 0 ? String(remaining) : "",
       paidDate: new Date().toISOString().slice(0, 10),
+      accountId: "",
       error: null,
       submitting: false,
     });
@@ -141,12 +194,18 @@ export default function InstallmentsPage() {
       setPayForm((prev) => ({ ...prev, error: "Payment amount must be greater than 0." }));
       return;
     }
+    const accountId = Number(payForm.accountId);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      setPayForm((prev) => ({ ...prev, error: "Payment account is required." }));
+      return;
+    }
 
     setPayForm((prev) => ({ ...prev, submitting: true, error: null }));
     try {
       await installmentPay(installment.uuid, {
         amount,
         paid_date: payForm.paidDate,
+        account_id: accountId,
       });
       closePayForm();
       await refresh();
@@ -158,10 +217,10 @@ export default function InstallmentsPage() {
     } finally {
       setPayForm((prev) => ({ ...prev, submitting: false }));
     }
-  }, [closePayForm, payForm.amount, payForm.installment, payForm.paidDate, refresh]);
+  }, [closePayForm, payForm.accountId, payForm.amount, payForm.installment, payForm.paidDate, refresh]);
 
   const totalDue = useMemo(
-    () => rows.reduce((sum, row) => sum + Math.max(0, row.amount - row.paid_amount), 0),
+    () => rows.reduce((sum, row) => sum + installmentRemaining(row), 0),
     [rows]
   );
   const overdueCount = useMemo(
@@ -214,7 +273,7 @@ export default function InstallmentsPage() {
       {
         key: "remaining",
         label: "Remaining",
-        render: (item) => <span>{money(Math.max(0, item.amount - item.paid_amount))}</span>,
+        render: (item) => <span>{money(installmentRemaining(item))}</span>,
       },
       {
         key: "status",
@@ -229,7 +288,24 @@ export default function InstallmentsPage() {
         label: "Action",
         render: (item) => {
           const normalized = normalizeStatus(item.status);
-          const disabled = normalized === "paid" || normalized === "cancelled";
+          const saleStatus = normalizeSaleStatus(item.sale_status);
+          const pendingApproval = saleStatus === "pending";
+          const saleBlocked = saleStatus === "cancelled" || saleStatus === "terminated" || saleStatus === "defaulted";
+          const disabled =
+            normalized === "paid" ||
+            normalized === "cancelled" ||
+            pendingApproval ||
+            saleBlocked ||
+            !canPayInstallments;
+          const actionLabel = pendingApproval
+            ? "Awaiting Approval"
+            : saleStatus === "cancelled"
+              ? "Sale Cancelled"
+              : saleBlocked
+                ? "Sale Closed"
+                : canPayInstallments
+                  ? "Pay"
+                  : "View Only";
           return (
             <button
               type="button"
@@ -237,17 +313,17 @@ export default function InstallmentsPage() {
               onClick={() => openPayForm(item)}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Pay
+              {actionLabel}
             </button>
           );
         },
       },
     ],
-    [openPayForm]
+    [canPayInstallments, openPayForm]
   );
 
   return (
-    <RequirePermission permission="installments.pay">
+    <RequirePermission permission={["installments.pay", "sales.create", "sales.approve"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Installments" subtitle="Track pending dues and record installment payments" />
 
@@ -271,6 +347,14 @@ export default function InstallmentsPage() {
                 type="date"
                 value={payForm.paidDate}
                 onChange={(value) => setPayForm((prev) => ({ ...prev, paidDate: String(value) }))}
+                required
+              />
+              <FormField
+                label="Payment Account"
+                type="select"
+                value={payForm.accountId}
+                onChange={(value) => setPayForm((prev) => ({ ...prev, accountId: String(value) }))}
+                options={accounts.map((item) => ({ value: String(item.id), label: item.label }))}
                 required
               />
             </div>
@@ -323,3 +407,4 @@ export default function InstallmentsPage() {
     </RequirePermission>
   );
 }
+

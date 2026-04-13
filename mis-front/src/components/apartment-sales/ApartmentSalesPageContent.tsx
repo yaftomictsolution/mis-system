@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSelector } from "react-redux";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import ApartmentSalesContentView from "@/components/apartment-sales/ApartmentSalesContentView";
 import { ApartmentSaleExpandedRow } from "@/components/apartment-sales/ApartmentSaleExpandedRow";
 import type { ApartmentSaleTerminateFormState } from "@/components/apartment-sales/ApartmentSaleDialogs";
@@ -17,6 +18,7 @@ import {
   LOCAL_LIST_PAGE_SIZE,
   TERMINATED_SUGGESTED_CHARGE_RATE,
   buildSalePayload,
+  canDeleteRow,
   customerRemainingAmount,
   resolveRowEditScope,
   toForm,
@@ -25,11 +27,13 @@ import {
 
 import { loadAllSaleApartments, loadAllSaleCustomers } from "@/components/apartment-sales/apartment-sale.lookups";
 import {
+  apartmentSaleApprove,
   apartmentSaleDelete,
   apartmentSaleHandoverKey,
   apartmentSaleIssueDeed,
   apartmentSaleListLocal,
   apartmentSalePullToLocal,
+  apartmentSaleReject,
   apartmentSaleTerminate,
   apartmentSaleUpdate,
   type ApartmentSaleTerminateInput,
@@ -128,9 +132,13 @@ function buildApartmentLabelMap(apartments: ApartmentRow[]): Map<number, string>
 }
 
 export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentSalesPageContentProps) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
   const canManageSales = permissions.includes("sales.create");
   const canApproveDeed = permissions.includes("sales.approve");
+  const canApproveSale = permissions.includes("sales.approve");
   const readOnly = !canManageSales;
 
   const [rows, setRows] = useState<ApartmentSaleRow[]>([]);
@@ -147,6 +155,8 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
   const [loading, setLoading] = useState(true);
 
   const [pendingDelete, setPendingDelete] = useState<ApartmentSaleRow | null>(null);
+  const [pendingApprove, setPendingApprove] = useState<ApartmentSaleRow | null>(null);
+  const [pendingReject, setPendingReject] = useState<ApartmentSaleRow | null>(null);
   const [pendingHandover, setPendingHandover] = useState<ApartmentSaleRow | null>(null);
   const [handoverSubmitting, setHandoverSubmitting] = useState(false);
   const [handoverError, setHandoverError] = useState<string | null>(null);
@@ -168,6 +178,10 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
   const getSalePaidTotal = useCallback(
     (row?: ApartmentSaleRow | null): number => {
       if (!row) return 0;
+      const customerReceivable = Math.max(
+        0,
+        toMoney2(Number(row.net_price ?? Number(row.total_price) - Number(row.discount)) * 0.85)
+      );
 
       const paidFromMap = installmentPaidBySaleUuid.get(row.uuid);
       if (typeof paidFromMap === "number" && Number.isFinite(paidFromMap)) {
@@ -176,6 +190,11 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
 
       const paidFromRow = Number(row.installments_paid_total ?? 0);
       if (Number.isFinite(paidFromRow)) {
+        if (row.payment_type !== "installment" && Number(row.installments_count ?? 0) <= 0 && paidFromRow <= 0) {
+          return String(row.status ?? "").trim().toLowerCase() === "completed"
+            ? Math.max(0, customerReceivable)
+            : 0;
+        }
         return Math.max(0, toMoney2(paidFromRow));
       }
 
@@ -322,6 +341,18 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
   }, [loadLocal, loadLookups]);
 
   const customerAssignedCountById = useMemo(() => buildCustomerAssignedCount(rows), [rows]);
+  const pendingApprovalCount = useMemo(
+    () => rows.filter((row) => getStatus(row.status) === "pending").length,
+    [rows]
+  );
+  const activeFilterTab = useMemo(() => {
+    if (!canApproveSale) return "all" as const;
+    return searchParams.get("tab") === "pending-approval" ? ("pending-approval" as const) : ("all" as const);
+  }, [canApproveSale, searchParams]);
+  const visibleRows = useMemo(() => {
+    if (activeFilterTab !== "pending-approval") return rows;
+    return rows.filter((row) => getStatus(row.status) === "pending");
+  }, [activeFilterTab, rows]);
   const customerOptions = useMemo(
     () => buildCustomerOptions(customers, customerAssignedCountById),
     [customers, customerAssignedCountById]
@@ -336,6 +367,10 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
   const openHandoverDialog = useCallback(
     (row: ApartmentSaleRow) => {
       const status = getStatus(row.status);
+      if (status === "pending") {
+        notifyError("Admin approval is required before key handover.");
+        return;
+      }
       if (status === "cancelled" || status === "terminated" || status === "defaulted") {
         notifyError("Cannot hand over keys for cancelled/terminated/defaulted sale.");
         return;
@@ -361,6 +396,10 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
   const openTerminateDialog = useCallback(
     (row: ApartmentSaleRow) => {
       const status = getStatus(row.status);
+      if (status === "pending") {
+        notifyError("Pending sales should be approved or deleted before termination workflow is used.");
+        return;
+      }
       if (status === "cancelled" || status === "terminated" || status === "defaulted" || status === "completed") {
         notifyError("Sale is already completed/cancelled/terminated/defaulted.");
         return;
@@ -414,6 +453,80 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
     [installmentPaidBySaleUuid, municipalityRemainingBySaleUuid]
   );
 
+  const closeForm = useCallback(() => {
+    setEditingUuid(null);
+    setFormError(null);
+    setForm(createEmptyApartmentSaleForm());
+  }, []);
+
+  const openApproveDialog = useCallback(
+    (row: ApartmentSaleRow) => {
+      if (!canApproveSale) {
+        notifyError("Only admin users can approve apartment sales.");
+        return;
+      }
+      if (getStatus(row.status) !== "pending") {
+        notifyError("Only pending apartment sales can be approved.");
+        return;
+      }
+      setPendingApprove(row);
+    },
+    [canApproveSale]
+  );
+
+  const handleApproveSale = useCallback(async () => {
+    if (!canApproveSale) {
+      notifyError("Only admin users can approve apartment sales.");
+      return;
+    }
+    if (!pendingApprove?.uuid) return;
+
+    try {
+      await apartmentSaleApprove(pendingApprove.uuid);
+      if (editingUuid === pendingApprove.uuid) closeForm();
+      setPendingApprove(null);
+      await refresh();
+    } catch (error: unknown) {
+      notifyError(error instanceof Error ? error.message : "Failed to approve sale.");
+    }
+  }, [canApproveSale, closeForm, editingUuid, pendingApprove, refresh]);
+
+  const closeApproveDialog = useCallback(() => {
+    setPendingApprove(null);
+  }, []);
+
+  const openRejectDialog = useCallback(
+    (row: ApartmentSaleRow) => {
+      if (!canApproveSale) {
+        notifyError("Only admin users can reject apartment sales.");
+        return;
+      }
+      if (getStatus(row.status) !== "pending") {
+        notifyError("Only pending apartment sales can be rejected.");
+        return;
+      }
+      setPendingReject(row);
+    },
+    [canApproveSale]
+  );
+
+  const handleRejectSale = useCallback(async () => {
+    if (!canApproveSale) {
+      notifyError("Only admin users can reject apartment sales.");
+      return;
+    }
+    if (!pendingReject?.uuid) return;
+
+    try {
+      await apartmentSaleReject(pendingReject.uuid);
+      if (editingUuid === pendingReject.uuid) closeForm();
+      setPendingReject(null);
+      await refresh();
+    } catch (error: unknown) {
+      notifyError(error instanceof Error ? error.message : "Failed to reject sale.");
+    }
+  }, [canApproveSale, closeForm, editingUuid, pendingReject, refresh]);
+
   
   const openSalePrintPage = useCallback((row: ApartmentSaleRow) => {
     if (typeof window === "undefined") return;
@@ -422,8 +535,7 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
 
   const openDeedPrintPage = useCallback((row: ApartmentSaleRow) => {
     if (typeof window === "undefined") return;
-    void row;
-    window.open("/deed-template.jpg", "_blank", "noopener,noreferrer");
+    window.open(`/print/apartment-sales/${row.uuid}/deed`, "_blank", "noopener,noreferrer");
   }, []);
 
   const salesColumns = useMemo(
@@ -434,6 +546,19 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
         onPrintSale: openSalePrintPage,
         onPrintDeed: openDeedPrintPage,
         canManageSales,
+        canApproveSale,
+        onApproveSale:
+          canApproveSale
+            ? (row) => {
+                openApproveDialog(row);
+              }
+            : undefined,
+        onRejectSale:
+          canApproveSale
+            ? (row) => {
+                openRejectDialog(row);
+              }
+            : undefined,
         canIssueDeed: canApproveDeed,
         installmentPaidBySaleUuid,
         municipalityRemainingBySaleUuid,
@@ -444,10 +569,13 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
     [
       apartmentLabelById,
       canApproveDeed,
+      canApproveSale,
       canManageSales,
       customerLabelById,
+      openApproveDialog,
       installmentPaidBySaleUuid,
       municipalityRemainingBySaleUuid,
+      openRejectDialog,
       openHandoverDialog,
       openIssueDeedDialog,
       openSalePrintPage,
@@ -502,12 +630,6 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
     [apartments]
   );
 
-  const closeForm = useCallback(() => {
-    setEditingUuid(null);
-    setFormError(null);
-    setForm(createEmptyApartmentSaleForm());
-  }, []);
-
   const openEditForm = useCallback(
     (row: ApartmentSaleRow) => {
       if (readOnly) {
@@ -535,8 +657,8 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
         return;
       }
 
-      if (resolveRowEditScope(row) !== "full") {
-        notifyError("Sale cannot be deleted after approval, payment, completion, or cancellation.");
+      if (!canDeleteRow(row)) {
+        notifyError("Sale can only be deleted when it has no recorded payments and no closed workflow history.");
         return;
       }
 
@@ -692,6 +814,21 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
     [suggestedCharge, terminateForm.status, terminatePaidTotal]
   );
 
+  const handleFilterTabChange = useCallback(
+    (tab: "all" | "pending-approval") => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (tab === "pending-approval") {
+        params.set("tab", "pending-approval");
+      } else {
+        params.delete("tab");
+      }
+
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    },
+    [pathname, router, searchParams]
+  );
+ 
   return (
     <ApartmentSalesContentView
       formOpen={Boolean(editingUuid)}
@@ -706,10 +843,14 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
       onFormSubmit={() => {
         void handleSave();
       }}
-      rows={rows}
+      rows={visibleRows}
       loading={loading}
       salesColumns={salesColumns}
       renderExpandedSaleRow={renderExpandedSaleRow}
+      showApprovalFilterTabs={canApproveSale}
+      activeFilterTab={activeFilterTab}
+      pendingApprovalCount={pendingApprovalCount}
+      onFilterTabChange={handleFilterTabChange}
       onEdit={readOnly ? undefined : openEditForm}
       onDelete={readOnly ? undefined : openDeleteDialog}
       dialogsProps={{
@@ -717,6 +858,16 @@ export default function ApartmentSalesPageContent({ refreshKey = 0 }: ApartmentS
         onCloseDelete: () => setPendingDelete(null),
         onConfirmDelete: () => {
           void handleDelete();
+        },
+        pendingApprove,
+        onCloseApprove: closeApproveDialog,
+        onConfirmApprove: () => {
+          void handleApproveSale();
+        },
+        pendingReject,
+        onCloseReject: () => setPendingReject(null),
+        onConfirmReject: () => {
+          void handleRejectSale();
         },
         pendingHandover,
         handoverSubmitting,

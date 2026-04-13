@@ -1,7 +1,7 @@
 "use client";
 
 import type { Dispatch, SetStateAction } from "react";
-import { AnimatePresence, motion, number } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { FormField } from "@/components/ui/FormField";
 import type {
   EmployeeFormData,
@@ -44,7 +44,7 @@ export default function EmployeeForm({
         >
           <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
             <h2 className="mb-4 text-lg font-semibold text-slate-900 dark:text-white">
-              {isEditing ? "Update Apartment" : "Create Apartment"}
+              {isEditing ? "Update Employee" : "Create Employee"}
             </h2>
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -83,9 +83,35 @@ export default function EmployeeForm({
               />
               <FormField
                 label="Base Salary"
+                type="number"
                 value={value.base_salary}
                 onChange={(v) => onChange((p) => ({ ...p, base_salary: Number(v) }))}
                 placeholder="Base salary"
+              />
+              <FormField
+                label="Salary Currency"
+                type="select"
+                value={value.salary_currency_code}
+                onChange={(v) => onChange((p) => ({ ...p, salary_currency_code: String(v).toUpperCase() as "USD" | "AFN" }))}
+                options={[
+                  { value: "USD", label: "USD" },
+                  { value: "AFN", label: "AFN" },
+                ]}
+                required
+              />
+              <FormField
+                label="Salary Effective From"
+                type="date"
+                value={value.salary_effective_from}
+                onChange={(v) => onChange((p) => ({ ...p, salary_effective_from: String(v) }))}
+              />
+              <FormField
+                label="Salary Change Reason"
+                type="textarea"
+                value={value.salary_change_reason}
+                onChange={(v) => onChange((p) => ({ ...p, salary_change_reason: String(v) }))}
+                placeholder="Reason for salary setup/change"
+                rows={3}
               />
               <FormField
                 label="Address"
@@ -107,14 +133,19 @@ export default function EmployeeForm({
               />
               <FormField
                 label="Status"
+                type="select"
                 value={value.status}
-                onChange={(v) => onChange((p) => ({ ...p, status: String(v)}))}
+                onChange={(v) => onChange((p) => ({ ...p, status: String(v) as EmployeeStatus }))}
+                options={[
+                  { value: "active", label: "Active" },
+                  { value: "resign", label: "Resigned" },
+                ]}
               />
               <FormField
                 label="Hire Date"
                 type="date"
                 value={value.hire_date}
-                onChange={(v) => onChange((p) => ({ ...p, hire_date: Date() }))}
+                onChange={(v) => onChange((p) => ({ ...p, hire_date: String(v) }))}
               />
             </div>
 
@@ -134,7 +165,7 @@ export default function EmployeeForm({
                 onClick={onSubmit}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {submitting ? (isEditing ? "Updating..." : "Saving...") : isEditing ? "Update Apartment" : "Add Apartment"}
+                {submitting ? (isEditing ? "Updating..." : "Saving...") : isEditing ? "Update Employee" : "Add Employee"}
               </button>
             </div>
           </div>

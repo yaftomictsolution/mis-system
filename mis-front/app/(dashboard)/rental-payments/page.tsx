@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import RequirePermission from "@/components/auth/RequirePermission";
@@ -7,8 +7,9 @@ import { DataTable, type Column } from "@/components/ui/DataTable";
 import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
-import type { RentalPaymentRow } from "@/db/localDB";
+import type { AccountRow, RentalPaymentRow } from "@/db/localDB";
 import { subscribeAppEvent } from "@/lib/appEvents";
+import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import { notifyError } from "@/lib/notify";
 import { rentalApprovePayment, rentalPaymentsListLocal, rentalPaymentsPullToLocal } from "@/modules/rentals/rentals.repo";
 import { useSelector } from "react-redux";
@@ -18,12 +19,18 @@ const LOCAL_PAGE_SIZE = 500;
 const TABLE_PAGE_SIZE = 10;
 const today = () => new Date().toISOString().slice(0, 10);
 
+type AccountOption = {
+  id: number;
+  label: string;
+};
+
 type ApproveFormState = {
   payment: RentalPaymentRow | null;
   amount: string;
   payment_date: string;
   payment_method: string;
   reference_no: string;
+  account_id: string;
   notes: string;
   submitting: boolean;
 };
@@ -34,6 +41,7 @@ const emptyApproveForm = (): ApproveFormState => ({
   payment_date: today(),
   payment_method: "cash",
   reference_no: "",
+  account_id: "",
   notes: "",
   submitting: false,
 });
@@ -54,21 +62,54 @@ export default function RentalPaymentsPage() {
   const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
   const canApprovePayments = permissions.includes("installments.pay");
   const [rows, setRows] = useState<RentalPaymentRow[]>([]);
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [approveForm, setApproveForm] = useState<ApproveFormState>(emptyApproveForm());
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const local = await rentalPaymentsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE });
+      const [local, accountPage] = await Promise.all([
+        rentalPaymentsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+        accountsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+      ]);
       setRows(local.items);
+      setAccounts(
+        accountPage.items
+          .filter((item: AccountRow) => Number(item.id) > 0 && item.status === "active")
+          .map((item: AccountRow) => ({
+            id: Number(item.id),
+            label: `${item.name} (${item.currency}) - ${new Intl.NumberFormat("en-US", {
+              style: "currency",
+              currency: String(item.currency || "USD").toUpperCase(),
+              maximumFractionDigits: 2,
+            }).format(Number(item.current_balance ?? 0))}`,
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label))
+      );
 
       try {
-        await rentalPaymentsPullToLocal();
+        await Promise.all([rentalPaymentsPullToLocal(), accountsPullToLocal()]);
       } catch {}
 
-      const updated = await rentalPaymentsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE });
+      const [updated, refreshedAccounts] = await Promise.all([
+        rentalPaymentsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+        accountsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+      ]);
       setRows(updated.items);
+      setAccounts(
+        refreshedAccounts.items
+          .filter((item: AccountRow) => Number(item.id) > 0 && item.status === "active")
+          .map((item: AccountRow) => ({
+            id: Number(item.id),
+            label: `${item.name} (${item.currency}) - ${new Intl.NumberFormat("en-US", {
+              style: "currency",
+              currency: String(item.currency || "USD").toUpperCase(),
+              maximumFractionDigits: 2,
+            }).format(Number(item.current_balance ?? 0))}`,
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label))
+      );
     } finally {
       setLoading(false);
     }
@@ -106,6 +147,7 @@ export default function RentalPaymentsPage() {
       payment_date: today(),
       payment_method: "cash",
       reference_no: "",
+      account_id: "",
       notes: "",
       submitting: false,
     });
@@ -128,6 +170,11 @@ export default function RentalPaymentsPage() {
       notifyError("Approval amount cannot be greater than bill remaining amount.");
       return;
     }
+    const accountId = Number(approveForm.account_id);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      notifyError("Payment account is required.");
+      return;
+    }
 
     setApproveForm((prev) => ({ ...prev, submitting: true }));
     try {
@@ -136,6 +183,7 @@ export default function RentalPaymentsPage() {
         payment_date: approveForm.payment_date || undefined,
         payment_method: approveForm.payment_method || "cash",
         reference_no: approveForm.reference_no || undefined,
+        account_id: accountId,
         notes: approveForm.notes || undefined,
       });
       closeApproveModal();
@@ -409,6 +457,14 @@ export default function RentalPaymentsPage() {
               value={approveForm.reference_no}
               onChange={(value) => setApproveForm((prev) => ({ ...prev, reference_no: String(value) }))}
             />
+            <FormField
+              label="Payment Account"
+              type="select"
+              value={approveForm.account_id}
+              onChange={(value) => setApproveForm((prev) => ({ ...prev, account_id: String(value) }))}
+              options={accounts.map((item) => ({ value: String(item.id), label: item.label }))}
+              required
+            />
           </div>
           <FormField
             label="Notes"
@@ -439,3 +495,6 @@ export default function RentalPaymentsPage() {
     </RequirePermission>
   );
 }
+
+
+

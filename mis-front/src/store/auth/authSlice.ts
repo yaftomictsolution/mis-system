@@ -16,6 +16,9 @@ type User = {
   full_name: string;
   email: string;
   phone?: string | null;
+  customer_id?: number | null;
+  customer_uuid?: string | null;
+  customer_name?: string | null;
   permissions: string[];
   roles?: string[];
 };

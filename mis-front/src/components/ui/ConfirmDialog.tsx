@@ -9,9 +9,24 @@ interface ConfirmDialogProps {
   onConfirm: () => void
   title: string
   message: string
+  confirmLabel?: string
+  confirmVariant?: "danger" | "success"
 }
 
-export function ConfirmDialog({ isOpen, onClose, onConfirm, title, message }: ConfirmDialogProps) {
+export function ConfirmDialog({
+  isOpen,
+  onClose,
+  onConfirm,
+  title,
+  message,
+  confirmLabel = "Delete",
+  confirmVariant = "danger",
+}: ConfirmDialogProps) {
+  const confirmClasses =
+    confirmVariant === "success"
+      ? "bg-emerald-600 hover:bg-emerald-700 shadow-lg shadow-emerald-500/20"
+      : "bg-red-600 hover:bg-red-700 shadow-lg shadow-red-500/20"
+
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="sm">
       <div className="flex flex-col items-center text-center">
@@ -33,9 +48,9 @@ export function ConfirmDialog({ isOpen, onClose, onConfirm, title, message }: Co
               onConfirm()
               onClose()
             }}
-            className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors font-medium shadow-lg shadow-red-500/20"
+            className={`flex-1 px-4 py-2 text-white rounded-lg transition-colors font-medium ${confirmClasses}`}
           >
-            Delete
+            {confirmLabel}
           </button>
         </div>
       </div>

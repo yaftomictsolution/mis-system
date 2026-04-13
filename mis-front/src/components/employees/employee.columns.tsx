@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import type { Column } from "@/components/ui/DataTable";
 import { EmployeeRow } from "@/db/localDB";
+import { formatMoney, normalizeCurrency } from "@/lib/currency";
 import { SalaryType, EmployeeStatus } from "./employee.types";
 
 const normalizeStatus = (status: string): EmployeeStatus => {
@@ -32,8 +34,15 @@ export const employeeColumns: Column<EmployeeRow>[] = [
  
   {
     key: "first_name",
-    label: "Full Name",
-    render: (item) => <span className="font-semibold">{item.first_name} - {item.last_name}</span>,
+    label: "Employee",
+    render: (item) => (
+      <div className="space-y-1">
+        <Link href={`/employees/${item.uuid}`} className="font-semibold text-blue-700 hover:underline dark:text-blue-300">
+          {[item.first_name, item.last_name].filter(Boolean).join(" ").trim() || item.first_name}
+        </Link>
+        <div className="text-xs text-slate-500">View profile</div>
+      </div>
+    ),
   },
   {
     key: "job_title",
@@ -56,7 +65,7 @@ export const employeeColumns: Column<EmployeeRow>[] = [
     key: "base_salary",
     label: "Base Salary",
     render: (item) => (
-      <span>{`$${item.base_salary}`}</span>
+      <span>{formatMoney(Number(item.base_salary ?? 0), normalizeCurrency(item.salary_currency_code ?? "USD"))}</span>
     ),
   },
   {

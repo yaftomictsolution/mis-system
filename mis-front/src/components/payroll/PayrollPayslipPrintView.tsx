@@ -1,18 +1,15 @@
 "use client";
 
 import type { EmployeeRow, SalaryPaymentRow } from "@/db/localDB";
+import { formatMoney, normalizeCurrency } from "@/lib/currency";
 
 type Props = {
   payment: SalaryPaymentRow;
   employee?: EmployeeRow | null;
 };
 
-function money(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 2,
-  }).format(Number(value || 0));
+function money(value: number, currency: string = "USD"): string {
+  return formatMoney(Number(value || 0), normalizeCurrency(currency));
 }
 
 function dateLabel(value?: number | null): string {
@@ -111,25 +108,46 @@ export default function PayrollPayslipPrintView({ payment, employee }: Props) {
                 <Field label="Status" value={payment.status || "-"} />
                 <Field label="Paid At" value={dateLabel(payment.paid_at)} />
                 <Field label="Prepared By" value={preparedBy} />
+                <Field label="Salary Currency" value={payment.salary_currency_code || "USD"} />
+                <Field label="Payment Account" value={payment.account_name ? `${payment.account_name} (${payment.payment_currency_code || payment.account_currency || "USD"})` : "-"} />
               </div>
             </section>
 
             <section className="rounded-2xl border border-slate-200 p-6">
               <div className="mb-4 text-sm font-bold uppercase tracking-[0.2em] text-slate-500">Salary Breakdown</div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Gross Salary</div>
-                  <div className="mt-2 text-2xl font-bold text-slate-900">{money(payment.gross_salary)}</div>
+                  <div className="mt-2 text-2xl font-bold text-slate-900">{money(payment.gross_salary, payment.salary_currency_code || "USD")}</div>
                 </div>
                 <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
                   <div className="text-xs font-semibold uppercase tracking-wide text-amber-700">Advance Deducted</div>
-                  <div className="mt-2 text-2xl font-bold text-amber-800">{money(payment.advance_deducted)}</div>
+                  <div className="mt-2 text-2xl font-bold text-amber-800">{money(payment.advance_deducted, payment.salary_currency_code || "USD")}</div>
+                </div>
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-5">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-rose-700">Tax Deducted</div>
+                  <div className="mt-2 text-2xl font-bold text-rose-800">
+                    {money(payment.tax_deducted || 0, payment.salary_currency_code || "USD")}
+                    <span className="ml-2 text-sm font-semibold">({Number(payment.tax_percentage || 0).toFixed(2)}%)</span>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Other Deductions</div>
+                  <div className="mt-2 text-2xl font-bold text-slate-900">{money(payment.other_deductions || 0, payment.salary_currency_code || "USD")}</div>
                 </div>
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5">
                   <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Net Salary</div>
-                  <div className="mt-2 text-2xl font-bold text-emerald-800">{money(payment.net_salary)}</div>
+                  <div className="mt-2 text-2xl font-bold text-emerald-800">{money(payment.net_salary, payment.salary_currency_code || "USD")}</div>
                 </div>
               </div>
+              {payment.net_salary_account_amount !== null && payment.net_salary_account_amount !== undefined ? (
+                <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-5">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">Account Payout</div>
+                  <div className="mt-2 text-2xl font-bold text-blue-800">
+                    {formatMoney(Number(payment.net_salary_account_amount ?? 0), normalizeCurrency(payment.payment_currency_code ?? payment.account_currency ?? "USD"))}
+                  </div>
+                </div>
+              ) : null}
             </section>
 
             <section className="rounded-2xl border border-slate-200 p-6">

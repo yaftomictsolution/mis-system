@@ -23,12 +23,18 @@ export type ApartmentSaleFormData = {
   first_due_date: string;
   schedule_locked: boolean;
   custom_dates: ApartmentSaleCustomDate[];
+  receive_full_payment_now: boolean;
+  payment_account_id: string;
+  payment_date: string;
+  payment_method: string;
+  payment_reference_no: string;
+  payment_notes: string;
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
 
 export const statusFromPaymentType = (paymentType: PaymentType): SaleStatus =>
-  paymentType === "installment" ? "active" : "pending";
+  "pending";
 
 export const createEmptyApartmentSaleForm = (): ApartmentSaleFormData => ({
   customer_id: "",
@@ -43,4 +49,10 @@ export const createEmptyApartmentSaleForm = (): ApartmentSaleFormData => ({
   first_due_date: today(),
   schedule_locked: false,
   custom_dates: [],
+  receive_full_payment_now: false,
+  payment_account_id: "",
+  payment_date: today(),
+  payment_method: "cash",
+  payment_reference_no: "",
+  payment_notes: "",
 });

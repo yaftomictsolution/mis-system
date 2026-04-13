@@ -9,7 +9,7 @@ const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
 const PULL_PAGE_SIZE = 200;
-const CURSOR_KEY = "roles_sync_cursor";
+const CURSOR_KEY = "roles_sync_cursor_v2";
 const CLEANUP_KEY = "roles_last_cleanup_ms";
 const PERMISSION_OPTIONS_KEY = "roles_permission_options";
 
@@ -127,17 +127,24 @@ function parseRolesPayload(payload: unknown): { list: Obj[]; hasMore: boolean; s
     };
   }
 
-  const paged = asObj(top);
-  const nested = paged.data;
-  if (Array.isArray(nested)) {
-    const current = Number(paged.current_page ?? 1);
-    const last = Number(paged.last_page ?? 1);
+  if (top && typeof top === "object") {
+    const paged = asObj(top);
+    const nested = paged.data;
+    
+    if (Array.isArray(nested)) {
+      const current = Number(paged.current_page ?? 1);
+      const last = Number(paged.last_page ?? 1);
+      return {
+        list: nested.map(asObj),
+        hasMore: current < last,
+        serverTime: String(meta.server_time ?? nowIso()),
+      };
+    }
+  }
 
-    return {
-      list: nested.map(asObj),
-      hasMore: current < last,
-      serverTime: String(meta.server_time ?? nowIso()),
-    };
+  const roles = root.roles ?? root.items ?? root.records;
+  if (Array.isArray(roles)) {
+    return { list: roles.map(asObj), hasMore: false, serverTime: nowIso() };
   }
 
   return { list: [], hasMore: false, serverTime: nowIso() };
@@ -168,6 +175,15 @@ function getApiErrorMessage(error: unknown): string {
 
 const isValidationError = (status?: number) => status === 409 || status === 422;
 
+function rolePriority(row: RoleRow, pendingUuids: Set<string>): number {
+  let score = 0;
+  if (pendingUuids.has(row.uuid)) score += 1000;
+  if (!row.uuid.startsWith("role-")) score += 100;
+  score += Math.min(50, row.permissions?.length ?? 0);
+  if (row.guard_name) score += 5;
+  return score;
+}
+
 async function removeLatestQueueItem(uuid: string, action: "create" | "update"): Promise<void> {
   const items = await db.sync_queue.where("uuid").equals(uuid).toArray();
   const target = items
@@ -196,6 +212,47 @@ async function removeQueuedOpsForEntityUuids(entity: string, uuids: string[]): P
   if (ids.length) {
     await db.sync_queue.bulkDelete(ids);
   }
+}
+
+async function cleanupDuplicateRoles(): Promise<number> {
+  const rows = await db.roles.toArray();
+  const pending = await db.sync_queue.where("entity").equals("roles").toArray();
+  const pendingUuids = new Set(pending.map((item) => item.uuid).filter(Boolean));
+  const grouped = new Map<string, RoleRow[]>();
+
+  for (const row of rows) {
+    const key = row.name.trim().toLowerCase();
+    if (!key) continue;
+    const list = grouped.get(key) ?? [];
+    list.push(row);
+    grouped.set(key, list);
+  }
+
+  const removable: string[] = [];
+
+  for (const list of grouped.values()) {
+    if (list.length < 2) continue;
+
+    const sorted = [...list].sort((a, b) => {
+      const scoreDiff = rolePriority(b, pendingUuids) - rolePriority(a, pendingUuids);
+      if (scoreDiff !== 0) return scoreDiff;
+      const updatedDiff = (b.updated_at ?? 0) - (a.updated_at ?? 0);
+      if (updatedDiff !== 0) return updatedDiff;
+      return a.uuid.localeCompare(b.uuid);
+    });
+
+    const keep = sorted[0]?.uuid;
+    for (const row of sorted.slice(1)) {
+      if (row.uuid !== keep) removable.push(row.uuid);
+    }
+  }
+
+  if (!removable.length) return 0;
+
+  const uniqueRemovable = [...new Set(removable)];
+  await db.roles.bulkDelete(uniqueRemovable);
+  await removeQueuedOpsForEntityUuids("roles", uniqueRemovable);
+  return uniqueRemovable.length;
 }
 
 
@@ -242,6 +299,7 @@ export async function userRoleUpdate(uuid: string, patch: unknown): Promise<Role
 }
 export async function UserRoleListLocal(query: UserRoleLocalQuery = {}): Promise<UserRoleLocalPage> {
   await userRoleRetentionCleanupIfDue();
+  await cleanupDuplicateRoles();
 
   const page = Math.max(1, query.page ?? 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, query.pageSize ?? DEFAULT_PAGE_SIZE));
@@ -278,7 +336,7 @@ export async function userRolePullToLocal(): Promise<{ pulled: number }> {
   let serverTime = nowIso();
 
   while (true) {
-    const params: Record<string, string | number> = { offline: 1, page, per_page: PULL_PAGE_SIZE };
+    const params: Record<string, string | number> = { page, per_page: PULL_PAGE_SIZE };
     if (since && page === 1) params.since = since;
 
     const res = await api.get("/api/roles", { params });
@@ -309,6 +367,7 @@ export async function userRolePullToLocal(): Promise<{ pulled: number }> {
     page += 1;
   }
 
+  await cleanupDuplicateRoles();
   lsSet(CURSOR_KEY, serverTime);
   await userRoleRetentionCleanupIfDue();
 

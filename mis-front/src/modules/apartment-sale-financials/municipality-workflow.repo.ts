@@ -1,4 +1,5 @@
-import { db, type ApartmentSaleFinancialRow } from "@/db/localDB";
+﻿import { db, type ApartmentSaleFinancialRow } from "@/db/localDB";
+import { accountTransactionsPullToLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import { api } from "@/lib/api";
 
 type Obj = Record<string, unknown>;
@@ -22,6 +23,7 @@ export type MunicipalityReceipt = {
   payment_date: string;
   amount: number;
   payment_method: string;
+  account_id?: number | null;
   notes?: string | null;
   received_by?: number | null;
   created_at?: string | null;
@@ -32,6 +34,7 @@ export type MunicipalityReceiptInput = {
   amount: number;
   payment_date?: string;
   payment_method?: "cash" | "bank" | "transfer" | "cheque";
+  account_id: number;
   receipt_no?: string;
   notes?: string;
 };
@@ -83,6 +86,7 @@ function sanitizeReceipt(input: unknown): MunicipalityReceipt {
     payment_date: String(row.payment_date ?? ""),
     amount: toMoney(row.amount),
     payment_method: String(row.payment_method ?? "cash"),
+    account_id: row.account_id == null ? null : Number(row.account_id),
     notes: row.notes ? String(row.notes) : null,
     received_by: row.received_by ? Number(row.received_by) : null,
     created_at: row.created_at ? String(row.created_at) : null,
@@ -159,6 +163,7 @@ export async function municipalityReceiptCreate(
 ): Promise<{ receipt: MunicipalityReceipt; financial: ApartmentSaleFinancialRow | null; letter: MunicipalityLetter | null; apartmentStatus: string | null }> {
   try {
     const res = await api.post(`/api/apartment-sales/${saleUuid}/municipality-receipts`, input);
+    await Promise.all([accountsPullToLocal(), accountTransactionsPullToLocal()]);
     const root = asObj(res.data);
     const payload = asObj(root.data);
     const source = Object.keys(payload).length ? payload : root;
@@ -187,3 +192,5 @@ export async function municipalityReceiptCreate(
     throw new Error(getApiErrorMessage(error));
   }
 }
+
+

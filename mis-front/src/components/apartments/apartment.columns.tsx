@@ -31,7 +31,8 @@ const normalizeUsageType = (usageType: string): UsageType => {
   return usageType.trim().toLowerCase() === "commercial" ? "commercial" : "residential";
 };
 
-export const apartmentColumns: Column<ApartmentRow>[] = [
+export function createApartmentColumns(): Column<ApartmentRow>[] {
+  return [
   {
     key: "apartment_image_url",
     label: "Image",
@@ -76,18 +77,6 @@ export const apartmentColumns: Column<ApartmentRow>[] = [
     ),
   },
   {
-    key: "layout",
-    label: "Layout",
-    render: (item) => (
-      <span>{`${item.bedrooms}BR / ${item.halls}Hall / ${item.bathrooms}Bath / ${item.kitchens}Kit`}</span>
-    ),
-  },
-  {
-    key: "area_sqm",
-    label: "Area",
-    render: (item) => <span>{`${item.area_sqm} sqm`}</span>,
-  },
-  {
     key: "status",
     label: "Status",
     render: (item) => {
@@ -95,9 +84,5 @@ export const apartmentColumns: Column<ApartmentRow>[] = [
       return <Badge color={statusColor[status]}>{statusLabel(status)}</Badge>;
     },
   },
-  {
-    key: "balcony",
-    label: "Balcony",
-    render: (item) => <span>{item.balcony ? "Yes" : "No"}</span>,
-  },
-];
+  ];
+}

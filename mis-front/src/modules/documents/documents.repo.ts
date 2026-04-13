@@ -26,6 +26,7 @@ export type SystemDocumentRow = {
   document_type: string;
   document_type_label: string;
   reference_id: number;
+  reference_uuid?: string | null;
   reference_label: string;
   file_name: string;
   file_path: string;
@@ -35,6 +36,7 @@ export type SystemDocumentRow = {
   created_at?: string | null;
   local_only?: boolean;
   local_blob?: Blob | null;
+  awaiting_reference_sync?: boolean;
 };
 
 export type SystemDocumentPage = {
@@ -77,6 +79,8 @@ const DOCUMENT_TYPES: Record<DocumentModuleKey, DocumentTypeOption[]> = {
   customer: [
     { value: "customer_deed_document", label: "Customer Deed Document" },
     { value: "customer_attachment", label: "Customer Attachment" },
+    { value: "customer_image", label: "Customer Image" },
+    { value: "customer_representative_image", label: "Customer Representative Image" },
   ],
   apartment: [
     { value: "apartment_image", label: "Apartment Image" },
@@ -134,6 +138,7 @@ function normalizeDocumentRow(input: unknown): SystemDocumentRow {
     document_type: String(row.document_type ?? ""),
     document_type_label: String(row.document_type_label ?? ""),
     reference_id: Number(row.reference_id ?? 0),
+    reference_uuid: row.reference_uuid ? String(row.reference_uuid) : null,
     reference_label: String(row.reference_label ?? ""),
     file_name: String(row.file_name ?? ""),
     file_path: String(row.file_path ?? ""),
@@ -143,6 +148,7 @@ function normalizeDocumentRow(input: unknown): SystemDocumentRow {
     created_at: row.created_at ? String(row.created_at) : null,
     local_only: Boolean(row.local_only),
     local_blob: row.local_blob instanceof Blob ? row.local_blob : null,
+    awaiting_reference_sync: Boolean(row.awaiting_reference_sync),
   };
 }
 
@@ -152,6 +158,8 @@ function toLocalRow(row: SystemDocumentRow): SystemDocumentLocalRow {
     updated_at: nowMs(),
     local_only: Boolean(row.local_only),
     local_blob: row.local_blob ?? null,
+    reference_uuid: row.reference_uuid ?? null,
+    awaiting_reference_sync: Boolean(row.awaiting_reference_sync),
   };
 }
 
@@ -163,6 +171,7 @@ function fromLocalRow(row: SystemDocumentLocalRow): SystemDocumentRow {
     document_type: row.document_type,
     document_type_label: row.document_type_label,
     reference_id: row.reference_id,
+    reference_uuid: row.reference_uuid ?? null,
     reference_label: row.reference_label,
     file_name: row.file_name,
     file_path: row.file_path,
@@ -172,6 +181,7 @@ function fromLocalRow(row: SystemDocumentLocalRow): SystemDocumentRow {
     created_at: row.created_at ?? null,
     local_only: Boolean(row.local_only),
     local_blob: row.local_blob ?? null,
+    awaiting_reference_sync: Boolean(row.awaiting_reference_sync),
   };
 }
 
@@ -393,16 +403,48 @@ async function uploadDocumentRemote(input: {
   return normalizeDocumentRow(asObj(res.data).data);
 }
 
+async function resolvePendingDocumentReferenceId(module: DocumentModuleKey, referenceUuid: string): Promise<number> {
+  const normalizedUuid = referenceUuid.trim();
+  if (!normalizedUuid) return 0;
+
+  switch (module) {
+    case "customer": {
+      const customer = await db.customers.get(normalizedUuid);
+      return typeof customer?.id === "number" && customer.id > 0 ? customer.id : 0;
+    }
+    case "apartment_sale": {
+      const sale = await db.apartment_sales.get(normalizedUuid);
+      return typeof sale?.id === "number" && sale.id > 0 ? sale.id : 0;
+    }
+    default:
+      return 0;
+  }
+}
+
 async function syncDocumentCreateOp(op: PendingModuleOpRow): Promise<"synced" | "retry" | "dropped"> {
   const payload = asObj(op.payload);
   const tempId = Number(payload.temp_id ?? 0);
   const moduleKey = String(payload.module ?? "") as DocumentModuleKey;
   const documentType = String(payload.document_type ?? "");
-  const referenceId = Number(payload.reference_id ?? 0);
+  let referenceId = Number(payload.reference_id ?? 0);
+  const referenceUuid = String(payload.reference_uuid ?? "").trim();
   const fileBlob = payload.file_blob instanceof Blob ? payload.file_blob : null;
   const fileName = String(payload.file_name ?? "document");
 
-  if (!tempId || !moduleKey || !documentType || !referenceId || !fileBlob) {
+  if (!tempId || !moduleKey || !documentType || !fileBlob) {
+    await db.system_documents.delete(tempId);
+    await deletePendingModuleOp(op.id);
+    return "dropped";
+  }
+
+  if (!(referenceId > 0) && referenceUuid) {
+    referenceId = await resolvePendingDocumentReferenceId(moduleKey, referenceUuid);
+    if (!(referenceId > 0)) {
+      return "retry";
+    }
+  }
+
+  if (!(referenceId > 0)) {
     await db.system_documents.delete(tempId);
     await deletePendingModuleOp(op.id);
     return "dropped";
@@ -504,15 +546,24 @@ export async function documentReferenceOptions(module: DocumentModuleKey): Promi
 export async function documentUpload(input: {
   module: DocumentModuleKey;
   documentType: string;
-  referenceId: number;
+  documentTypeLabel?: string;
+  referenceId?: number;
+  referenceUuid?: string;
+  referenceLabel?: string;
   file: File;
 }): Promise<SystemDocumentRow> {
-  if (isOnline()) {
+  let resolvedReferenceId = Number(input.referenceId ?? 0);
+  if (!(resolvedReferenceId > 0) && input.referenceUuid?.trim()) {
+    resolvedReferenceId = await resolvePendingDocumentReferenceId(input.module, input.referenceUuid.trim());
+  }
+  const hasReferenceId = resolvedReferenceId > 0;
+
+  if (isOnline() && hasReferenceId) {
     try {
       const saved = await uploadDocumentRemote({
         module: input.module,
         documentType: input.documentType,
-        referenceId: input.referenceId,
+        referenceId: resolvedReferenceId,
         file: input.file,
         fileName: input.file.name,
       });
@@ -533,9 +584,16 @@ export async function documentUpload(input: {
     module_label: MODULE_LABELS[input.module] ?? input.module,
     document_type: input.documentType,
     document_type_label:
-      DOCUMENT_TYPES[input.module]?.find((item) => item.value === input.documentType)?.label ?? input.documentType,
-    reference_id: input.referenceId,
-    reference_label: await buildReferenceLabel(input.module, input.referenceId),
+      input.documentTypeLabel ||
+      DOCUMENT_TYPES[input.module]?.find((item) => item.value === input.documentType)?.label ||
+      input.documentType,
+    reference_id: hasReferenceId ? resolvedReferenceId : 0,
+    reference_uuid: input.referenceUuid?.trim() ? input.referenceUuid.trim() : null,
+    reference_label: input.referenceLabel?.trim()
+      ? input.referenceLabel.trim()
+      : hasReferenceId
+        ? await buildReferenceLabel(input.module, Number(input.referenceId))
+        : "Pending record sync",
     file_name: input.file.name,
     file_path: "",
     file_url: "",
@@ -544,6 +602,7 @@ export async function documentUpload(input: {
     created_at: nowIso(),
     local_only: true,
     local_blob: input.file,
+    awaiting_reference_sync: !hasReferenceId && Boolean(input.referenceUuid?.trim()),
   };
 
   await db.transaction("rw", db.system_documents, db.pending_module_ops, async () => {
@@ -556,7 +615,9 @@ export async function documentUpload(input: {
         temp_id: tempId,
         module: input.module,
         document_type: input.documentType,
-        reference_id: input.referenceId,
+        reference_id: hasReferenceId ? resolvedReferenceId : null,
+        reference_uuid: input.referenceUuid?.trim() ? input.referenceUuid.trim() : null,
+        reference_label: tempRow.reference_label,
         file_name: input.file.name,
         file_blob: input.file,
       },

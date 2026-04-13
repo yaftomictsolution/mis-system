@@ -36,12 +36,19 @@ export const NAV_ITEMS = [
     ],
   },
   {
+    title: 'Finance',
+    items: [
+      { icon: BadgeDollarSign, label: 'Accounts', permission: "accounts.view", path: '/accounts' },
+      { icon: ArrowLeftRight, label: 'Exchange Rates', permission: "exchange_rates.view", path: '/exchange-rates' },
+    ],
+  },
+  {
     title: 'Apartment',
     items: [
       { icon: Building2, label: 'Apartments',permission: "apartments.view", path: '/apartments' },
       { icon: UserCheck, label: 'Customers',permission: "customers.view", path: '/customers' },
-      { icon: BadgeDollarSign, label: 'Sales',permission: "sales.create", path: '/apartment-sales' },
-      { icon: CalendarCheck, label: 'Installments',permission: "installments.pay", path: '/installments' },
+      { icon: BadgeDollarSign, label: 'Sales', permission: ["sales.create", "sales.approve"], path: '/apartment-sales' },
+      { icon: CalendarCheck, label: 'Installments',permission: ["installments.pay", "sales.create", "sales.approve"], path: '/installments' },
       { icon: MessageSquareText, label: 'CRM', permission: "customers.view", path: '/crm' },
       { icon: FolderOpen, label: 'Documents', path: '/documents' },
     ],
