@@ -4,15 +4,23 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSalaryAdvanceRequest;
+use App\Models\Employee;
 use App\Models\SalaryAdvance;
+use App\Services\SalaryAdvanceBalanceService;
 use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class SalaryAdvanceController extends Controller
 {
     private const OFFLINE_WINDOW_MONTHS = 6;
+
+    public function __construct(
+        private readonly SalaryAdvanceBalanceService $salaryAdvanceBalanceService
+    ) {
+    }
 
     public function index(Request $request): JsonResponse
     {
@@ -101,52 +109,70 @@ class SalaryAdvanceController extends Controller
         $data = $request->validated();
         $incomingUuid = (string) ($data['uuid'] ?? '');
 
-        $advance = $incomingUuid !== ''
-            ? SalaryAdvance::withTrashed()->where('uuid', $incomingUuid)->first()
-            : null;
-
         $created = false;
-        if (! $advance) {
-            $advance = new SalaryAdvance();
-            $advance->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
-            $created = true;
-        } elseif ($advance->trashed()) {
-            $advance->restore();
-        }
+        $advance = DB::transaction(function () use ($incomingUuid, $data, $request, &$created) {
+            $advance = $incomingUuid !== ''
+                ? SalaryAdvance::withTrashed()->where('uuid', $incomingUuid)->lockForUpdate()->first()
+                : null;
 
-        $advance->fill([
-            'employee_id' => (int) $data['employee_id'],
-            'amount' => round((float) $data['amount'], 2),
-            'user_id' => isset($data['user_id']) ? (int) $data['user_id'] : ($advance->user_id ?: $request->user()?->id),
-            'reason' => isset($data['reason']) ? trim((string) $data['reason']) ?: null : null,
-            'status' => $this->normalizeStatus((string) ($data['status'] ?? 'pending')),
-        ]);
-        $advance->save();
+            if (! $advance) {
+                $advance = new SalaryAdvance();
+                $advance->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
+                $created = true;
+                $advance->deducted_amount = 0;
+                $advance->remaining_amount = 0;
+            } elseif ($advance->trashed()) {
+                $advance->restore();
+            }
+
+            $advance->fill([
+                'employee_id' => (int) $data['employee_id'],
+                'amount' => round((float) $data['amount'], 2),
+                'currency_code' => $this->resolveAdvanceCurrency($data, null, (int) $data['employee_id']),
+                'user_id' => isset($data['user_id']) ? (int) $data['user_id'] : ($advance->user_id ?: $request->user()?->id),
+                'reason' => isset($data['reason']) ? trim((string) $data['reason']) ?: null : null,
+            ]);
+            $this->salaryAdvanceBalanceService->syncAdvanceSnapshot(
+                $advance,
+                (string) ($data['status'] ?? 'pending')
+            );
+            $advance->save();
+
+            return $advance->fresh(['employee', 'user']);
+        });
 
         return response()->json([
-            'data' => $this->payload($advance->fresh(['employee', 'user'])),
+            'data' => $this->payload($advance),
         ], $created ? 201 : 200);
     }
 
     public function update(StoreSalaryAdvanceRequest $request, string $uuid): JsonResponse
     {
-        $advance = SalaryAdvance::withTrashed()->where('uuid', $uuid)->firstOrFail();
-        if ($advance->trashed()) {
-            $advance->restore();
-        }
+        $advance = DB::transaction(function () use ($uuid, $request) {
+            $advance = SalaryAdvance::withTrashed()->where('uuid', $uuid)->lockForUpdate()->firstOrFail();
+            if ($advance->trashed()) {
+                $advance->restore();
+            }
 
-        $data = $request->validated();
-        $advance->fill([
-            'employee_id' => (int) $data['employee_id'],
-            'amount' => round((float) $data['amount'], 2),
-            'user_id' => isset($data['user_id']) ? (int) $data['user_id'] : ($advance->user_id ?: $request->user()?->id),
-            'reason' => isset($data['reason']) ? trim((string) $data['reason']) ?: null : null,
-            'status' => $this->normalizeStatus((string) ($data['status'] ?? $advance->status)),
-        ]);
-        $advance->save();
+            $data = $request->validated();
+            $advance->fill([
+                'employee_id' => (int) $data['employee_id'],
+                'amount' => round((float) $data['amount'], 2),
+                'currency_code' => $this->resolveAdvanceCurrency($data, $advance, (int) $data['employee_id']),
+                'user_id' => isset($data['user_id']) ? (int) $data['user_id'] : ($advance->user_id ?: $request->user()?->id),
+                'reason' => isset($data['reason']) ? trim((string) $data['reason']) ?: null : null,
+            ]);
+            $this->salaryAdvanceBalanceService->syncAdvanceSnapshot(
+                $advance,
+                (string) ($data['status'] ?? $advance->status)
+            );
+            $advance->save();
+
+            return $advance->fresh(['employee', 'user']);
+        });
 
         return response()->json([
-            'data' => $this->payload($advance->fresh(['employee', 'user'])),
+            'data' => $this->payload($advance),
         ]);
     }
 
@@ -201,19 +227,35 @@ class SalaryAdvanceController extends Controller
             'employee_uuid' => $advance->employee?->uuid,
             'employee_name' => $employeeName !== '' ? $employeeName : null,
             'amount' => (float) $advance->amount,
+            'currency_code' => $advance->currency_code,
             'user_id' => $advance->user_id,
             'user_name' => $advance->user?->name,
             'reason' => $advance->reason,
             'status' => $advance->status,
+            'deducted_amount' => (float) $advance->deducted_amount,
+            'remaining_amount' => (float) $advance->remaining_amount,
             'created_at' => optional($advance->created_at)->toISOString(),
             'updated_at' => optional($advance->updated_at)->toISOString(),
             'deleted_at' => optional($advance->deleted_at)->toISOString(),
         ];
     }
 
-    private function normalizeStatus(string $value): string
+    private function resolveAdvanceCurrency(array $data, ?SalaryAdvance $advance, int $employeeId): string
     {
-        $status = strtolower(trim($value));
-        return in_array($status, ['approved', 'deducted', 'rejected'], true) ? $status : 'pending';
+        $requested = strtoupper(trim((string) ($data['currency_code'] ?? '')));
+        if (in_array($requested, ['USD', 'AFN'], true)) {
+            return $requested;
+        }
+
+        if ($advance && in_array(strtoupper(trim((string) $advance->currency_code)), ['USD', 'AFN'], true)) {
+            return strtoupper(trim((string) $advance->currency_code));
+        }
+
+        $employeeCurrency = Employee::query()
+            ->where('id', $employeeId)
+            ->value('salary_currency_code');
+
+        $normalizedEmployeeCurrency = strtoupper(trim((string) $employeeCurrency));
+        return in_array($normalizedEmployeeCurrency, ['USD', 'AFN'], true) ? $normalizedEmployeeCurrency : 'USD';
     }
 }

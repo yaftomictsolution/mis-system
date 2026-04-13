@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Models\ApartmentSale;
 use App\Models\Apartment;
 use App\Models\ApartmentSaleFinancial;
+use App\Models\ApartmentRental;
+use App\Support\ApartmentSaleCustomerAmounts;
 use Illuminate\Support\Facades\DB;
 
 class ApartmentSaleFinancialService
@@ -27,9 +29,9 @@ class ApartmentSaleFinancialService
             $financial->apartment_sale_id = (int) $sale->id;
         }
 
-        $netPrice = $this->toMoney($sale->net_price ?? ((float) $sale->total_price - (float) $sale->discount));
-        $municipalityShare15 = $this->toMoney($netPrice * 0.15);
-        $companyShare85 = $this->toMoney($netPrice * 0.85);
+        $netPrice = ApartmentSaleCustomerAmounts::netPrice($sale);
+        $municipalityShare15 = ApartmentSaleCustomerAmounts::municipalityShare($sale);
+        $companyShare85 = ApartmentSaleCustomerAmounts::companyShare($sale);
 
         $discountOrDeduction = array_key_exists('discount_or_contractor_deduction', $overrides)
             ? $this->toMoney($overrides['discount_or_contractor_deduction'])
@@ -51,10 +53,14 @@ class ApartmentSaleFinancialService
             ? $this->toMoney($overrides['rahnama_fee_1'])
             : $this->toMoney($financial->rahnama_fee_1 ?? ($netPrice * 0.01));
 
-        $paidTotal = $this->toMoney((float) $sale->installments()->sum('paid_amount'));
+        $installments = $sale->installments()->get();
+        $paidTotal = ApartmentSaleCustomerAmounts::paidTotal($installments);
+        $hasInstallmentRows = $sale->installments()->exists();
         $status = strtolower(trim((string) $sale->status));
-        $effectivePaid = ($sale->payment_type === 'full' && $status === 'completed') ? $netPrice : $paidTotal;
-        $customerDebt = $this->toMoney(max(0, $netPrice - $effectivePaid - $discountOrDeduction));
+        $effectivePaid = (!$hasInstallmentRows && $sale->payment_type === 'full' && $status === 'completed')
+            ? $companyShare85
+            : $paidTotal;
+        $customerDebt = $this->toMoney(max(0, $companyShare85 - $effectivePaid - $discountOrDeduction));
 
         $accountsStatus = $this->resolveAccountsStatus(
             $financial,
@@ -125,28 +131,49 @@ class ApartmentSaleFinancialService
 
     private function syncApartmentStatus(ApartmentSale $sale): void
     {
-        $apartment = Apartment::query()->find($sale->apartment_id);
+        $this->refreshApartmentStatusForApartment((int) $sale->apartment_id);
+    }
+
+    public function refreshApartmentStatusForApartment(int $apartmentId): void
+    {
+        if ($apartmentId <= 0) {
+            return;
+        }
+
+        $apartment = Apartment::query()->find($apartmentId);
         if (!$apartment) {
             return;
         }
 
-        $status = strtolower(trim((string) $sale->status));
-        $deedStatus = strtolower(trim((string) ($sale->deed_status ?? 'not_issued')));
-        $handoverStatus = strtolower(trim((string) ($sale->key_handover_status ?? 'not_handed_over')));
-        $targetStatus = 'reserved';
+        $activeSale = ApartmentSale::query()
+            ->where('apartment_id', $apartmentId)
+            ->whereNotIn('status', ['cancelled', 'terminated', 'defaulted'])
+            ->orderByDesc('updated_at')
+            ->first();
 
-        if (in_array($status, ['cancelled', 'terminated', 'defaulted'], true)) {
-            $hasOtherActiveSale = ApartmentSale::query()
-                ->where('apartment_id', $sale->apartment_id)
-                ->where('id', '!=', $sale->id)
-                ->whereNotIn('status', ['cancelled', 'terminated', 'defaulted'])
-                ->exists();
+        $openRental = ApartmentRental::query()
+            ->where('apartment_id', $apartmentId)
+            ->whereIn('status', ['draft', 'advance_pending', 'active'])
+            ->orderByDesc('updated_at')
+            ->first();
 
-            $targetStatus = $hasOtherActiveSale ? 'reserved' : 'available';
-        } elseif ($deedStatus === 'issued') {
-            $targetStatus = 'sold';
-        } elseif ($handoverStatus === 'handed_over') {
-            $targetStatus = 'handed_over';
+        $targetStatus = 'available';
+
+        if ($activeSale) {
+            $deedStatus = strtolower(trim((string) ($activeSale->deed_status ?? 'not_issued')));
+            $handoverStatus = strtolower(trim((string) ($activeSale->key_handover_status ?? 'not_handed_over')));
+
+            if ($deedStatus === 'issued') {
+                $targetStatus = 'sold';
+            } elseif ($handoverStatus === 'handed_over') {
+                $targetStatus = 'handed_over';
+            } else {
+                $targetStatus = 'reserved';
+            }
+        } elseif ($openRental) {
+            $targetStatus = strtolower(trim((string) $openRental->status)) === 'active'
+                ? 'rented'
+                : 'reserved';
         }
 
         if ((string) $apartment->status !== $targetStatus) {
@@ -163,7 +190,8 @@ class ApartmentSaleFinancialService
         }
 
         $status = strtolower(trim((string) $sale->status));
-        $hasUnpaidInstallment = $sale->installments()->whereRaw('paid_amount < amount')->exists();
+        $installments = $sale->relationLoaded('installments') ? $sale->installments : $sale->installments()->get();
+        $hasUnpaidInstallment = ApartmentSaleCustomerAmounts::hasUnpaidInstallments($sale, $installments);
         $eligible =
             $status === 'completed' &&
             !$hasUnpaidInstallment &&
@@ -204,8 +232,9 @@ class ApartmentSaleFinancialService
         string $status
     ): void {
         $refundAmount = $this->toMoney($sale->termination?->refund_amount ?? 0);
-        $receivedFromCustomer = ($sale->payment_type === 'full' && $status === 'completed')
-            ? $netPrice
+        $hasInstallmentRows = $sale->installments()->exists();
+        $receivedFromCustomer = (!$hasInstallmentRows && $sale->payment_type === 'full' && $status === 'completed')
+            ? ApartmentSaleCustomerAmounts::companyShare($sale)
             : $paidTotal;
         $deliveredToMunicipality = $this->toMoney($financial->delivered_to_municipality ?? 0);
 

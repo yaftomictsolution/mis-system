@@ -3,14 +3,19 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Account;
 use App\Models\Apartment;
 use App\Models\ApartmentSale;
 use App\Models\ApartmentSaleFinancial;
 use App\Models\Customer;
+use App\Models\Employee;
+use App\Models\ExchangeRate;
 use App\Models\Installment;
+use App\Models\InstallmentPayment;
 use App\Models\Roles;
 use App\Models\SalaryAdvance;
 use App\Models\SalaryPayment;
+use App\Models\SalaryAdvanceDeduction;
 use App\Models\Vendor;
 use App\Models\Warehouse;
 use App\Models\Material;
@@ -24,10 +29,16 @@ use App\Models\AssetAssignment;
 use App\Models\Project;
 use App\Models\StockMovement;
 use App\Models\User;
+use App\Services\AccountLedgerService;
 use App\Services\ApartmentSaleFinancialService;
+use App\Services\EmployeeSalaryHistoryService;
+use App\Services\ExchangeRateService;
 use App\Services\MaterialStockService;
 use App\Services\MunicipalityWorkflowService;
+use App\Services\SaleApprovalAlertService;
 use App\Services\SaleCreatedFinanceAlertService;
+use App\Services\SalaryAdvanceBalanceService;
+use App\Support\ApartmentSaleCustomerAmounts;
 use App\Models\SyncInbox;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
@@ -43,8 +54,13 @@ class SyncController extends Controller
     public function __construct(
         private readonly ApartmentSaleFinancialService $financials,
         private readonly MunicipalityWorkflowService $workflow,
+        private readonly SaleApprovalAlertService $saleApprovalAlerts,
         private readonly SaleCreatedFinanceAlertService $saleCreatedAlerts,
-        private readonly MaterialStockService $materialStocks
+        private readonly MaterialStockService $materialStocks,
+        private readonly EmployeeSalaryHistoryService $salaryHistoryService,
+        private readonly ExchangeRateService $exchangeRateService,
+        private readonly AccountLedgerService $accountLedgerService,
+        private readonly SalaryAdvanceBalanceService $salaryAdvanceBalanceService,
     )
     {
     }
@@ -53,7 +69,7 @@ class SyncController extends Controller
     {
         $validated = $request->validate([
             'idempotency_key' => ['required', 'string'],
-            'entity' => ['required', Rule::in(['customers', 'roles', 'users', 'apartments', 'apartment_sales', 'installments', 'apartment_sale_financials', 'salary_advances', 'salary_payments', 'projects', 'vendors', 'warehouses', 'materials', 'company_assets', 'material_requests', 'purchase_requests', 'asset_requests'])],
+            'entity' => ['required', Rule::in(['customers', 'roles', 'users', 'apartments', 'apartment_sales', 'installments', 'apartment_sale_financials', 'employees', 'salary_advances', 'salary_payments', 'accounts', 'exchange_rates', 'projects', 'vendors', 'warehouses', 'materials', 'company_assets', 'material_requests', 'purchase_requests', 'asset_requests'])],
             'uuid' => ['required', 'uuid'],
             'action' => ['required', 'in:create,update,delete'],
             'payload' => ['nullable', 'array'],
@@ -126,6 +142,8 @@ class SyncController extends Controller
 
         if ($entity === 'users') {
             $existing = User::withTrashed()->where('uuid', $uuid)->first();
+            $role = trim((string) ($request->input('payload.role') ?? ''));
+            $customerId = (int) ($request->input('payload.customer_id') ?? 0);
 
             $request->validate([
                 'payload.name' => ['required', 'string', 'max:255'],
@@ -138,6 +156,93 @@ class SyncController extends Controller
                         ->ignore($existing?->id),
                 ],
                 'payload.password' => [($action === 'create' ? 'required' : 'nullable'), 'string', 'max:255'],
+                'payload.role' => ['nullable', 'string', 'max:255'],
+                'payload.customer_id' => [
+                    'nullable',
+                    'integer',
+                    'min:1',
+                    Rule::exists('customers', 'id'),
+                    Rule::unique('users', 'customer_id')
+                        ->whereNull('deleted_at')
+                        ->ignore($existing?->id),
+                ],
+            ]);
+
+            if ($role === 'Customer' && $customerId <= 0) {
+                abort(422, 'Linked customer is required for Customer portal accounts.');
+            }
+
+            if ($role !== '' && $role !== 'Customer' && $customerId > 0) {
+                abort(422, 'Only the Customer role can be linked to a customer account.');
+            }
+
+            return;
+        }
+
+        if ($entity === 'employees') {
+            $existing = Employee::withTrashed()->where('uuid', $uuid)->first();
+
+            $request->validate([
+                'payload.first_name' => ['required', 'string', 'max:255'],
+                'payload.last_name' => ['nullable', 'string', 'max:255'],
+                'payload.job_title' => ['nullable', 'string', 'max:255'],
+                'payload.salary_type' => ['required', 'string', 'max:255'],
+                'payload.base_salary' => ['nullable', 'numeric', 'min:0'],
+                'payload.salary_currency_code' => ['nullable', Rule::in(['USD', 'AFN'])],
+                'payload.salary_change_reason' => ['nullable', 'string', 'max:2000'],
+                'payload.salary_effective_from' => ['nullable', 'date'],
+                'payload.salary_history_uuid' => ['nullable', 'string', 'size:36'],
+                'payload.address' => ['nullable', 'string', 'max:255'],
+                'payload.email' => [
+                    'nullable',
+                    'email',
+                    'max:255',
+                    Rule::unique('employees', 'email')->ignore($existing?->id),
+                ],
+                'payload.phone' => ['nullable', 'string', 'max:255'],
+                'payload.hire_date' => ['nullable', 'date'],
+                'payload.status' => ['nullable', 'string', 'max:255'],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'accounts') {
+            $existing = Account::withTrashed()->where('uuid', $uuid)->first();
+
+            $request->validate([
+                'payload.name' => [
+                    'required',
+                    'string',
+                    'max:255',
+                    Rule::unique('accounts', 'name')->ignore($existing?->id),
+                ],
+                'payload.account_type' => [
+                'required',
+                'string',
+                'max:80',
+                Rule::exists('document_types', 'code')->where(fn ($query) => $query->where('module', 'accounts')),
+            ],
+                'payload.bank_name' => ['nullable', 'string', 'max:255'],
+                'payload.account_number' => ['nullable', 'string', 'max:100'],
+                'payload.currency' => ['nullable', Rule::in(['USD', 'AFN'])],
+                'payload.opening_balance' => ['nullable', 'numeric'],
+                'payload.status' => ['nullable', Rule::in(['active', 'inactive'])],
+                'payload.notes' => ['nullable', 'string'],
+            ]);
+
+            return;
+        }
+
+        if ($entity === 'exchange_rates') {
+            $request->validate([
+                'payload.base_currency' => ['nullable', Rule::in(['USD'])],
+                'payload.quote_currency' => ['nullable', Rule::in(['AFN'])],
+                'payload.rate' => ['required', 'numeric', 'gt:0'],
+                'payload.source' => ['nullable', Rule::in(['manual', 'api'])],
+                'payload.effective_date' => ['nullable', 'date'],
+                'payload.is_active' => ['nullable', 'boolean'],
+                'payload.notes' => ['nullable', 'string'],
             ]);
 
             return;
@@ -310,6 +415,8 @@ class SyncController extends Controller
                 'payload.name' => ['required', 'string', 'max:255'],
                 'payload.fname' => ['nullable', 'string', 'max:255'],
                 'payload.gname' => ['nullable', 'string', 'max:255'],
+                'payload.job_title' => ['nullable', 'string', 'max:255'],
+                'payload.tazkira_number' => ['nullable', 'string', 'max:255'],
                 'payload.phone' => [
                     'required',
                     'string',
@@ -326,6 +433,25 @@ class SyncController extends Controller
                         ->ignore($existing?->id),
                 ],
                 'payload.address' => ['nullable', 'string'],
+                'payload.current_area' => ['nullable', 'string', 'max:255'],
+                'payload.current_district' => ['nullable', 'string', 'max:255'],
+                'payload.current_province' => ['nullable', 'string', 'max:255'],
+                'payload.original_area' => ['nullable', 'string', 'max:255'],
+                'payload.original_district' => ['nullable', 'string', 'max:255'],
+                'payload.original_province' => ['nullable', 'string', 'max:255'],
+                'payload.representative_name' => ['nullable', 'string', 'max:255'],
+                'payload.representative_fname' => ['nullable', 'string', 'max:255'],
+                'payload.representative_gname' => ['nullable', 'string', 'max:255'],
+                'payload.representative_job_title' => ['nullable', 'string', 'max:255'],
+                'payload.representative_relationship' => ['nullable', 'string', 'max:255'],
+                'payload.representative_phone' => ['nullable', 'string', 'max:50'],
+                'payload.representative_tazkira_number' => ['nullable', 'string', 'max:255'],
+                'payload.representative_current_area' => ['nullable', 'string', 'max:255'],
+                'payload.representative_current_district' => ['nullable', 'string', 'max:255'],
+                'payload.representative_current_province' => ['nullable', 'string', 'max:255'],
+                'payload.representative_original_area' => ['nullable', 'string', 'max:255'],
+                'payload.representative_original_district' => ['nullable', 'string', 'max:255'],
+                'payload.representative_original_province' => ['nullable', 'string', 'max:255'],
             ]);
 
             return;
@@ -393,6 +519,10 @@ class SyncController extends Controller
                 'payload.area_sqm' => ['nullable', 'numeric', 'min:0'],
                 'payload.apartment_shape' => ['nullable', 'string', 'max:100'],
                 'payload.corridor' => ['nullable', 'string', 'max:100'],
+                'payload.north_boundary' => ['nullable', 'string', 'max:255'],
+                'payload.south_boundary' => ['nullable', 'string', 'max:255'],
+                'payload.east_boundary' => ['nullable', 'string', 'max:255'],
+                'payload.west_boundary' => ['nullable', 'string', 'max:255'],
                 'payload.status' => ['nullable', Rule::in(['available', 'reserved', 'handed_over', 'sold', 'rented', 'company_use'])],
                 'payload.qr_code' => ['nullable', 'string', 'max:255'],
                 'payload.additional_info' => ['nullable', 'string'],
@@ -457,37 +587,38 @@ class SyncController extends Controller
                 'payload.discount_or_contractor_deduction' => ['nullable', 'numeric', 'min:0'],
                 'payload.updated_at' => ['nullable'],
             ]);
-
             $saleId = (int) $request->input('payload.apartment_sale_id', 0);
             $saleUuid = trim((string) $request->input('payload.sale_uuid', ''));
             if ($saleId <= 0 && $saleUuid === '') {
                 abort(422, 'apartment_sale_id or sale_uuid is required for apartment_sale_financials.');
             }
-
             return;
         }
-
         if ($entity === 'salary_advances') {
             $request->validate([
                 'payload.employee_id' => ['required', 'integer', 'min:1', Rule::exists('employees', 'id')],
                 'payload.amount' => ['required', 'numeric', 'min:0.01'],
+                'payload.currency_code' => ['nullable', Rule::in(['USD', 'AFN'])],
                 'payload.user_id' => ['nullable', 'integer', 'min:1', Rule::exists('users', 'id')],
                 'payload.reason' => ['nullable', 'string'],
-                'payload.status' => ['nullable', Rule::in(['pending', 'approved', 'deducted', 'rejected'])],
+                'payload.status' => ['nullable', Rule::in(['pending', 'approved', 'partial_deducted', 'deducted', 'rejected'])],
                 'payload.updated_at' => ['nullable'],
             ]);
-
             return;
         }
-
         if ($entity === 'salary_payments') {
             $request->validate([
                 'payload.employee_id' => ['required', 'integer', 'min:1', Rule::exists('employees', 'id')],
                 'payload.period' => ['required', 'string', 'max:100'],
                 'payload.gross_salary' => ['required', 'numeric', 'min:0'],
+                'payload.salary_currency_code' => ['nullable', Rule::in(['USD', 'AFN'])],
                 'payload.advance_deducted' => ['nullable', 'numeric', 'min:0'],
+                'payload.tax_percentage' => ['nullable', 'numeric', 'min:0', 'max:100'],
+                'payload.tax_deducted' => ['nullable', 'numeric', 'min:0'],
+                'payload.other_deductions' => ['nullable', 'numeric', 'min:0'],
                 'payload.net_salary' => ['nullable', 'numeric', 'min:0'],
                 'payload.status' => ['nullable', Rule::in(['draft', 'paid', 'cancelled'])],
+                'payload.account_id' => ['nullable', 'integer', 'min:1', Rule::exists('accounts', 'id')],
                 'payload.user_id' => ['nullable', 'integer', 'min:1', Rule::exists('users', 'id')],
                 'payload.paid_at' => ['nullable', 'date'],
                 'payload.updated_at' => ['nullable'],
@@ -495,7 +626,6 @@ class SyncController extends Controller
 
             return;
         }
-
         if ($entity === 'installments') {
             $request->validate([
                 'payload.apartment_sale_id' => ['required', 'integer', 'min:1', Rule::exists('apartment_sales', 'id')],
@@ -504,21 +634,25 @@ class SyncController extends Controller
                 'payload.due_date' => ['required', 'date'],
                 'payload.paid_amount' => ['nullable', 'numeric', 'min:0'],
                 'payload.paid_date' => ['nullable', 'date'],
+                'payload.payment_amount' => ['nullable', 'numeric', 'min:0.01'],
+                'payload.account_id' => ['nullable', 'integer', 'min:1', Rule::exists('accounts', 'id')],
+                'payload.payment_method' => ['nullable', 'string', 'max:30'],
+                'payload.reference_no' => ['nullable', 'string', 'max:100'],
+                'payload.notes' => ['nullable', 'string'],
                 'payload.status' => ['nullable', Rule::in(['pending', 'paid', 'overdue', 'cancelled'])],
                 'payload.updated_at' => ['nullable'],
             ]);
-
+            if ($request->filled('payload.payment_amount')) {
+                $request->validate([
+                    'payload.account_id' => ['required', 'integer', 'min:1', Rule::exists('accounts', 'id')],
+                ]);
+            }
             return;
         }
 
-
     }
-
     private function applyEntityOperation(string $entity, string $uuid, string $action, array $payload, int $actorId = 0): void
     {
-        
-
-
         if ($entity === 'users') {
             if ($action === 'delete') {
                 $user = User::withTrashed()->where('uuid', $uuid)->first();
@@ -554,7 +688,233 @@ class SyncController extends Controller
             } elseif (! $user->exists && empty($user->password)) {
                 $user->password = Hash::make(Str::random(32));
             }
+
+            $role = trim((string) ($payload['role'] ?? (is_array($payload['roles'] ?? null) ? ($payload['roles'][0] ?? '') : '')));
+            $customerId = array_key_exists('customer_id', $payload)
+                ? (int) ($payload['customer_id'] ?? 0)
+                : (int) ($user->customer_id ?? 0);
+
+            if ($role === 'Customer') {
+                $user->customer_id = $customerId > 0 ? $customerId : null;
+            } elseif (array_key_exists('customer_id', $payload)) {
+                $user->customer_id = null;
+            }
+
             $user->save();
+
+            if ($role !== '') {
+                $user->syncRoles([$role]);
+            } elseif (array_key_exists('role', $payload) || array_key_exists('roles', $payload)) {
+                $user->syncRoles([]);
+            }
+
+            return;
+        }
+
+        if ($entity === 'employees') {
+            if ($action === 'delete') {
+                $employee = Employee::withTrashed()->where('uuid', $uuid)->first();
+                if ($employee && ! $employee->trashed()) {
+                    $employee->delete();
+                }
+
+                return;
+            }
+
+            $email = trim((string) ($payload['email'] ?? ''));
+            $employee = Employee::withTrashed()->where('uuid', $uuid)->first();
+            if (! $employee && $email !== '') {
+                $employee = Employee::withTrashed()->where('email', $email)->first();
+            }
+
+            $isNew = false;
+            if (! $employee) {
+                $employee = new Employee();
+                $employee->uuid = $uuid;
+                $isNew = true;
+            } elseif ($employee->trashed()) {
+                $employee->restore();
+            }
+
+            $previousSalary = $employee->base_salary;
+            $previousSalaryCurrency = $employee->salary_currency_code;
+
+            if (array_key_exists('first_name', $payload)) {
+                $employee->first_name = trim((string) $payload['first_name']);
+            }
+            if (array_key_exists('last_name', $payload)) {
+                $employee->last_name = trim((string) ($payload['last_name'] ?? '')) ?: null;
+            }
+            if (array_key_exists('job_title', $payload)) {
+                $employee->job_title = trim((string) ($payload['job_title'] ?? '')) ?: null;
+            }
+            if (array_key_exists('salary_type', $payload)) {
+                $employee->salary_type = trim((string) ($payload['salary_type'] ?? '')) ?: 'fixed';
+            }
+            if (array_key_exists('base_salary', $payload)) {
+                $employee->base_salary = $payload['base_salary'] !== null
+                    ? max(0, round((float) $payload['base_salary'], 2))
+                    : null;
+            }
+            if (array_key_exists('salary_currency_code', $payload)) {
+                $currency = strtoupper(trim((string) ($payload['salary_currency_code'] ?? 'USD')));
+                $employee->salary_currency_code = in_array($currency, ['USD', 'AFN'], true) ? $currency : 'USD';
+            } elseif (! $employee->salary_currency_code) {
+                $employee->salary_currency_code = 'USD';
+            }
+            if (array_key_exists('address', $payload)) {
+                $employee->address = trim((string) ($payload['address'] ?? '')) ?: null;
+            }
+            if (array_key_exists('email', $payload)) {
+                $employee->email = $email !== '' ? $email : null;
+            }
+            if (array_key_exists('phone', $payload)) {
+                $employee->phone = trim((string) ($payload['phone'] ?? '')) ?: null;
+            }
+            if (array_key_exists('status', $payload)) {
+                $employee->status = trim((string) ($payload['status'] ?? '')) ?: 'active';
+            }
+            if (array_key_exists('hire_date', $payload)) {
+                $employee->hire_date = !empty($payload['hire_date'])
+                    ? CarbonImmutable::parse((string) $payload['hire_date'])->toDateString()
+                    : null;
+            }
+            $employee->save();
+
+            if ($isNew) {
+                $this->salaryHistoryService->recordInitialSalary($employee, $actorId > 0 ? $actorId : null);
+            } else {
+                $this->salaryHistoryService->recordSalaryChange(
+                    $employee,
+                    $previousSalary,
+                    $employee->base_salary,
+                    $previousSalaryCurrency,
+                    $employee->salary_currency_code,
+                    isset($payload['salary_effective_from']) && !empty($payload['salary_effective_from'])
+                        ? CarbonImmutable::parse((string) $payload['salary_effective_from'])->toDateString()
+                        : null,
+                    isset($payload['salary_change_reason']) ? (string) $payload['salary_change_reason'] : null,
+                    isset($payload['salary_history_uuid']) ? (string) $payload['salary_history_uuid'] : null,
+                    $actorId > 0 ? $actorId : null,
+                );
+            }
+
+            return;
+        }
+
+        if ($entity === 'accounts') {
+            if ($action === 'delete') {
+                $account = Account::withTrashed()->where('uuid', $uuid)->first();
+                if ($account && ! $account->trashed()) {
+                    $hasTransactions = $account->transactions()->exists();
+                    $hasSalaryPayments = $account->salaryPayments()->whereNull('deleted_at')->exists();
+
+                    if ($hasTransactions && $hasSalaryPayments) {
+                        abort(409, 'Cannot delete account with transaction and salary payment history. Mark it inactive instead.');
+                    }
+
+                    if ($hasTransactions) {
+                        abort(409, 'Cannot delete account with transaction history. Mark it inactive instead.');
+                    }
+
+                    if ($hasSalaryPayments) {
+                        abort(409, 'Cannot delete account linked to salary payments. Mark it inactive instead.');
+                    }
+
+                    $account->delete();
+                }
+
+                return;
+            }
+
+            $account = Account::withTrashed()->where('uuid', $uuid)->first();
+            $isNew = false;
+            if (! $account) {
+                $account = new Account();
+                $account->uuid = $uuid;
+                $isNew = true;
+            } elseif ($account->trashed()) {
+                $account->restore();
+            }
+
+            $previousOpening = round((float) ($account->opening_balance ?? 0), 2);
+
+            if (array_key_exists('name', $payload)) {
+                $account->name = trim((string) $payload['name']);
+            }
+            if (array_key_exists('account_type', $payload)) {
+                $account->account_type = trim((string) ($payload['account_type'] ?? '')) ?: 'office';
+            }
+            if (array_key_exists('bank_name', $payload)) {
+                $account->bank_name = trim((string) ($payload['bank_name'] ?? '')) ?: null;
+            }
+            if (array_key_exists('account_number', $payload)) {
+                $account->account_number = trim((string) ($payload['account_number'] ?? '')) ?: null;
+            }
+            if (array_key_exists('currency', $payload)) {
+                $account->currency = strtoupper(trim((string) ($payload['currency'] ?? 'USD'))) ?: 'USD';
+            }
+            if (array_key_exists('opening_balance', $payload)) {
+                $account->opening_balance = round((float) ($payload['opening_balance'] ?? 0), 2);
+            }
+            if (array_key_exists('status', $payload)) {
+                $account->status = trim((string) ($payload['status'] ?? '')) ?: 'active';
+            }
+            if (array_key_exists('notes', $payload)) {
+                $account->notes = trim((string) ($payload['notes'] ?? '')) ?: null;
+            }
+
+            if ($isNew) {
+                $account->current_balance = round((float) ($account->opening_balance ?? 0), 2);
+            } else {
+                $delta = round((float) ($account->opening_balance ?? 0) - $previousOpening, 2);
+                $account->current_balance = round((float) ($account->current_balance ?? 0) + $delta, 2);
+            }
+
+            $account->save();
+
+            return;
+        }
+
+        if ($entity === 'exchange_rates') {
+            if ($action === 'delete') {
+                $rate = ExchangeRate::withTrashed()->where('uuid', $uuid)->first();
+                if ($rate && ! $rate->trashed()) {
+                    $this->exchangeRateService->ensureCanDelete($rate);
+                    $rate->delete();
+                }
+
+                return;
+            }
+
+            $rate = ExchangeRate::withTrashed()->where('uuid', $uuid)->first();
+            if (! $rate) {
+                $rate = new ExchangeRate();
+                $rate->uuid = $uuid;
+            } elseif ($rate->trashed()) {
+                $rate->restore();
+            }
+
+            $rate->base_currency = 'USD';
+            $rate->quote_currency = 'AFN';
+            $rate->rate = round((float) ($payload['rate'] ?? $rate->rate ?? 0), 6);
+            $rate->source = trim((string) ($payload['source'] ?? $rate->source ?? 'manual')) ?: 'manual';
+            $rate->effective_date = array_key_exists('effective_date', $payload) && !empty($payload['effective_date'])
+                ? CarbonImmutable::parse((string) $payload['effective_date'])->toDateString()
+                : ($rate->effective_date ?: now()->toDateString());
+            if ($actorId > 0) {
+                $rate->approved_by_user_id = $actorId;
+            }
+            if (array_key_exists('notes', $payload)) {
+                $rate->notes = trim((string) ($payload['notes'] ?? '')) ?: null;
+            }
+            if (array_key_exists('is_active', $payload)) {
+                $rate->is_active = (bool) $payload['is_active'];
+            } elseif (! $rate->exists) {
+                $rate->is_active = true;
+            }
+            $rate->save();
+            $this->exchangeRateService->syncActivation($rate);
 
             return;
         }
@@ -1076,6 +1436,12 @@ class SyncController extends Controller
             if (array_key_exists('gname', $payload)) {
                 $customer->gname = $payload['gname'];
             }
+            if (array_key_exists('job_title', $payload)) {
+                $customer->job_title = $payload['job_title'];
+            }
+            if (array_key_exists('tazkira_number', $payload)) {
+                $customer->tazkira_number = $payload['tazkira_number'];
+            }
             if (array_key_exists('phone', $payload)) {
                 $customer->phone = $payload['phone'];
             }
@@ -1087,6 +1453,63 @@ class SyncController extends Controller
             }
             if (array_key_exists('address', $payload)) {
                 $customer->address = $payload['address'];
+            }
+            if (array_key_exists('current_area', $payload)) {
+                $customer->current_area = $payload['current_area'];
+            }
+            if (array_key_exists('current_district', $payload)) {
+                $customer->current_district = $payload['current_district'];
+            }
+            if (array_key_exists('current_province', $payload)) {
+                $customer->current_province = $payload['current_province'];
+            }
+            if (array_key_exists('original_area', $payload)) {
+                $customer->original_area = $payload['original_area'];
+            }
+            if (array_key_exists('original_district', $payload)) {
+                $customer->original_district = $payload['original_district'];
+            }
+            if (array_key_exists('original_province', $payload)) {
+                $customer->original_province = $payload['original_province'];
+            }
+            if (array_key_exists('representative_name', $payload)) {
+                $customer->representative_name = $payload['representative_name'];
+            }
+            if (array_key_exists('representative_fname', $payload)) {
+                $customer->representative_fname = $payload['representative_fname'];
+            }
+            if (array_key_exists('representative_gname', $payload)) {
+                $customer->representative_gname = $payload['representative_gname'];
+            }
+            if (array_key_exists('representative_job_title', $payload)) {
+                $customer->representative_job_title = $payload['representative_job_title'];
+            }
+            if (array_key_exists('representative_relationship', $payload)) {
+                $customer->representative_relationship = $payload['representative_relationship'];
+            }
+            if (array_key_exists('representative_phone', $payload)) {
+                $customer->representative_phone = $payload['representative_phone'];
+            }
+            if (array_key_exists('representative_tazkira_number', $payload)) {
+                $customer->representative_tazkira_number = $payload['representative_tazkira_number'];
+            }
+            if (array_key_exists('representative_current_area', $payload)) {
+                $customer->representative_current_area = $payload['representative_current_area'];
+            }
+            if (array_key_exists('representative_current_district', $payload)) {
+                $customer->representative_current_district = $payload['representative_current_district'];
+            }
+            if (array_key_exists('representative_current_province', $payload)) {
+                $customer->representative_current_province = $payload['representative_current_province'];
+            }
+            if (array_key_exists('representative_original_area', $payload)) {
+                $customer->representative_original_area = $payload['representative_original_area'];
+            }
+            if (array_key_exists('representative_original_district', $payload)) {
+                $customer->representative_original_district = $payload['representative_original_district'];
+            }
+            if (array_key_exists('representative_original_province', $payload)) {
+                $customer->representative_original_province = $payload['representative_original_province'];
             }
             if (array_key_exists('status', $payload)) {
                 $customer->status = $payload['status'];
@@ -1165,14 +1588,27 @@ class SyncController extends Controller
 
             $advance->employee_id = (int) ($payload['employee_id'] ?? $advance->employee_id ?? 0);
             $advance->amount = max(0.01, round((float) ($payload['amount'] ?? $advance->amount ?? 0), 2));
+            $requestedAdvanceCurrency = strtoupper(trim((string) ($payload['currency_code'] ?? '')));
+            $employeeAdvanceCurrency = Employee::query()
+                ->where('id', $advance->employee_id)
+                ->value('salary_currency_code');
+            $advance->currency_code = in_array($requestedAdvanceCurrency, ['USD', 'AFN'], true)
+                ? $requestedAdvanceCurrency
+                : (in_array(strtoupper(trim((string) $advance->currency_code)), ['USD', 'AFN'], true)
+                    ? strtoupper(trim((string) $advance->currency_code))
+                    : (in_array(strtoupper(trim((string) $employeeAdvanceCurrency)), ['USD', 'AFN'], true)
+                        ? strtoupper(trim((string) $employeeAdvanceCurrency))
+                        : 'USD'));
             $advance->user_id = array_key_exists('user_id', $payload)
                 ? ($payload['user_id'] !== null ? (int) $payload['user_id'] : null)
                 : ($advance->user_id ?: ($actorId > 0 ? $actorId : null));
-            $advance->reason = array_key_exists('reason', $payload)
-                ? (trim((string) ($payload['reason'] ?? '')) !== '' ? trim((string) $payload['reason']) : null)
-                : $advance->reason;
-            $advanceStatus = strtolower(trim((string) ($payload['status'] ?? $advance->status ?? 'pending')));
-            $advance->status = in_array($advanceStatus, ['approved', 'deducted', 'rejected'], true) ? $advanceStatus : 'pending';
+                $advance->reason = array_key_exists('reason', $payload)
+                    ? (trim((string) ($payload['reason'] ?? '')) !== '' ? trim((string) $payload['reason']) : null)
+                    : $advance->reason;
+            $this->salaryAdvanceBalanceService->syncAdvanceSnapshot(
+                $advance,
+                (string) ($payload['status'] ?? $advance->status ?? 'pending')
+            );
             $advance->save();
 
             return;
@@ -1180,42 +1616,82 @@ class SyncController extends Controller
 
         if ($entity === 'salary_payments') {
             if ($action === 'delete') {
-                $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->first();
-                if ($payment && ! $payment->trashed()) {
-                    $payment->delete();
-                }
+                DB::transaction(function () use ($uuid, $actorId): void {
+                    $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->lockForUpdate()->first();
+                    if ($payment && ! $payment->trashed()) {
+                        $this->salaryAdvanceBalanceService->reverseSalaryPaymentDeductions($payment);
+                        $this->accountLedgerService->reverseLinkedSalaryPaymentPosting(
+                            $payment,
+                            $actorId > 0 ? $actorId : null
+                        );
+                        $payment->delete();
+                    }
+                });
 
                 return;
             }
 
-            $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->first();
-            if (! $payment) {
-                $payment = new SalaryPayment();
-                $payment->uuid = $uuid;
-            } elseif ($payment->trashed()) {
-                $payment->restore();
-            }
+            DB::transaction(function () use ($uuid, $payload, $actorId): void {
+                $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->lockForUpdate()->first();
+                if (! $payment) {
+                    $payment = new SalaryPayment();
+                    $payment->uuid = $uuid;
+                } elseif ($payment->trashed()) {
+                    $payment->restore();
+                }
 
-            $grossSalary = max(0, round((float) ($payload['gross_salary'] ?? $payment->gross_salary ?? 0), 2));
-            $advanceDeducted = max(0, round((float) ($payload['advance_deducted'] ?? $payment->advance_deducted ?? 0), 2));
-            if ($advanceDeducted > $grossSalary) {
-                $advanceDeducted = $grossSalary;
-            }
+                $grossSalary = max(0, round((float) ($payload['gross_salary'] ?? $payment->gross_salary ?? 0), 2));
+                $advanceDeducted = max(0, round((float) ($payload['advance_deducted'] ?? $payment->advance_deducted ?? 0), 2));
+                if ($advanceDeducted > $grossSalary) {
+                    $advanceDeducted = $grossSalary;
+                }
+                $taxPercentage = min(100, max(0, round((float) ($payload['tax_percentage'] ?? $payment->tax_percentage ?? 0), 2)));
+                $taxDeducted = array_key_exists('tax_percentage', $payload)
+                    ? min($grossSalary, round($grossSalary * ($taxPercentage / 100), 2))
+                    : min($grossSalary, max(0, round((float) ($payload['tax_deducted'] ?? $payment->tax_deducted ?? 0), 2)));
+                $otherDeductions = min($grossSalary, max(0, round((float) ($payload['other_deductions'] ?? $payment->other_deductions ?? 0), 2)));
 
-            $payment->employee_id = (int) ($payload['employee_id'] ?? $payment->employee_id ?? 0);
-            $payment->period = trim((string) ($payload['period'] ?? $payment->period ?? ''));
-            $payment->gross_salary = $grossSalary;
-            $payment->advance_deducted = $advanceDeducted;
-            $payment->net_salary = max(0, round($grossSalary - $advanceDeducted, 2));
-            $paymentStatus = strtolower(trim((string) ($payload['status'] ?? $payment->status ?? 'draft')));
-            $payment->status = in_array($paymentStatus, ['paid', 'cancelled'], true) ? $paymentStatus : 'draft';
-            $payment->user_id = array_key_exists('user_id', $payload)
-                ? ($payload['user_id'] !== null ? (int) $payload['user_id'] : null)
-                : ($payment->user_id ?: ($actorId > 0 ? $actorId : null));
-            $payment->paid_at = array_key_exists('paid_at', $payload) && !empty($payload['paid_at'])
-                ? CarbonImmutable::parse((string) $payload['paid_at'])->toDateTimeString()
-                : (array_key_exists('paid_at', $payload) ? null : $payment->paid_at);
-            $payment->save();
+                $payment->employee_id = (int) ($payload['employee_id'] ?? $payment->employee_id ?? 0);
+                $employeeCurrency = Employee::query()
+                    ->where('id', $payment->employee_id)
+                    ->value('salary_currency_code');
+                $salaryCurrency = $this->exchangeRateService->normalizeCurrency(
+                    (string) ($payload['salary_currency_code'] ?? $employeeCurrency ?? $payment->salary_currency_code ?? 'USD')
+                );
+                $salaryRateSnapshot = $this->exchangeRateService->rateSnapshotForCurrency($salaryCurrency);
+                $payment->period = trim((string) ($payload['period'] ?? $payment->period ?? ''));
+                $payment->gross_salary = $grossSalary;
+                $payment->gross_salary_usd = $this->exchangeRateService->convertCurrencyAmountToUsd($grossSalary, $salaryCurrency, $salaryRateSnapshot);
+                $payment->salary_currency_code = $salaryCurrency;
+                $payment->salary_exchange_rate_snapshot = $salaryRateSnapshot;
+                $payment->advance_deducted = $advanceDeducted;
+                $payment->advance_deducted_usd = $this->exchangeRateService->convertCurrencyAmountToUsd($advanceDeducted, $salaryCurrency, $salaryRateSnapshot);
+                $payment->tax_percentage = $taxPercentage;
+                $payment->tax_deducted = $taxDeducted;
+                $payment->tax_deducted_usd = $this->exchangeRateService->convertCurrencyAmountToUsd($taxDeducted, $salaryCurrency, $salaryRateSnapshot);
+                $payment->other_deductions = $otherDeductions;
+                $payment->other_deductions_usd = $this->exchangeRateService->convertCurrencyAmountToUsd($otherDeductions, $salaryCurrency, $salaryRateSnapshot);
+                $payment->net_salary = max(0, round($grossSalary - $advanceDeducted - $taxDeducted - $otherDeductions, 2));
+                $payment->net_salary_usd = $this->exchangeRateService->convertCurrencyAmountToUsd($payment->net_salary, $salaryCurrency, $salaryRateSnapshot);
+                $paymentStatus = strtolower(trim((string) ($payload['status'] ?? $payment->status ?? 'draft')));
+                $payment->status = in_array($paymentStatus, ['paid', 'cancelled'], true) ? $paymentStatus : 'draft';
+                $payment->account_id = array_key_exists('account_id', $payload)
+                    ? ($payload['account_id'] !== null ? (int) $payload['account_id'] : null)
+                    : $payment->account_id;
+                $payment->user_id = array_key_exists('user_id', $payload)
+                    ? ($payload['user_id'] !== null ? (int) $payload['user_id'] : null)
+                    : ($payment->user_id ?: ($actorId > 0 ? $actorId : null));
+                $payment->paid_at = array_key_exists('paid_at', $payload) && !empty($payload['paid_at'])
+                    ? CarbonImmutable::parse((string) $payload['paid_at'])->toDateTimeString()
+                    : (array_key_exists('paid_at', $payload) ? null : ($payment->status === 'paid' ? ($payment->paid_at ?: now()) : $payment->paid_at));
+                $payment->save();
+
+                $this->salaryAdvanceBalanceService->syncSalaryPaymentDeductions($payment);
+                $this->accountLedgerService->syncSalaryPaymentPosting(
+                    $payment,
+                    $actorId > 0 ? $actorId : null
+                );
+            });
 
             return;
         }
@@ -1285,6 +1761,18 @@ class SyncController extends Controller
             if (array_key_exists('corridor', $payload)) {
                 $apartment->corridor = $payload['corridor'] !== null ? (string) $payload['corridor'] : null;
             }
+            if (array_key_exists('north_boundary', $payload)) {
+                $apartment->north_boundary = $payload['north_boundary'] !== null ? (string) $payload['north_boundary'] : null;
+            }
+            if (array_key_exists('south_boundary', $payload)) {
+                $apartment->south_boundary = $payload['south_boundary'] !== null ? (string) $payload['south_boundary'] : null;
+            }
+            if (array_key_exists('east_boundary', $payload)) {
+                $apartment->east_boundary = $payload['east_boundary'] !== null ? (string) $payload['east_boundary'] : null;
+            }
+            if (array_key_exists('west_boundary', $payload)) {
+                $apartment->west_boundary = $payload['west_boundary'] !== null ? (string) $payload['west_boundary'] : null;
+            }
             if (array_key_exists('status', $payload)) {
                 $apartment->status = (string) $payload['status'];
             }
@@ -1296,6 +1784,17 @@ class SyncController extends Controller
             }
 
             $apartment->save();
+
+            ApartmentQrAccessToken::query()->firstOrCreate(
+                ['apartment_id' => $apartment->id],
+                [
+                    'uuid' => (string) Str::uuid(),
+                    'token' => Str::random(64),
+                    'status' => 'active',
+                    'created_by_user_id' => $actorId > 0 ? $actorId : null,
+                ]
+            );
+
             return;
         }
 
@@ -1303,14 +1802,31 @@ class SyncController extends Controller
             if ($action === 'delete') {
                 $sale = ApartmentSale::withTrashed()->where('uuid', $uuid)->first();
                 if ($sale) {
-                    if (! $sale->trashed()) {
-                        $state = $this->resolveSaleMutationState($sale);
-                        if (!($state['can_delete'] ?? false)) {
-                            abort(409, 'Sale cannot be deleted after approval, payment, completion, or cancellation.');
+                    DB::transaction(function () use ($sale): void {
+                        if (! $sale->trashed()) {
+                            $state = $this->resolveSaleMutationState($sale);
+                            if (!($state['can_delete'] ?? false)) {
+                                abort(409, 'Sale cannot be deleted after approval, payment, completion, or cancellation.');
+                            }
                         }
-                        $sale->delete();
-                    }
-                    ApartmentSaleFinancial::query()->where('apartment_sale_id', $sale->id)->delete();
+
+                        $apartmentId = (int) $sale->apartment_id;
+                        $installmentIds = Installment::query()
+                            ->where('apartment_sale_id', $sale->id)
+                            ->pluck('id');
+
+                        if ($installmentIds->isNotEmpty()) {
+                            InstallmentPayment::query()->whereIn('installment_id', $installmentIds)->delete();
+                        }
+                        Installment::query()->where('apartment_sale_id', $sale->id)->delete();
+
+                        if (! $sale->trashed()) {
+                            $sale->delete();
+                        }
+
+                        ApartmentSaleFinancial::query()->where('apartment_sale_id', $sale->id)->delete();
+                        $this->financials->refreshApartmentStatusForApartment($apartmentId);
+                    });
                 }
 
                 return;
@@ -1327,6 +1843,10 @@ class SyncController extends Controller
             }
 
             $normalized = $this->normalizeApartmentSalePayload($payload);
+            if ($action === 'create') {
+                $normalized['status'] = 'pending';
+                $normalized['approved_at'] = null;
+            }
             $state = $this->resolveSaleMutationState($sale);
 
             if ($action === 'update' && ($state['edit_scope'] ?? 'none') === 'none') {
@@ -1348,7 +1868,9 @@ class SyncController extends Controller
                 }
                 $sale->save();
                 $financial = $this->financials->recalculateForSale($sale->fresh());
-                $this->workflow->ensurePaymentLetter($sale->fresh(), $financial);
+                if (! $this->isPendingApartmentSaleStatus($sale->status)) {
+                    $this->workflow->ensurePaymentLetter($sale->fresh(), $financial);
+                }
                 return;
             }
 
@@ -1388,11 +1910,13 @@ class SyncController extends Controller
                 $this->syncSaleInstallments($sale, $normalized);
                 $freshSale = $sale->fresh();
                 $financial = $this->financials->recalculateForSale($freshSale);
-                $this->workflow->ensurePaymentLetter($freshSale, $financial);
+                if (! $this->isPendingApartmentSaleStatus($freshSale->status)) {
+                    $this->workflow->ensurePaymentLetter($freshSale, $financial);
+                }
             });
 
             if ($action === 'create' && $createdNewSale) {
-                $this->saleCreatedAlerts->notifyFinance(
+                $this->saleApprovalAlerts->notifyAdmins(
                     $sale->fresh(['customer:id,name', 'apartment:id,apartment_code,unit_number'])
                 );
             }
@@ -1429,6 +1953,10 @@ class SyncController extends Controller
                 abort(422, 'Apartment sale not found for financial record.');
             }
 
+            if ($this->isPendingApartmentSaleStatus($sale->status)) {
+                abort(409, 'Admin approval is required before financial workflow can continue.');
+            }
+
             $overrides = [];
             foreach ([
                 'accounts_status',
@@ -1458,9 +1986,136 @@ class SyncController extends Controller
                         $freshSale = $sale->fresh();
                         $this->syncSaleStatusFromInstallments($freshSale);
                         $financial = $this->financials->recalculateForSale($freshSale);
-                        $this->workflow->ensurePaymentLetter($freshSale, $financial);
+                        if (! $this->isPendingApartmentSaleStatus($freshSale->status)) {
+                            $this->workflow->ensurePaymentLetter($freshSale, $financial);
+                        }
                     }
                 }
+
+                return;
+            }
+
+            if (array_key_exists('payment_amount', $payload)) {
+                DB::transaction(function () use ($uuid, $payload, $actorId): void {
+                    $installment = Installment::query()
+                        ->with('sale')
+                        ->where('uuid', $uuid)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if (! $installment && isset($payload['apartment_sale_id'], $payload['installment_no'])) {
+                        $installment = Installment::query()
+                            ->with('sale')
+                            ->where('apartment_sale_id', (int) $payload['apartment_sale_id'])
+                            ->where('installment_no', max(1, (int) $payload['installment_no']))
+                            ->lockForUpdate()
+                            ->first();
+                    }
+
+                    if (! $installment) {
+                        abort(422, 'Installment not found for offline payment sync.');
+                    }
+
+                    $installment->loadMissing('sale.installments');
+                    $sale = $installment->sale;
+                    $saleStatus = strtolower(trim((string) ($sale?->status ?? '')));
+                    if ($saleStatus === 'pending') {
+                        abort(409, 'Admin approval is required before recording installment payments.');
+                    }
+                    if (in_array($saleStatus, ['cancelled', 'terminated', 'defaulted'], true)) {
+                        abort(409, 'Cannot apply payment on cancelled/terminated/defaulted sale.');
+                    }
+
+                    $scaledAmounts = $sale
+                        ? ApartmentSaleCustomerAmounts::installmentAmounts($sale, $sale->installments)
+                        : [];
+                    $amountKey = $installment->id ? 'id:' . $installment->id : (!empty($installment->uuid) ? 'uuid:' . $installment->uuid : null);
+                    $total = $amountKey && array_key_exists($amountKey, $scaledAmounts)
+                        ? round((float) $scaledAmounts[$amountKey], 2)
+                        : round((float) ($installment->amount ?? 0), 2);
+                    $currentPaid = round((float) ($installment->paid_amount ?? 0), 2);
+                    $remaining = max(0, round($total - $currentPaid, 2));
+                    if ($remaining <= 0) {
+                        return;
+                    }
+
+                    $requested = max(0, round((float) ($payload['payment_amount'] ?? 0), 2));
+                    if ($requested <= 0) {
+                        abort(422, 'Payment amount must be greater than 0.');
+                    }
+
+                    $applied = min($requested, $remaining);
+                    $newPaid = round($currentPaid + $applied, 2);
+                    $paidDate = ! empty($payload['paid_date'])
+                        ? CarbonImmutable::parse((string) $payload['paid_date'])->toDateString()
+                        : now()->toDateString();
+                    $paymentMethod = trim((string) ($payload['payment_method'] ?? 'cash')) ?: 'cash';
+                    $accountId = (int) ($payload['account_id'] ?? 0);
+                    if ($accountId <= 0) {
+                        abort(422, 'Payment account is required.');
+                    }
+
+                    $installment->paid_amount = $newPaid;
+                    $installment->paid_date = $paidDate;
+                    $installment->status = $this->deriveInstallmentStatus(
+                        $newPaid,
+                        $total,
+                        $installment->due_date ? CarbonImmutable::parse((string) $installment->due_date)->toDateString() : null
+                    );
+                    $installment->save();
+
+                    $payment = InstallmentPayment::query()->create([
+                        'uuid' => (string) Str::uuid(),
+                        'installment_id' => $installment->id,
+                        'amount' => $applied,
+                        'payment_date' => CarbonImmutable::parse($paidDate)->toDateTimeString(),
+                        'payment_method' => $paymentMethod,
+                        'reference_no' => isset($payload['reference_no']) ? trim((string) $payload['reference_no']) ?: null : null,
+                        'notes' => isset($payload['notes']) ? trim((string) $payload['notes']) ?: null : null,
+                        'received_by' => $actorId > 0 ? $actorId : null,
+                        'account_id' => $accountId,
+                    ]);
+
+                    $posting = $this->accountLedgerService->postModuleTransaction(
+                        accountId: $accountId,
+                        sourceAmount: $applied,
+                        sourceCurrency: 'USD',
+                        direction: 'in',
+                        module: 'sales',
+                        referenceType: 'installment_payment',
+                        referenceUuid: $payment->uuid,
+                        description: sprintf(
+                            'Installment payment received for sale %s installment #%d',
+                            trim((string) ($sale?->sale_id ?: $sale?->uuid ?: $installment->apartment_sale_id)),
+                            (int) $installment->installment_no
+                        ),
+                        paymentMethod: $paymentMethod,
+                        transactionDate: $payment->payment_date,
+                        actorId: $actorId > 0 ? $actorId : null,
+                        metadata: [
+                            'installment_id' => $installment->id,
+                            'installment_uuid' => $installment->uuid,
+                            'apartment_sale_id' => $installment->apartment_sale_id,
+                            'apartment_sale_uuid' => $sale?->uuid,
+                            'sale_id' => $sale?->sale_id,
+                        ]
+                    );
+
+                    $payment->account_transaction_id = $posting['transaction']->id;
+                    $payment->payment_currency_code = $posting['account_currency'];
+                    $payment->exchange_rate_snapshot = $posting['exchange_rate_snapshot'];
+                    $payment->account_amount = $posting['account_amount'];
+                    $payment->saveQuietly();
+
+                    if ($sale) {
+                        $this->syncSaleStatusFromInstallments($sale);
+                        $freshSale = $sale->fresh();
+                        $financial = $this->financials->recalculateForSale($freshSale);
+                        if (! $this->isPendingApartmentSaleStatus($freshSale->status)) {
+                            $this->workflow->ensurePaymentLetter($freshSale, $financial);
+                        }
+                    }
+                });
 
                 return;
             }
@@ -1522,7 +2177,9 @@ class SyncController extends Controller
                 $this->syncSaleStatusFromInstallments($installment->sale);
                 $freshSale = $installment->sale->fresh();
                 $financial = $this->financials->recalculateForSale($freshSale);
-                $this->workflow->ensurePaymentLetter($freshSale, $financial);
+                if (! $this->isPendingApartmentSaleStatus($freshSale->status)) {
+                    $this->workflow->ensurePaymentLetter($freshSale, $financial);
+                }
             }
         }
     }
@@ -1646,23 +2303,46 @@ class SyncController extends Controller
 
     private function syncSaleInstallments(ApartmentSale $sale, array $payload): void
     {
+        $rows = [];
+        $now = now();
+        $customerReceivable = ApartmentSaleCustomerAmounts::companyShare($sale);
+
         if ($sale->payment_type !== 'installment') {
+            $amount = $customerReceivable;
+            if ($amount > 0) {
+                $dueDate = CarbonImmutable::parse((string) $sale->sale_date)->toDateString();
+                $rows[] = [
+                    'uuid' => (string) Str::uuid(),
+                    'apartment_sale_id' => $sale->id,
+                    'installment_no' => 1,
+                    'amount' => $amount,
+                    'due_date' => $dueDate,
+                    'paid_amount' => 0,
+                    'paid_date' => null,
+                    'status' => $this->deriveInstallmentStatus(0, $amount, $dueDate),
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
+            }
+
             Installment::query()->where('apartment_sale_id', $sale->id)->delete();
+            if (!empty($rows)) {
+                Installment::query()->insert($rows);
+            }
             return;
         }
 
-        $rows = [];
-        $now = now();
         $frequency = (string) ($payload['frequency_type'] ?? 'monthly');
 
         if ($frequency === 'custom_dates') {
+            $draftRows = [];
             foreach ((array) ($payload['custom_dates'] ?? []) as $idx => $item) {
                 $amount = max(0, round((float) ($item['amount'] ?? 0), 2));
                 if ($amount <= 0) {
                     continue;
                 }
 
-                $rows[] = [
+                $draftRows[] = [
                     'uuid' => (string) Str::uuid(),
                     'apartment_sale_id' => $sale->id,
                     'installment_no' => max(1, (int) ($item['installment_no'] ?? ($idx + 1))),
@@ -1670,17 +2350,38 @@ class SyncController extends Controller
                     'due_date' => CarbonImmutable::parse((string) ($item['due_date'] ?? $sale->sale_date))->toDateString(),
                     'paid_amount' => 0,
                     'paid_date' => null,
-                    'status' => 'pending',
+                    'status' => $this->deriveInstallmentStatus(
+                        0,
+                        $amount,
+                        CarbonImmutable::parse((string) ($item['due_date'] ?? $sale->sale_date))->toDateString()
+                    ),
                     'created_at' => $now,
                     'updated_at' => $now,
                 ];
+            }
+
+            usort($draftRows, fn (array $a, array $b): int => $a['installment_no'] <=> $b['installment_no']);
+            $amountCents = ApartmentSaleCustomerAmounts::distributeCents(
+                (int) round($customerReceivable * 100),
+                array_map(static fn (array $row): int => (int) round(((float) $row['amount']) * 100), $draftRows),
+            );
+
+            foreach ($draftRows as $index => $row) {
+                $adjustedAmount = round(($amountCents[$index] ?? 0) / 100, 2);
+                if ($adjustedAmount <= 0) {
+                    continue;
+                }
+
+                $row['amount'] = $adjustedAmount;
+                $row['status'] = $this->deriveInstallmentStatus(0, $adjustedAmount, $row['due_date']);
+                $rows[] = $row;
             }
         } else {
             $count = max(1, (int) ($payload['installment_count'] ?? 1));
             $interval = max(1, (int) ($payload['interval_count'] ?? 1));
             $startDate = CarbonImmutable::parse((string) ($payload['first_due_date'] ?? $sale->sale_date))->startOfDay();
 
-            $totalCents = (int) round(max(0, (float) $sale->net_price) * 100);
+            $totalCents = (int) round($customerReceivable * 100);
             $base = intdiv($totalCents, $count);
             $remainder = $totalCents % $count;
 
@@ -1703,7 +2404,7 @@ class SyncController extends Controller
                     'due_date' => $dueDate->toDateString(),
                     'paid_amount' => 0,
                     'paid_date' => null,
-                    'status' => 'pending',
+                    'status' => $this->deriveInstallmentStatus(0, round($amountCents / 100, 2), $dueDate->toDateString()),
                     'created_at' => $now,
                     'updated_at' => $now,
                 ];
@@ -1722,13 +2423,8 @@ class SyncController extends Controller
             return;
         }
 
-        $hasUnpaid = $sale->installments()
-            ->where(function ($builder): void {
-                $builder
-                    ->whereRaw('paid_amount < amount')
-                    ->orWhere('status', '!=', 'paid');
-            })
-            ->exists();
+        $sale->loadMissing('installments');
+        $hasUnpaid = ApartmentSaleCustomerAmounts::hasUnpaidInstallments($sale, $sale->installments);
 
         if (! $hasUnpaid) {
             if ($sale->status !== 'completed') {
@@ -1847,15 +2543,11 @@ class SyncController extends Controller
             ->where('id', '!=', $currentId)
             ->exists();
     }
+
+    private function isPendingApartmentSaleStatus(?string $status): bool
+    {
+        return strtolower(trim((string) ($status ?? ''))) === 'pending';
+    }
 }
-
-
-
-
-
-
-
-
-
 
 

@@ -8,19 +8,11 @@ use Illuminate\Validation\Rule;
 
 class UserRequest extends FormRequest
 {
-    /**
-     * Determine if the user is authorized to make this request.
-     */
     public function authorize(): bool
     {
-       return true;
+        return true;
     }
 
-    /**
-     * Get the validation rules that apply to the request.
-     *
-     * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
-     */
     public function rules(): array
     {
         $uuid = (string) ($this->route('uuid') ?: $this->input('uuid') ?: '');
@@ -43,6 +35,15 @@ class UserRequest extends FormRequest
             ],
             'password' => ['nullable', 'string', 'max:255'],
             'role' => ['nullable', 'string', 'max:255'],
+            'customer_id' => [
+                'nullable',
+                'integer',
+                'min:1',
+                Rule::exists('customers', 'id'),
+                Rule::unique('users', 'customer_id')
+                    ->whereNull('deleted_at')
+                    ->ignore($existing?->id),
+            ],
         ];
     }
 }

@@ -4,15 +4,25 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSalaryPaymentRequest;
+use App\Models\Employee;
 use App\Models\SalaryPayment;
+use App\Services\AccountLedgerService;
+use App\Services\SalaryAdvanceBalanceService;
 use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class SalaryPaymentController extends Controller
 {
     private const OFFLINE_WINDOW_MONTHS = 6;
+
+    public function __construct(
+        private readonly AccountLedgerService $accountLedgerService,
+        private readonly SalaryAdvanceBalanceService $salaryAdvanceBalanceService,
+    ) {
+    }
 
     public function index(Request $request): JsonResponse
     {
@@ -32,6 +42,8 @@ class SalaryPaymentController extends Controller
             ->with([
                 'employee:id,uuid,first_name,last_name',
                 'user:id,name',
+                'account:id,uuid,name,currency',
+                'accountTransaction:id,uuid',
             ])
             ->orderByDesc('updated_at');
 
@@ -47,6 +59,11 @@ class SalaryPaymentController extends Controller
                     ->orWhere('status', 'like', "%{$search}%")
                     ->orWhere('gross_salary', 'like', "%{$search}%")
                     ->orWhere('net_salary', 'like', "%{$search}%")
+                    ->orWhere('tax_deducted', 'like', "%{$search}%")
+                    ->orWhere('other_deductions', 'like', "%{$search}%")
+                    ->orWhereHas('account', function ($accountQuery) use ($search): void {
+                        $accountQuery->where('name', 'like', "%{$search}%");
+                    })
                     ->orWhereHas('employee', function ($employeeQuery) use ($search): void {
                         $employeeQuery
                             ->where('first_name', 'like', "%{$search}%")
@@ -101,49 +118,68 @@ class SalaryPaymentController extends Controller
     {
         $data = $request->validated();
         $incomingUuid = (string) ($data['uuid'] ?? '');
-
-        $payment = $incomingUuid !== ''
-            ? SalaryPayment::withTrashed()->where('uuid', $incomingUuid)->first()
-            : null;
-
         $created = false;
-        if (! $payment) {
-            $payment = new SalaryPayment();
-            $payment->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
-            $created = true;
-        } elseif ($payment->trashed()) {
-            $payment->restore();
-        }
+        $payment = DB::transaction(function () use ($incomingUuid, $data, $request, &$created) {
+            $payment = $incomingUuid !== ''
+                ? SalaryPayment::withTrashed()->where('uuid', $incomingUuid)->lockForUpdate()->first()
+                : null;
 
-        $this->fillPayment($payment, $data, (int) ($request->user()?->id ?? 0));
-        $payment->save();
+            if (! $payment) {
+                $payment = new SalaryPayment();
+                $payment->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
+                $created = true;
+            } elseif ($payment->trashed()) {
+                $payment->restore();
+            }
+
+            $this->fillPayment($payment, $data, (int) ($request->user()?->id ?? 0));
+            $payment->save();
+            $this->salaryAdvanceBalanceService->syncSalaryPaymentDeductions($payment);
+            $this->accountLedgerService->syncSalaryPaymentPosting($payment, (int) ($request->user()?->id ?? 0));
+
+            return $payment->fresh(['employee', 'user', 'account', 'accountTransaction']);
+        });
 
         return response()->json([
-            'data' => $this->payload($payment->fresh(['employee', 'user'])),
+            'data' => $this->payload($payment),
         ], $created ? 201 : 200);
     }
 
     public function update(StoreSalaryPaymentRequest $request, string $uuid): JsonResponse
     {
         $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->firstOrFail();
-        if ($payment->trashed()) {
-            $payment->restore();
-        }
+        $payment = DB::transaction(function () use ($payment, $request) {
+            $payment = SalaryPayment::withTrashed()->where('id', $payment->id)->lockForUpdate()->firstOrFail();
+            if ($payment->trashed()) {
+                $payment->restore();
+            }
 
-        $this->fillPayment($payment, $request->validated(), (int) ($request->user()?->id ?? 0));
-        $payment->save();
+            $this->fillPayment($payment, $request->validated(), (int) ($request->user()?->id ?? 0));
+            $payment->save();
+            $this->salaryAdvanceBalanceService->syncSalaryPaymentDeductions($payment);
+            $this->accountLedgerService->syncSalaryPaymentPosting($payment, (int) ($request->user()?->id ?? 0));
+
+            return $payment->fresh(['employee', 'user', 'account', 'accountTransaction']);
+        });
 
         return response()->json([
-            'data' => $this->payload($payment->fresh(['employee', 'user'])),
+            'data' => $this->payload($payment),
         ]);
     }
 
-    public function destroy(string $uuid): JsonResponse
+    public function destroy(Request $request, string $uuid): JsonResponse
     {
-        $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->first();
-        if ($payment && ! $payment->trashed()) {
-            $payment->delete();
-        }
+        DB::transaction(function () use ($uuid, $request): void {
+            $payment = SalaryPayment::withTrashed()->where('uuid', $uuid)->lockForUpdate()->first();
+            if ($payment && ! $payment->trashed()) {
+                $this->salaryAdvanceBalanceService->reverseSalaryPaymentDeductions($payment);
+                $this->accountLedgerService->reverseLinkedSalaryPaymentPosting(
+                    $payment,
+                    (int) ($request->user()?->id ?? 0)
+                );
+                $payment->delete();
+            }
+        });
 
         return response()->json([
             'message' => 'Deleted',
@@ -182,16 +218,47 @@ class SalaryPaymentController extends Controller
         if ($advanceDeducted > $gross) {
             $advanceDeducted = $gross;
         }
+        $taxPercentage = min(100, max(0, round((float) ($data['tax_percentage'] ?? $payment->tax_percentage ?? 0), 2)));
+        $taxDeducted = array_key_exists('tax_percentage', $data)
+            ? min($gross, round($gross * ($taxPercentage / 100), 2))
+            : min($gross, max(0, round((float) ($data['tax_deducted'] ?? $payment->tax_deducted ?? 0), 2)));
+        $otherDeductions = min($gross, max(0, round((float) ($data['other_deductions'] ?? 0), 2)));
+        $net = max(0, round($gross - $advanceDeducted - $taxDeducted - $otherDeductions, 2));
+        $status = $this->normalizeStatus((string) ($data['status'] ?? 'draft'));
+        $employeeId = (int) $data['employee_id'];
+        $employeeCurrency = Employee::query()->where('id', $employeeId)->value('salary_currency_code');
+        $salaryCurrency = $this->normalizeCurrency((string) ($data['salary_currency_code'] ?? $employeeCurrency ?? $payment->salary_currency_code ?? 'USD'));
+        $salaryRateSnapshot = $this->accountLedgerService->getRateSnapshotForSalaryCurrency($salaryCurrency);
+        $grossUsd = $this->accountLedgerService->convertSalaryAmountToUsd($gross, $salaryCurrency, $salaryRateSnapshot);
+        $advanceDeductedUsd = $this->accountLedgerService->convertSalaryAmountToUsd($advanceDeducted, $salaryCurrency, $salaryRateSnapshot);
+        $taxDeductedUsd = $this->accountLedgerService->convertSalaryAmountToUsd($taxDeducted, $salaryCurrency, $salaryRateSnapshot);
+        $otherDeductionsUsd = $this->accountLedgerService->convertSalaryAmountToUsd($otherDeductions, $salaryCurrency, $salaryRateSnapshot);
+        $netUsd = $this->accountLedgerService->convertSalaryAmountToUsd($net, $salaryCurrency, $salaryRateSnapshot);
 
         $payment->fill([
-            'employee_id' => (int) $data['employee_id'],
+            'employee_id' => $employeeId,
             'period' => trim((string) $data['period']),
             'gross_salary' => $gross,
+            'gross_salary_usd' => $grossUsd,
+            'salary_currency_code' => $salaryCurrency,
+            'salary_exchange_rate_snapshot' => $salaryRateSnapshot,
             'advance_deducted' => $advanceDeducted,
-            'net_salary' => max(0, round($gross - $advanceDeducted, 2)),
-            'status' => $this->normalizeStatus((string) ($data['status'] ?? 'draft')),
+            'advance_deducted_usd' => $advanceDeductedUsd,
+            'tax_percentage' => $taxPercentage,
+            'tax_deducted' => $taxDeducted,
+            'tax_deducted_usd' => $taxDeductedUsd,
+            'other_deductions' => $otherDeductions,
+            'other_deductions_usd' => $otherDeductionsUsd,
+            'net_salary' => $net,
+            'net_salary_usd' => $netUsd,
+            'status' => $status,
+            'account_id' => array_key_exists('account_id', $data)
+                ? ($data['account_id'] !== null ? (int) $data['account_id'] : null)
+                : $payment->account_id,
             'user_id' => isset($data['user_id']) ? (int) $data['user_id'] : ($payment->user_id ?: ($actorId > 0 ? $actorId : null)),
-            'paid_at' => !empty($data['paid_at']) ? $data['paid_at'] : null,
+            'paid_at' => !empty($data['paid_at'])
+                ? $data['paid_at']
+                : ($status === 'paid' ? ($payment->paid_at ?: now()) : null),
         ]);
     }
 
@@ -210,9 +277,27 @@ class SalaryPaymentController extends Controller
             'employee_name' => $employeeName !== '' ? $employeeName : null,
             'period' => $payment->period,
             'gross_salary' => (float) $payment->gross_salary,
+            'gross_salary_usd' => $payment->gross_salary_usd !== null ? (float) $payment->gross_salary_usd : null,
+            'salary_currency_code' => $payment->salary_currency_code,
+            'salary_exchange_rate_snapshot' => $payment->salary_exchange_rate_snapshot !== null ? (float) $payment->salary_exchange_rate_snapshot : null,
             'advance_deducted' => (float) $payment->advance_deducted,
+            'advance_deducted_usd' => $payment->advance_deducted_usd !== null ? (float) $payment->advance_deducted_usd : null,
+            'tax_percentage' => (float) $payment->tax_percentage,
+            'tax_deducted' => (float) $payment->tax_deducted,
+            'tax_deducted_usd' => $payment->tax_deducted_usd !== null ? (float) $payment->tax_deducted_usd : null,
+            'other_deductions' => (float) $payment->other_deductions,
+            'other_deductions_usd' => $payment->other_deductions_usd !== null ? (float) $payment->other_deductions_usd : null,
             'net_salary' => (float) $payment->net_salary,
+            'net_salary_usd' => $payment->net_salary_usd !== null ? (float) $payment->net_salary_usd : null,
             'status' => $payment->status,
+            'account_id' => $payment->account_id,
+            'account_uuid' => $payment->account?->uuid,
+            'account_name' => $payment->account?->name,
+            'account_currency' => $payment->account?->currency,
+            'account_transaction_uuid' => $payment->accountTransaction?->uuid,
+            'payment_currency_code' => $payment->payment_currency_code,
+            'exchange_rate_snapshot' => $payment->exchange_rate_snapshot !== null ? (float) $payment->exchange_rate_snapshot : null,
+            'net_salary_account_amount' => $payment->net_salary_account_amount !== null ? (float) $payment->net_salary_account_amount : null,
             'user_id' => $payment->user_id,
             'user_name' => $payment->user?->name,
             'paid_at' => optional($payment->paid_at)->toISOString(),
@@ -226,5 +311,11 @@ class SalaryPaymentController extends Controller
     {
         $status = strtolower(trim($value));
         return in_array($status, ['paid', 'cancelled'], true) ? $status : 'draft';
+    }
+
+    private function normalizeCurrency(string $value): string
+    {
+        $normalized = strtoupper(trim($value));
+        return in_array($normalized, ['USD', 'AFN'], true) ? $normalized : 'USD';
     }
 }

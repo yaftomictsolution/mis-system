@@ -7,17 +7,20 @@ use App\Models\Apartment;
 use App\Models\ApartmentRental;
 use App\Models\RentalPayment;
 use App\Models\RentalPaymentReceipt;
+use App\Services\AccountLedgerService;
 use App\Services\RentalBillCreatedFinanceAlertService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Throwable;
 
 class ApartmentRentalController extends Controller
 {
     public function __construct(
-        private readonly RentalBillCreatedFinanceAlertService $billAlerts
+        private readonly RentalBillCreatedFinanceAlertService $billAlerts,
+        private readonly AccountLedgerService $accountLedgerService,
     ) {
     }
     public function index(Request $request): JsonResponse
@@ -184,6 +187,7 @@ class ApartmentRentalController extends Controller
             'advance_months' => ['nullable', 'integer', 'min:1', 'max:12'],
             'initial_advance_paid' => ['nullable', 'numeric', 'min:0'],
             'initial_payment_method' => ['nullable', 'string', 'max:50'],
+            'initial_account_id' => ['nullable', 'integer', 'min:1', 'exists:accounts,id'],
             'notes' => ['nullable', 'string', 'max:1000'],
         ]);
 
@@ -210,61 +214,111 @@ class ApartmentRentalController extends Controller
         $requiredAdvance = $this->toMoney($monthlyRent * $advanceMonths);
         $initialAdvancePaid = min($requiredAdvance, $this->toMoney($data['initial_advance_paid'] ?? 0));
         $remainingAdvance = $this->toMoney(max(0, $requiredAdvance - $initialAdvancePaid));
+        $actorId = (int) ($request->user()?->id ?? 0) ?: null;
 
-        $rental = new ApartmentRental();
-        $rental->uuid = trim((string) ($data['uuid'] ?? '')) ?: (string) Str::uuid();
-        $rental->rental_id = $this->nextRentalId();
-        $rental->apartment_id = (int) $data['apartment_id'];
-        $rental->tenant_id = (int) $data['tenant_id'];
-        $rental->created_by = (int) ($request->user()?->id ?? 0) ?: null;
-        $rental->contract_start = (string) $data['contract_start'];
-        $rental->contract_end = $data['contract_end'] ?? null;
-        $rental->monthly_rent = $monthlyRent;
-        $rental->advance_months = $advanceMonths;
-        $rental->advance_required_amount = $requiredAdvance;
-        $rental->advance_paid_amount = $initialAdvancePaid;
-        $rental->advance_remaining_amount = $remainingAdvance;
-        $rental->total_paid_amount = $initialAdvancePaid;
-        $rental->advance_status = $remainingAdvance <= 0 ? 'completed' : ($initialAdvancePaid > 0 ? 'partial' : 'pending');
-        $rental->next_due_date = $this->computeNextDueDate((string) $data['contract_start']);
-        $rental->status = $remainingAdvance <= 0 ? 'active' : 'advance_pending';
-        $rental->key_handover_status = 'not_handed_over';
-        $rental->save();
-
-        if ($initialAdvancePaid > 0) {
-            $payment = RentalPayment::query()->create([
-                'uuid' => (string) Str::uuid(),
-                'rental_id' => (int) $rental->id,
-                'period_month' => null,
-                'due_date' => now()->toDateString(),
-                'payment_type' => 'advance',
-                'amount_due' => $initialAdvancePaid,
-                'amount_paid' => $initialAdvancePaid,
-                'remaining_amount' => 0,
-                'paid_date' => now(),
-                'status' => 'paid',
-                'notes' => $data['notes'] ?? null,
-            ]);
-
-            RentalPaymentReceipt::query()->create([
-                'uuid' => (string) Str::uuid(),
-                'rental_payment_id' => (int) $payment->id,
-                'rental_id' => (int) $rental->id,
-                'tenant_id' => (int) $rental->tenant_id,
-                'receipt_no' => $this->nextReceiptNo(),
-                'payment_date' => now(),
-                'amount' => $initialAdvancePaid,
-                'payment_method' => trim((string) ($data['initial_payment_method'] ?? 'cash')) ?: 'cash',
-                'reference_no' => null,
-                'received_by' => (int) ($request->user()?->id ?? 0) ?: null,
-                'notes' => $data['notes'] ?? null,
-            ]);
+        if ($initialAdvancePaid > 0 && empty($data['initial_account_id'])) {
+            return response()->json([
+                'message' => 'Payment account is required when initial advance is received.',
+            ], 422);
         }
 
-        $this->syncRentalPaymentTotals($rental);
+        $rental = DB::transaction(function () use (
+            $data,
+            $monthlyRent,
+            $advanceMonths,
+            $requiredAdvance,
+            $initialAdvancePaid,
+            $remainingAdvance,
+            $actorId,
+            $apartment
+        ): ApartmentRental {
+            $rental = new ApartmentRental();
+            $rental->uuid = trim((string) ($data['uuid'] ?? '')) ?: (string) Str::uuid();
+            $rental->rental_id = $this->nextRentalId();
+            $rental->apartment_id = (int) $data['apartment_id'];
+            $rental->tenant_id = (int) $data['tenant_id'];
+            $rental->created_by = $actorId;
+            $rental->contract_start = (string) $data['contract_start'];
+            $rental->contract_end = $data['contract_end'] ?? null;
+            $rental->monthly_rent = $monthlyRent;
+            $rental->advance_months = $advanceMonths;
+            $rental->advance_required_amount = $requiredAdvance;
+            $rental->advance_paid_amount = $initialAdvancePaid;
+            $rental->advance_remaining_amount = $remainingAdvance;
+            $rental->total_paid_amount = $initialAdvancePaid;
+            $rental->advance_status = $remainingAdvance <= 0 ? 'completed' : ($initialAdvancePaid > 0 ? 'partial' : 'pending');
+            $rental->next_due_date = $this->computeNextDueDate((string) $data['contract_start']);
+            $rental->status = $remainingAdvance <= 0 ? 'active' : 'advance_pending';
+            $rental->key_handover_status = 'not_handed_over';
+            $rental->save();
 
-        $apartment->status = $rental->status === 'active' ? 'rented' : 'reserved';
-        $apartment->save();
+            if ($initialAdvancePaid > 0) {
+                $payment = RentalPayment::query()->create([
+                    'uuid' => (string) Str::uuid(),
+                    'rental_id' => (int) $rental->id,
+                    'period_month' => null,
+                    'due_date' => now()->toDateString(),
+                    'payment_type' => 'advance',
+                    'amount_due' => $initialAdvancePaid,
+                    'amount_paid' => $initialAdvancePaid,
+                    'remaining_amount' => 0,
+                    'paid_date' => now(),
+                    'status' => 'paid',
+                    'notes' => $data['notes'] ?? null,
+                ]);
+
+                $receipt = RentalPaymentReceipt::query()->create([
+                    'uuid' => (string) Str::uuid(),
+                    'rental_payment_id' => (int) $payment->id,
+                    'rental_id' => (int) $rental->id,
+                    'tenant_id' => (int) $rental->tenant_id,
+                    'receipt_no' => $this->nextReceiptNo(),
+                    'payment_date' => now(),
+                    'amount' => $initialAdvancePaid,
+                    'payment_method' => trim((string) ($data['initial_payment_method'] ?? 'cash')) ?: 'cash',
+                    'reference_no' => null,
+                    'received_by' => $actorId,
+                    'account_id' => (int) $data['initial_account_id'],
+                    'notes' => $data['notes'] ?? null,
+                ]);
+
+                $posting = $this->accountLedgerService->postModuleTransaction(
+                    accountId: (int) $data['initial_account_id'],
+                    sourceAmount: $initialAdvancePaid,
+                    sourceCurrency: 'USD',
+                    direction: 'in',
+                    module: 'rentals',
+                    referenceType: 'rental_payment_receipt',
+                    referenceUuid: $receipt->uuid,
+                    description: sprintf('Initial advance received for rental %s', $rental->rental_id),
+                    paymentMethod: $receipt->payment_method,
+                    transactionDate: $receipt->payment_date,
+                    actorId: $actorId,
+                    metadata: [
+                        'rental_id' => $rental->id,
+                        'rental_uuid' => $rental->uuid,
+                        'rental_code' => $rental->rental_id,
+                        'rental_payment_id' => $payment->id,
+                        'rental_payment_uuid' => $payment->uuid,
+                        'rental_receipt_id' => $receipt->id,
+                        'rental_receipt_uuid' => $receipt->uuid,
+                    ]
+                );
+
+                $receipt->account_transaction_id = $posting['transaction']->id;
+                $receipt->payment_currency_code = $posting['account_currency'];
+                $receipt->exchange_rate_snapshot = $posting['exchange_rate_snapshot'];
+                $receipt->account_amount = $posting['account_amount'];
+                $receipt->saveQuietly();
+            }
+
+            $this->syncRentalPaymentTotals($rental);
+
+            $apartment->status = $rental->status === 'active' ? 'rented' : 'reserved';
+            $apartment->save();
+
+            return $rental->fresh(['apartment', 'tenant']);
+        });
 
         return response()->json([
             'data' => $this->rentalPayload($rental->fresh(['apartment', 'tenant'])),
@@ -339,6 +393,7 @@ class ApartmentRentalController extends Controller
             'period_month' => ['nullable', 'string', 'max:20'],
             'payment_method' => ['nullable', 'string', 'max:50'],
             'reference_no' => ['nullable', 'string', 'max:120'],
+            'account_id' => ['required', 'integer', 'min:1', 'exists:accounts,id'],
             'notes' => ['nullable', 'string', 'max:1000'],
         ]);
 
@@ -347,35 +402,79 @@ class ApartmentRentalController extends Controller
         $remaining = $this->toMoney(max(0, $amountDue - $amountPaid));
         $status = $remaining <= 0 ? 'paid' : 'partial';
 
-        $payment = RentalPayment::query()->create([
-            'uuid' => (string) Str::uuid(),
-            'rental_id' => (int) $rental->id,
-            'period_month' => $data['period_month'] ?? null,
-            'due_date' => $data['due_date'] ?? null,
-            'payment_type' => (string) $data['payment_type'],
-            'amount_due' => $amountDue,
-            'amount_paid' => $amountPaid,
-            'remaining_amount' => $remaining,
-            'paid_date' => $data['payment_date'] ?? now()->toDateString(),
-            'status' => $status,
-            'notes' => $data['notes'] ?? null,
-        ]);
+        $actorId = (int) ($request->user()?->id ?? 0) ?: null;
 
-        $receipt = RentalPaymentReceipt::query()->create([
-            'uuid' => (string) Str::uuid(),
-            'rental_payment_id' => (int) $payment->id,
-            'rental_id' => (int) $rental->id,
-            'tenant_id' => (int) $rental->tenant_id,
-            'receipt_no' => $this->nextReceiptNo(),
-            'payment_date' => $data['payment_date'] ?? now()->toDateString(),
-            'amount' => $amountPaid,
-            'payment_method' => trim((string) ($data['payment_method'] ?? 'cash')) ?: 'cash',
-            'reference_no' => $data['reference_no'] ?? null,
-            'received_by' => (int) ($request->user()?->id ?? 0) ?: null,
-            'notes' => $data['notes'] ?? null,
-        ]);
+        [$payment, $receipt, $rental] = DB::transaction(function () use (
+            $data,
+            $rental,
+            $amountDue,
+            $amountPaid,
+            $remaining,
+            $status,
+            $actorId
+        ): array {
+            $payment = RentalPayment::query()->create([
+                'uuid' => (string) Str::uuid(),
+                'rental_id' => (int) $rental->id,
+                'period_month' => $data['period_month'] ?? null,
+                'due_date' => $data['due_date'] ?? null,
+                'payment_type' => (string) $data['payment_type'],
+                'amount_due' => $amountDue,
+                'amount_paid' => $amountPaid,
+                'remaining_amount' => $remaining,
+                'paid_date' => $data['payment_date'] ?? now()->toDateString(),
+                'status' => $status,
+                'notes' => $data['notes'] ?? null,
+            ]);
 
-        $this->syncRentalPaymentTotals($rental);
+            $receipt = RentalPaymentReceipt::query()->create([
+                'uuid' => (string) Str::uuid(),
+                'rental_payment_id' => (int) $payment->id,
+                'rental_id' => (int) $rental->id,
+                'tenant_id' => (int) $rental->tenant_id,
+                'receipt_no' => $this->nextReceiptNo(),
+                'payment_date' => $data['payment_date'] ?? now()->toDateString(),
+                'amount' => $amountPaid,
+                'payment_method' => trim((string) ($data['payment_method'] ?? 'cash')) ?: 'cash',
+                'reference_no' => $data['reference_no'] ?? null,
+                'received_by' => $actorId,
+                'account_id' => (int) $data['account_id'],
+                'notes' => $data['notes'] ?? null,
+            ]);
+
+            $posting = $this->accountLedgerService->postModuleTransaction(
+                accountId: (int) $data['account_id'],
+                sourceAmount: $amountPaid,
+                sourceCurrency: 'USD',
+                direction: 'in',
+                module: 'rentals',
+                referenceType: 'rental_payment_receipt',
+                referenceUuid: $receipt->uuid,
+                description: sprintf('Rental payment received for rental %s', $rental->rental_id),
+                paymentMethod: $receipt->payment_method,
+                transactionDate: $receipt->payment_date,
+                actorId: $actorId,
+                metadata: [
+                    'rental_id' => $rental->id,
+                    'rental_uuid' => $rental->uuid,
+                    'rental_code' => $rental->rental_id,
+                    'rental_payment_id' => $payment->id,
+                    'rental_payment_uuid' => $payment->uuid,
+                    'rental_receipt_id' => $receipt->id,
+                    'rental_receipt_uuid' => $receipt->uuid,
+                ]
+            );
+
+            $receipt->account_transaction_id = $posting['transaction']->id;
+            $receipt->payment_currency_code = $posting['account_currency'];
+            $receipt->exchange_rate_snapshot = $posting['exchange_rate_snapshot'];
+            $receipt->account_amount = $posting['account_amount'];
+            $receipt->saveQuietly();
+
+            $this->syncRentalPaymentTotals($rental);
+
+            return [$payment, $receipt, $rental->fresh(['apartment', 'tenant'])];
+        });
 
         return response()->json([
             'message' => 'Payment saved.',
@@ -503,6 +602,7 @@ class ApartmentRentalController extends Controller
             'payment_date' => ['nullable', 'date'],
             'payment_method' => ['nullable', 'string', 'max:50'],
             'reference_no' => ['nullable', 'string', 'max:120'],
+            'account_id' => ['required', 'integer', 'min:1', 'exists:accounts,id'],
             'notes' => ['nullable', 'string', 'max:1000'],
         ]);
 
@@ -528,32 +628,79 @@ class ApartmentRentalController extends Controller
         $paymentStatus = $remainingAfter <= 0 ? 'paid' : 'partial';
         $paymentDate = $data['payment_date'] ?? now()->toDateString();
 
-        $payment->amount_paid = $newPaid;
-        $payment->remaining_amount = $remainingAfter;
-        $payment->paid_date = $paymentDate;
-        $payment->status = $paymentStatus;
-        $payment->approved_by = (int) $actor->id;
-        $payment->approved_at = now();
-        if (!empty($data['notes'])) {
-            $payment->notes = trim((string) $data['notes']);
-        }
-        $payment->save();
+        [$payment, $receipt, $rental] = DB::transaction(function () use (
+            $payment,
+            $rental,
+            $newPaid,
+            $remainingAfter,
+            $paymentDate,
+            $paymentStatus,
+            $data,
+            $actor,
+            $approvedAmount
+        ): array {
+            $payment = RentalPayment::query()->lockForUpdate()->findOrFail($payment->id);
+            $rental = ApartmentRental::query()->lockForUpdate()->findOrFail($rental->id);
 
-        $receipt = RentalPaymentReceipt::query()->create([
-            'uuid' => (string) Str::uuid(),
-            'rental_payment_id' => (int) $payment->id,
-            'rental_id' => (int) $rental->id,
-            'tenant_id' => (int) $rental->tenant_id,
-            'receipt_no' => $this->nextReceiptNo(),
-            'payment_date' => $paymentDate,
-            'amount' => $approvedAmount,
-            'payment_method' => trim((string) ($data['payment_method'] ?? 'cash')) ?: 'cash',
-            'reference_no' => $data['reference_no'] ?? null,
-            'received_by' => (int) $actor->id,
-            'notes' => $data['notes'] ?? null,
-        ]);
+            $payment->amount_paid = $newPaid;
+            $payment->remaining_amount = $remainingAfter;
+            $payment->paid_date = $paymentDate;
+            $payment->status = $paymentStatus;
+            $payment->approved_by = (int) $actor->id;
+            $payment->approved_at = now();
+            if (!empty($data['notes'])) {
+                $payment->notes = trim((string) $data['notes']);
+            }
+            $payment->save();
 
-        $this->syncRentalPaymentTotals($rental);
+            $receipt = RentalPaymentReceipt::query()->create([
+                'uuid' => (string) Str::uuid(),
+                'rental_payment_id' => (int) $payment->id,
+                'rental_id' => (int) $rental->id,
+                'tenant_id' => (int) $rental->tenant_id,
+                'receipt_no' => $this->nextReceiptNo(),
+                'payment_date' => $paymentDate,
+                'amount' => $approvedAmount,
+                'payment_method' => trim((string) ($data['payment_method'] ?? 'cash')) ?: 'cash',
+                'reference_no' => $data['reference_no'] ?? null,
+                'received_by' => (int) $actor->id,
+                'account_id' => (int) $data['account_id'],
+                'notes' => $data['notes'] ?? null,
+            ]);
+
+            $posting = $this->accountLedgerService->postModuleTransaction(
+                accountId: (int) $data['account_id'],
+                sourceAmount: $approvedAmount,
+                sourceCurrency: 'USD',
+                direction: 'in',
+                module: 'rentals',
+                referenceType: 'rental_payment_receipt',
+                referenceUuid: $receipt->uuid,
+                description: sprintf('Rental bill payment received for rental %s', $rental->rental_id),
+                paymentMethod: $receipt->payment_method,
+                transactionDate: $receipt->payment_date,
+                actorId: (int) $actor->id,
+                metadata: [
+                    'rental_id' => $rental->id,
+                    'rental_uuid' => $rental->uuid,
+                    'rental_code' => $rental->rental_id,
+                    'rental_payment_id' => $payment->id,
+                    'rental_payment_uuid' => $payment->uuid,
+                    'rental_receipt_id' => $receipt->id,
+                    'rental_receipt_uuid' => $receipt->uuid,
+                ]
+            );
+
+            $receipt->account_transaction_id = $posting['transaction']->id;
+            $receipt->payment_currency_code = $posting['account_currency'];
+            $receipt->exchange_rate_snapshot = $posting['exchange_rate_snapshot'];
+            $receipt->account_amount = $posting['account_amount'];
+            $receipt->saveQuietly();
+
+            $this->syncRentalPaymentTotals($rental);
+
+            return [$payment->fresh(['approver']), $receipt->fresh(), $rental->fresh(['apartment', 'tenant'])];
+        });
 
         return response()->json([
             'message' => 'Finance approved payment successfully.',
@@ -848,9 +995,5 @@ class ApartmentRentalController extends Controller
         ];
     }
 }
-
-
-
-
 
 

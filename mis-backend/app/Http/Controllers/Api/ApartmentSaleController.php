@@ -9,15 +9,21 @@ use App\Models\ApartmentSalePossessionLog;
 use App\Models\ApartmentSale;
 use App\Models\Installment;
 use App\Models\InstallmentPayment;
+use App\Services\AccountLedgerService;
 use App\Services\ApartmentSaleFinancialService;
 use App\Services\MunicipalityWorkflowService;
+use App\Services\SaleApprovalAlertService;
+use App\Services\SaleApprovedAlertService;
 use App\Services\SaleCreatedFinanceAlertService;
+use App\Services\SaleWorkflowSalesOfficerAlertService;
+use App\Support\ApartmentSaleCustomerAmounts;
 use App\Support\PermanentDeleteDependencyInspector;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class ApartmentSaleController extends Controller
 {
@@ -26,7 +32,11 @@ class ApartmentSaleController extends Controller
     public function __construct(
         private readonly ApartmentSaleFinancialService $financials,
         private readonly MunicipalityWorkflowService $workflow,
-        private readonly SaleCreatedFinanceAlertService $saleCreatedAlerts
+        private readonly SaleApprovalAlertService $saleApprovalAlerts,
+        private readonly SaleApprovedAlertService $saleApprovedAlerts,
+        private readonly SaleCreatedFinanceAlertService $saleCreatedAlerts,
+        private readonly SaleWorkflowSalesOfficerAlertService $saleWorkflowAlerts,
+        private readonly AccountLedgerService $accountLedgerService,
     )
     {
     }
@@ -153,6 +163,8 @@ class ApartmentSaleController extends Controller
     public function store(StoreApartmentSaleRequest $request): JsonResponse
     {
         $data = $this->normalizeSaleInput($request->validated());
+        $data['status'] = 'pending';
+        $data['approved_at'] = null;
         $actorId = (int) (optional($request->user())->id ?? 0);
         $incomingUuid = (string) ($data['uuid'] ?? '');
 
@@ -181,12 +193,11 @@ class ApartmentSaleController extends Controller
         DB::transaction(function () use ($sale, $data, $actorId): void {
             $this->fillAndSaveSale($sale, $data, $actorId);
             $this->syncInstallmentsForSale($sale, $data);
-            $financial = $this->financials->recalculateForSale($sale);
-            $this->workflow->ensurePaymentLetter($sale, $financial);
+            $this->financials->recalculateForSale($sale);
         });
 
         if ($created) {
-            $this->saleCreatedAlerts->notifyFinance(
+            $this->saleApprovalAlerts->notifyAdmins(
                 $sale->fresh(['customer:id,name', 'apartment:id,apartment_code,unit_number'])
             );
         }
@@ -234,18 +245,26 @@ class ApartmentSaleController extends Controller
             if ($actorId > 0) {
                 $sale->user_id = $actorId;
             }
+            if (strtolower(trim((string) $sale->status)) !== 'approved') {
+                $sale->approved_at = null;
+            }
             $sale->save();
         } else {
             DB::transaction(function () use ($sale, $data, $actorId): void {
                 $this->fillAndSaveSale($sale, $data, $actorId);
                 $this->syncInstallmentsForSale($sale, $data);
                 $financial = $this->financials->recalculateForSale($sale);
-                $this->workflow->ensurePaymentLetter($sale, $financial);
+                if (!$this->isApprovalPending($sale)) {
+                    $this->workflow->ensurePaymentLetter($sale, $financial);
+                }
             });
         }
 
         if ($state['edit_scope'] === 'limited') {
-            $this->financials->recalculateForSale($sale);
+            $financial = $this->financials->recalculateForSale($sale);
+            if (!$this->isApprovalPending($sale)) {
+                $this->workflow->ensurePaymentLetter($sale, $financial);
+            }
         }
 
         return response()->json([
@@ -260,11 +279,23 @@ class ApartmentSaleController extends Controller
             $state = $this->resolveSaleMutationState($sale);
             if (!$state['can_delete']) {
                 return response()->json([
-                    'message' => 'Sale cannot be deleted after approval, payment, completion, cancellation, termination, or default.',
+                    'message' => 'Sale can only be deleted when it has no recorded payments and no closed workflow history.',
                 ], 409);
             }
-            $sale->delete();
-            ApartmentSaleFinancial::query()->where('apartment_sale_id', $sale->id)->delete();
+            DB::transaction(function () use ($sale): void {
+                $apartmentId = (int) $sale->apartment_id;
+                $installmentIds = Installment::query()
+                    ->where('apartment_sale_id', $sale->id)
+                    ->pluck('id');
+
+                if ($installmentIds->isNotEmpty()) {
+                    InstallmentPayment::query()->whereIn('installment_id', $installmentIds)->delete();
+                }
+                Installment::query()->where('apartment_sale_id', $sale->id)->delete();
+                $sale->delete();
+                ApartmentSaleFinancial::query()->where('apartment_sale_id', $sale->id)->delete();
+                $this->financials->refreshApartmentStatusForApartment($apartmentId);
+            });
         }
 
         return response()->json([
@@ -283,8 +314,18 @@ class ApartmentSaleController extends Controller
 
         try {
             DB::transaction(function () use ($sale): void {
+                $apartmentId = (int) $sale->apartment_id;
+                $installmentIds = Installment::query()
+                    ->where('apartment_sale_id', $sale->id)
+                    ->pluck('id');
+
+                if ($installmentIds->isNotEmpty()) {
+                    InstallmentPayment::query()->whereIn('installment_id', $installmentIds)->delete();
+                }
+                Installment::query()->where('apartment_sale_id', $sale->id)->delete();
                 ApartmentSaleFinancial::query()->where('apartment_sale_id', $sale->id)->delete();
                 $sale->forceDelete();
+                $this->financials->refreshApartmentStatusForApartment($apartmentId);
             });
         } catch (\Throwable $e) {
             report($e);
@@ -314,6 +355,12 @@ class ApartmentSaleController extends Controller
             ->where('uuid', $uuid)
             ->firstOrFail();
 
+        if ($this->isApprovalPending($sale)) {
+            return response()->json([
+                'message' => 'Admin approval is required before deed workflow can continue.',
+            ], 409);
+        }
+
         $deedStatus = strtolower(trim((string) ($sale->deed_status ?? 'not_issued')));
         if ($deedStatus === 'issued') {
             return response()->json([
@@ -337,7 +384,8 @@ class ApartmentSaleController extends Controller
             ], 409);
         }
 
-        $hasUnpaidInstallment = $sale->installments()->whereRaw('paid_amount < amount')->exists();
+        $installments = $sale->installments()->get();
+        $hasUnpaidInstallment = ApartmentSaleCustomerAmounts::hasUnpaidInstallments($sale, $installments);
         if ($hasUnpaidInstallment) {
             return response()->json([
                 'message' => 'Deed cannot be issued until all installments are fully paid.',
@@ -391,9 +439,134 @@ class ApartmentSaleController extends Controller
             }
         });
 
+        $freshSale = $sale->fresh(['customer:id,name', 'apartment:id,apartment_code,unit_number', 'user:id,name,full_name,email,status']);
+        $this->saleWorkflowAlerts->notifyDeedIssued($freshSale, $actor);
+
         return response()->json([
             'message' => 'Ownership deed issued successfully.',
-            'data' => $this->salePayload($sale->fresh()),
+            'data' => $this->salePayload($freshSale),
+        ]);
+    }
+
+    public function approve(Request $request, string $uuid): JsonResponse
+    {
+        $actor = $request->user();
+        if (!$actor || !$actor->can('sales.approve')) {
+            return response()->json([
+                'message' => 'Only admin users can approve apartment sales.',
+            ], 403);
+        }
+
+        $sale = ApartmentSale::query()
+            ->with(['customer:id,name', 'apartment:id,apartment_code,unit_number'])
+            ->where('uuid', $uuid)
+            ->firstOrFail();
+
+        $status = strtolower(trim((string) ($sale->status ?? '')));
+        if (in_array($status, ['cancelled', 'terminated', 'defaulted'], true)) {
+            return response()->json([
+                'message' => 'Cancelled/terminated/defaulted sales cannot be approved.',
+            ], 409);
+        }
+
+        if ($status === 'approved' || $sale->approved_at) {
+            return response()->json([
+                'message' => 'Apartment sale is already approved.',
+                'data' => $this->salePayload($sale->fresh()),
+            ]);
+        }
+
+        if ($status !== 'pending') {
+            return response()->json([
+                'message' => 'Only pending apartment sales can be approved.',
+            ], 409);
+        }
+
+        DB::transaction(function () use ($sale): void {
+            $sale->status = 'approved';
+            $sale->approved_at = now();
+            $sale->save();
+
+            $freshSale = $sale->fresh();
+            $financial = $this->financials->recalculateForSale($freshSale);
+            $this->workflow->ensurePaymentLetter($freshSale, $financial);
+        });
+
+        $freshSale = $sale->fresh(['customer:id,name', 'apartment:id,apartment_code,unit_number', 'user:id,name,full_name,email,status']);
+        $this->saleCreatedAlerts->notifyFinance($freshSale);
+        $this->saleApprovedAlerts->notifySalesOfficer($freshSale, $actor);
+
+        return response()->json([
+            'message' => 'Apartment sale approved successfully.',
+            'data' => $this->salePayload($freshSale),
+        ]);
+    }
+
+    public function reject(Request $request, string $uuid): JsonResponse
+    {
+        $actor = $request->user();
+        if (!$actor || !$actor->can('sales.approve')) {
+            return response()->json([
+                'message' => 'Only admin users can reject apartment sales.',
+            ], 403);
+        }
+
+        $sale = ApartmentSale::query()
+            ->with(['customer:id,name', 'apartment:id,apartment_code,unit_number'])
+            ->where('uuid', $uuid)
+            ->firstOrFail();
+
+        $status = strtolower(trim((string) ($sale->status ?? '')));
+        if (in_array($status, ['cancelled', 'terminated', 'defaulted'], true)) {
+            return response()->json([
+                'message' => 'Apartment sale is already cancelled or closed.',
+                'data' => $this->salePayload($sale->fresh()),
+            ], 409);
+        }
+
+        if ($status === 'approved' || $sale->approved_at) {
+            return response()->json([
+                'message' => 'Approved apartment sales cannot be rejected. Use termination workflow instead.',
+            ], 409);
+        }
+
+        if ($status !== 'pending') {
+            return response()->json([
+                'message' => 'Only pending apartment sales can be rejected.',
+            ], 409);
+        }
+
+        $hasPaidInstallments = $sale->installments()
+            ->where('paid_amount', '>', 0)
+            ->exists();
+
+        if ($hasPaidInstallments) {
+            return response()->json([
+                'message' => 'Sales with recorded payments cannot be rejected. Use termination workflow instead.',
+            ], 409);
+        }
+
+        DB::transaction(function () use ($sale): void {
+            $sale->status = 'cancelled';
+            $sale->approved_at = null;
+            $sale->save();
+
+            Installment::query()
+                ->where('apartment_sale_id', $sale->id)
+                ->update([
+                    'status' => 'cancelled',
+                    'updated_at' => now(),
+                ]);
+
+            $this->financials->recalculateForSale($sale->fresh());
+        });
+
+        $freshSale = $sale->fresh(['customer:id,name', 'apartment:id,apartment_code,unit_number', 'user:id,name,full_name,email,status']);
+        $this->saleWorkflowAlerts->notifyRejected($freshSale, $actor);
+
+        return response()->json([
+            'message' => 'Apartment sale rejected and cancelled successfully.',
+            'data' => $this->salePayload($freshSale),
         ]);
     }
 
@@ -520,6 +693,11 @@ class ApartmentSaleController extends Controller
             ->firstOrFail();
 
         $saleStatus = strtolower(trim((string) $sale->status));
+        if ($saleStatus === 'pending') {
+            return response()->json([
+                'message' => 'Admin approval is required before key handover.',
+            ], 409);
+        }
         if (in_array($saleStatus, ['cancelled', 'terminated', 'defaulted'], true)) {
             return response()->json([
                 'message' => 'Cannot hand over keys for cancelled/terminated/defaulted sale.',
@@ -559,9 +737,6 @@ class ApartmentSaleController extends Controller
             $sale->key_handover_by = (int) $actor->id;
             if (!$sale->possession_start_date) {
                 $sale->possession_start_date = now()->toDateString();
-            }
-            if ($sale->status === 'pending') {
-                $sale->status = 'active';
             }
             $sale->save();
 
@@ -605,6 +780,11 @@ class ApartmentSaleController extends Controller
             ->firstOrFail();
 
         $saleStatus = strtolower(trim((string) $sale->status));
+        if ($saleStatus === 'pending') {
+            return response()->json([
+                'message' => 'Pending sales should be approved or deleted before termination workflow is used.',
+            ], 409);
+        }
         if (in_array($saleStatus, ['cancelled', 'terminated', 'defaulted', 'completed'], true)) {
             return response()->json([
                 'message' => 'Sale is already completed/cancelled/terminated/defaulted.',
@@ -837,11 +1017,6 @@ class ApartmentSaleController extends Controller
 
     private function syncInstallmentsForSale(ApartmentSale $sale, array $data): void
     {
-        if ($sale->payment_type !== 'installment') {
-            Installment::query()->where('apartment_sale_id', $sale->id)->delete();
-            return;
-        }
-
         $rows = $this->buildInstallments($sale, $data);
 
         Installment::query()->where('apartment_sale_id', $sale->id)->delete();
@@ -854,9 +1029,34 @@ class ApartmentSaleController extends Controller
     {
         $now = now();
         $rows = [];
+        $customerReceivable = ApartmentSaleCustomerAmounts::companyShare($sale);
+
+        if ($sale->payment_type !== 'installment') {
+            $amount = $customerReceivable;
+            if ($amount <= 0) {
+                return [];
+            }
+
+            $dueDate = CarbonImmutable::parse((string) $sale->sale_date)->toDateString();
+
+            return [[
+                'uuid' => (string) Str::uuid(),
+                'apartment_sale_id' => $sale->id,
+                'installment_no' => 1,
+                'amount' => $amount,
+                'due_date' => $dueDate,
+                'paid_amount' => 0,
+                'paid_date' => null,
+                'status' => $this->deriveInstallmentStatus(0, $amount, $dueDate),
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]];
+        }
+
         $frequency = (string) ($data['frequency_type'] ?? 'monthly');
 
         if ($frequency === 'custom_dates') {
+            $draftRows = [];
             foreach ((array) ($data['custom_dates'] ?? []) as $idx => $item) {
                 $installmentNo = max(1, (int) ($item['installment_no'] ?? ($idx + 1)));
                 $amount = max(0, round((float) ($item['amount'] ?? 0), 2));
@@ -864,7 +1064,7 @@ class ApartmentSaleController extends Controller
                     continue;
                 }
 
-                $rows[] = [
+                $draftRows[] = [
                     'uuid' => (string) Str::uuid(),
                     'apartment_sale_id' => $sale->id,
                     'installment_no' => $installmentNo,
@@ -872,13 +1072,33 @@ class ApartmentSaleController extends Controller
                     'due_date' => CarbonImmutable::parse((string) ($item['due_date'] ?? $sale->sale_date))->toDateString(),
                     'paid_amount' => 0,
                     'paid_date' => null,
-                    'status' => 'pending',
+                    'status' => $this->deriveInstallmentStatus(
+                        0,
+                        $amount,
+                        CarbonImmutable::parse((string) ($item['due_date'] ?? $sale->sale_date))->toDateString()
+                    ),
                     'created_at' => $now,
                     'updated_at' => $now,
                 ];
             }
 
-            usort($rows, fn (array $a, array $b): int => $a['installment_no'] <=> $b['installment_no']);
+            usort($draftRows, fn (array $a, array $b): int => $a['installment_no'] <=> $b['installment_no']);
+            $amountCents = ApartmentSaleCustomerAmounts::distributeCents(
+                (int) round($customerReceivable * 100),
+                array_map(static fn (array $row): int => (int) round(((float) $row['amount']) * 100), $draftRows),
+            );
+
+            foreach ($draftRows as $index => $row) {
+                $adjustedAmount = round(($amountCents[$index] ?? 0) / 100, 2);
+                if ($adjustedAmount <= 0) {
+                    continue;
+                }
+
+                $row['amount'] = $adjustedAmount;
+                $row['status'] = $this->deriveInstallmentStatus(0, $adjustedAmount, $row['due_date']);
+                $rows[] = $row;
+            }
+
             return $rows;
         }
 
@@ -886,7 +1106,7 @@ class ApartmentSaleController extends Controller
         $interval = max(1, (int) ($data['interval_count'] ?? 1));
         $startDate = CarbonImmutable::parse((string) ($data['first_due_date'] ?? $sale->sale_date))->startOfDay();
 
-        $totalCents = (int) round(max(0, (float) $sale->net_price) * 100);
+        $totalCents = (int) round($customerReceivable * 100);
         $base = intdiv($totalCents, $count);
         $remainder = $totalCents % $count;
 
@@ -902,7 +1122,7 @@ class ApartmentSaleController extends Controller
                 'due_date' => $dueDate->toDateString(),
                 'paid_amount' => 0,
                 'paid_date' => null,
-                'status' => 'pending',
+                'status' => $this->deriveInstallmentStatus(0, round($amountCents / 100, 2), $dueDate->toDateString()),
                 'created_at' => $now,
                 'updated_at' => $now,
             ];
@@ -925,6 +1145,145 @@ class ApartmentSaleController extends Controller
         }
 
         return $start->addMonths($offset * $interval);
+    }
+
+    private function shouldReceiveImmediateFullPayment(array $validated, ApartmentSale $sale): bool
+    {
+        return $sale->payment_type === 'full' && !empty($validated['receive_full_payment_now']);
+    }
+
+    private function applyImmediateFullPayment(ApartmentSale $sale, array $validated, int $actorId): void
+    {
+        $accountId = (int) ($validated['payment_account_id'] ?? 0);
+        if ($accountId <= 0) {
+            throw ValidationException::withMessages([
+                'payment_account_id' => 'Payment account is required when receiving full payment now.',
+            ]);
+        }
+
+        $installment = Installment::query()
+            ->where('apartment_sale_id', $sale->id)
+            ->orderBy('installment_no')
+            ->lockForUpdate()
+            ->first();
+
+        if (!$installment) {
+            throw ValidationException::withMessages([
+                'receive_full_payment_now' => 'Full-payment receivable could not be prepared for this sale.',
+            ]);
+        }
+
+        $installment->loadMissing('sale.installments');
+        $sale = $installment->sale?->fresh(['installments']) ?? $sale->fresh(['installments']);
+        $scaledAmounts = $sale
+            ? ApartmentSaleCustomerAmounts::installmentAmounts($sale, $sale->installments)
+            : [];
+        $amountKey = $installment->id ? 'id:' . $installment->id : (!empty($installment->uuid) ? 'uuid:' . $installment->uuid : null);
+        $total = $amountKey && array_key_exists($amountKey, $scaledAmounts)
+            ? round((float) $scaledAmounts[$amountKey], 2)
+            : round((float) ($installment->amount ?? 0), 2);
+        $currentPaid = round((float) ($installment->paid_amount ?? 0), 2);
+        $remaining = max(0, round($total - $currentPaid, 2));
+        if ($remaining <= 0) {
+            return;
+        }
+
+        $paidDate = !empty($validated['payment_date'])
+            ? CarbonImmutable::parse((string) $validated['payment_date'])->toDateString()
+            : CarbonImmutable::parse((string) $sale->sale_date)->toDateString();
+        $paymentMethod = trim((string) ($validated['payment_method'] ?? 'cash')) ?: 'cash';
+
+        $installment->paid_amount = round($currentPaid + $remaining, 2);
+        $installment->paid_date = $paidDate;
+        $installment->status = $this->deriveInstallmentStatus(
+            (float) $installment->paid_amount,
+            $total,
+            $installment->due_date?->toDateString()
+        );
+        $installment->save();
+
+        $payment = InstallmentPayment::query()->create([
+            'uuid' => (string) Str::uuid(),
+            'installment_id' => $installment->id,
+            'amount' => $remaining,
+            'payment_date' => CarbonImmutable::parse($paidDate)->toDateTimeString(),
+            'payment_method' => $paymentMethod,
+            'reference_no' => isset($validated['payment_reference_no']) ? trim((string) $validated['payment_reference_no']) ?: null : null,
+            'notes' => isset($validated['payment_notes']) ? trim((string) $validated['payment_notes']) ?: null : null,
+            'received_by' => $actorId > 0 ? $actorId : null,
+            'account_id' => $accountId,
+        ]);
+
+        $posting = $this->accountLedgerService->postModuleTransaction(
+            accountId: $accountId,
+            sourceAmount: $remaining,
+            sourceCurrency: 'USD',
+            direction: 'in',
+            module: 'sales',
+            referenceType: 'installment_payment',
+            referenceUuid: $payment->uuid,
+            description: sprintf(
+                'Full sale payment received for sale %s',
+                trim((string) ($sale->sale_id ?: $sale->uuid ?: $sale->id))
+            ),
+            paymentMethod: $paymentMethod,
+            transactionDate: $payment->payment_date,
+            actorId: $actorId > 0 ? $actorId : null,
+            metadata: [
+                'installment_id' => $installment->id,
+                'installment_uuid' => $installment->uuid,
+                'apartment_sale_id' => $installment->apartment_sale_id,
+                'apartment_sale_uuid' => $sale->uuid,
+                'sale_id' => $sale->sale_id,
+            ]
+        );
+
+        $payment->account_transaction_id = $posting['transaction']->id;
+        $payment->payment_currency_code = $posting['account_currency'];
+        $payment->exchange_rate_snapshot = $posting['exchange_rate_snapshot'];
+        $payment->account_amount = $posting['account_amount'];
+        $payment->saveQuietly();
+
+        $this->syncSaleStatusFromInstallments($sale);
+        $freshSale = $sale->fresh();
+        $financial = $this->financials->recalculateForSale($freshSale);
+        $this->workflow->ensurePaymentLetter($freshSale, $financial);
+    }
+
+    private function syncSaleStatusFromInstallments(ApartmentSale $sale): void
+    {
+        if (in_array($sale->status, ['cancelled', 'terminated', 'defaulted'], true)) {
+            return;
+        }
+
+        $sale->loadMissing('installments');
+        $hasUnpaid = ApartmentSaleCustomerAmounts::hasUnpaidInstallments($sale, $sale->installments);
+
+        if (!$hasUnpaid) {
+            if ($sale->status !== 'completed') {
+                $sale->status = 'completed';
+                $sale->save();
+            }
+
+            return;
+        }
+
+        if ($sale->status === 'completed') {
+            $sale->status = 'active';
+            $sale->save();
+        }
+    }
+
+    private function deriveInstallmentStatus(float $paidAmount, float $amount, ?string $dueDate): string
+    {
+        if ($paidAmount >= $amount) {
+            return 'paid';
+        }
+        if ($dueDate && CarbonImmutable::parse($dueDate)->isBefore(now()->startOfDay())) {
+            return 'overdue';
+        }
+
+        return 'pending';
     }
 
     private function salePayload(ApartmentSale $sale): array
@@ -1052,12 +1411,13 @@ class ApartmentSaleController extends Controller
         $fullAccess = in_array($status, ['pending', 'active'], true) && !$hasPaidInstallments;
         $limitedAccess = !$isTerminal && ($status === 'approved' || $hasPaidInstallments);
         $editScope = $deedIssued ? 'none' : ($fullAccess ? 'full' : ($limitedAccess ? 'limited' : 'none'));
+        $canDelete = $editScope === 'full' || ($status === 'cancelled' && !$hasPaidInstallments && !$deedIssued);
         $firstInstallmentPaid = $sale->payment_type === 'installment'
             ? Installment::query()
                 ->where('apartment_sale_id', $sale->id)
                 ->where('paid_amount', '>', 0)
                 ->exists()
-            : ($status === 'completed' || $hasPaidInstallments);
+            : $status === 'completed';
         $canHandoverKey =
             !$deedIssued &&
             !in_array($status, ['cancelled', 'terminated', 'defaulted'], true) &&
@@ -1071,10 +1431,15 @@ class ApartmentSaleController extends Controller
             'has_first_installment_paid' => $firstInstallmentPaid,
             'edit_scope' => $editScope,
             'can_update' => $editScope !== 'none',
-            'can_delete' => $editScope === 'full',
+            'can_delete' => $canDelete,
             'key_handover_status' => $handoverStatus,
             'can_handover_key' => $canHandoverKey,
         ];
+    }
+
+    private function isApprovalPending(ApartmentSale $sale): bool
+    {
+        return strtolower(trim((string) ($sale->status ?? ''))) === 'pending';
     }
 
     private function hasRestrictedSaleChanges(ApartmentSale $sale, array $incoming): bool
@@ -1142,5 +1507,3 @@ class ApartmentSaleController extends Controller
         return CarbonImmutable::parse((string) $value)->toDateString();
     }
 }
-
-

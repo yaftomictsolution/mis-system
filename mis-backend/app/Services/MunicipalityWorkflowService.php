@@ -12,7 +12,10 @@ use Illuminate\Validation\ValidationException;
 
 class MunicipalityWorkflowService
 {
-    public function __construct(private readonly ApartmentSaleFinancialService $financials)
+    public function __construct(
+        private readonly ApartmentSaleFinancialService $financials,
+        private readonly AccountLedgerService $accountLedgerService,
+    )
     {
     }
 
@@ -44,6 +47,12 @@ class MunicipalityWorkflowService
                 ]);
             }
 
+            if (strtolower(trim((string) ($freshSale->status ?? ''))) === 'pending') {
+                throw ValidationException::withMessages([
+                    'sale' => 'Admin approval is required before municipality workflow can continue.',
+                ]);
+            }
+
             $financial = $this->financials->recalculateForSale($freshSale);
             $remaining = $this->toMoney($financial->remaining_municipality);
             if ($remaining <= 0) {
@@ -70,6 +79,7 @@ class MunicipalityWorkflowService
                 $receiptNo = $this->generateReceiptNo($freshSale);
             }
 
+            $accountId = (int) ($input['account_id'] ?? 0);
             $receipt = MunicipalityReceipt::query()->create([
                 'uuid' => (string) Str::uuid(),
                 'apartment_sale_id' => $freshSale->id,
@@ -79,7 +89,40 @@ class MunicipalityWorkflowService
                 'payment_method' => mb_substr(trim((string) ($input['payment_method'] ?? 'cash')) ?: 'cash', 0, 30),
                 'notes' => isset($input['notes']) ? (string) $input['notes'] : null,
                 'received_by' => $receivedBy,
+                'account_id' => $accountId > 0 ? $accountId : null,
             ]);
+
+            if ($accountId > 0) {
+                $posting = $this->accountLedgerService->postModuleTransaction(
+                    accountId: $accountId,
+                    sourceAmount: $amount,
+                    sourceCurrency: 'USD',
+                    direction: 'out',
+                    module: 'sales',
+                    referenceType: 'municipality_receipt',
+                    referenceUuid: $receipt->uuid,
+                    description: sprintf(
+                        'Municipality payment for sale %s',
+                        trim((string) ($freshSale->sale_id ?: $freshSale->uuid))
+                    ),
+                    paymentMethod: $receipt->payment_method,
+                    transactionDate: $receipt->payment_date,
+                    actorId: $receivedBy,
+                    metadata: [
+                        'apartment_sale_id' => $freshSale->id,
+                        'apartment_sale_uuid' => $freshSale->uuid,
+                        'sale_id' => $freshSale->sale_id,
+                        'municipality_receipt_id' => $receipt->id,
+                        'municipality_receipt_uuid' => $receipt->uuid,
+                    ]
+                );
+
+                $receipt->account_transaction_id = $posting['transaction']->id;
+                $receipt->payment_currency_code = $posting['account_currency'];
+                $receipt->exchange_rate_snapshot = $posting['exchange_rate_snapshot'];
+                $receipt->account_amount = $posting['account_amount'];
+                $receipt->saveQuietly();
+            }
 
             $updatedFinancial = $this->financials->recalculateForSale($freshSale->fresh(), [
                 'delivered_to_municipality' => $this->toMoney($financial->delivered_to_municipality) + $amount,
@@ -178,4 +221,3 @@ class MunicipalityWorkflowService
         return round($n, 2);
     }
 }
-

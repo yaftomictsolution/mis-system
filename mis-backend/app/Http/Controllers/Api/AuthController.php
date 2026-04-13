@@ -12,14 +12,17 @@ use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
-    public function login(Request $request)
+    public function login(Request $request): JsonResponse
     {
         $request->validate([
             'email' => ['required', 'email'],
             'password' => ['required', 'string'],
         ]);
 
-        $user = User::where('email', $request->email)->first();
+        $user = User::query()
+            ->with('customer:id,uuid,name')
+            ->where('email', $request->email)
+            ->first();
 
         if (! $user || ! Hash::check($request->password, $user->password)) {
             throw ValidationException::withMessages([
@@ -39,16 +42,17 @@ class AuthController extends Controller
 
         return response()->json([
             'token' => $token,
-            'user' => $this->authUserPayload($user),
+            'user' => $this->authUserPayload($user->fresh()->loadMissing('customer:id,uuid,name')),
         ]);
     }
 
-    public function me(Request $request)
+    public function me(Request $request): JsonResponse
     {
+        /** @var User $user */
         $user = $request->user();
 
         return response()->json([
-            'user' => $this->authUserPayload($user),
+            'user' => $this->authUserPayload($user->loadMissing('customer:id,uuid,name')),
         ]);
     }
 
@@ -85,7 +89,7 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'Profile updated successfully.',
-            'user' => $this->authUserPayload($user->fresh()),
+            'user' => $this->authUserPayload($user->fresh()->loadMissing('customer:id,uuid,name')),
         ]);
     }
 
@@ -99,7 +103,7 @@ class AuthController extends Controller
             'new_password' => ['required', 'string', 'min:8', 'confirmed'],
         ]);
 
-        if (!Hash::check((string) $data['current_password'], (string) $user->password)) {
+        if (! Hash::check((string) $data['current_password'], (string) $user->password)) {
             throw ValidationException::withMessages([
                 'current_password' => ['Current password is incorrect.'],
             ]);
@@ -119,23 +123,30 @@ class AuthController extends Controller
         ]);
     }
 
-    public function logout(Request $request)
+    public function logout(Request $request): JsonResponse
     {
-        $request->user()->tokens()->delete();
+        $request->user()?->tokens()->delete();
 
-        return response()->json(['message' => 'Logged out']);
+        return response()->json([
+            'message' => 'Logged out',
+        ]);
     }
 
     private function authUserPayload(User $user): array
     {
+        $user->loadMissing('customer:id,uuid,name');
+
         return [
             'id' => $user->id,
             'uuid' => $user->uuid,
             'full_name' => $user->full_name,
             'email' => $user->email,
             'phone' => $user->phone,
-            'roles' => $user->getRoleNames(),
-            'permissions' => $user->getAllPermissions()->pluck('name'),
+            'customer_id' => $user->customer_id,
+            'customer_uuid' => $user->customer?->uuid,
+            'customer_name' => $user->customer?->name,
+            'roles' => $user->getRoleNames()->values()->all(),
+            'permissions' => $user->getAllPermissions()->pluck('name')->values()->all(),
         ];
     }
 }

@@ -37,6 +37,9 @@ class OfflinePolicyController extends Controller
             'rental_payments' => 365,
             'salary_advances' => 365,
             'salary_payments' => 365,
+            'accounts' => 365,
+            'account_transactions' => 365,
+            'employee_salary_histories' => 365,
         ],
     ];
 
@@ -76,6 +79,9 @@ class OfflinePolicyController extends Controller
             'module_retention_days.rental_payments' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.salary_advances' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.salary_payments' => ['required', 'integer', 'min:0', 'max:3650'],
+            'module_retention_days.accounts' => ['required', 'integer', 'min:0', 'max:3650'],
+            'module_retention_days.account_transactions' => ['required', 'integer', 'min:0', 'max:3650'],
+            'module_retention_days.employee_salary_histories' => ['required', 'integer', 'min:0', 'max:3650'],
         ]);
 
         $policy = $this->normalizePolicy($validated);
@@ -149,6 +155,9 @@ class OfflinePolicyController extends Controller
                 'rental_payments' => $this->normalizeDays($moduleRetention['rental_payments'] ?? 365),
                 'salary_advances' => $this->normalizeDays($moduleRetention['salary_advances'] ?? 365),
                 'salary_payments' => $this->normalizeDays($moduleRetention['salary_payments'] ?? 365),
+                'accounts' => $this->normalizeDays($moduleRetention['accounts'] ?? 365),
+                'account_transactions' => $this->normalizeDays($moduleRetention['account_transactions'] ?? 365),
+                'employee_salary_histories' => $this->normalizeDays($moduleRetention['employee_salary_histories'] ?? 365),
             ],
         ];
     }

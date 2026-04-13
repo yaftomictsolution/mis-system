@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreApartmentRequest;
 use App\Models\Apartment;
+use App\Models\ApartmentQrAccessToken;
 use App\Models\Document;
 use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Http\JsonResponse;
@@ -47,6 +48,10 @@ class ApartmentController extends Controller
                 'area_sqm',
                 'apartment_shape',
                 'corridor',
+                'north_boundary',
+                'south_boundary',
+                'east_boundary',
+                'west_boundary',
                 'status',
                 'qr_code',
                 'additional_info',
@@ -55,6 +60,7 @@ class ApartmentController extends Controller
             ])
             ->with([
                 'documents:id,module,document_type,reference_id,file_path,expiry_date,created_at',
+                'qrAccessToken:id,apartment_id,token,status',
             ])
             ->orderByDesc('updated_at');
 
@@ -74,6 +80,10 @@ class ApartmentController extends Controller
                     ->orWhere('status', 'like', "%{$search}%")
                     ->orWhere('apartment_shape', 'like', "%{$search}%")
                     ->orWhere('corridor', 'like', "%{$search}%")
+                    ->orWhere('north_boundary', 'like', "%{$search}%")
+                    ->orWhere('south_boundary', 'like', "%{$search}%")
+                    ->orWhere('east_boundary', 'like', "%{$search}%")
+                    ->orWhere('west_boundary', 'like', "%{$search}%")
                     ->orWhere('additional_info', 'like', "%{$search}%");
             });
         }
@@ -172,8 +182,10 @@ class ApartmentController extends Controller
         $apartment->fill($updateData);
         $apartment->save();
 
+        $this->ensureQrAccessToken($apartment, $request);
+
         return response()->json([
-            'data' => $this->apartmentPayload($apartment->fresh(['documents'])),
+            'data' => $this->apartmentPayload($apartment->fresh(['documents', 'qrAccessToken'])),
             'restored' => $restored,
         ], $created ? 201 : 200);
     }
@@ -190,8 +202,10 @@ class ApartmentController extends Controller
         $apartment->fill($data);
         $apartment->save();
 
+        $this->ensureQrAccessToken($apartment, $request);
+
         return response()->json([
-            'data' => $this->apartmentPayload($apartment->fresh(['documents'])),
+            'data' => $this->apartmentPayload($apartment->fresh(['documents', 'qrAccessToken'])),
         ]);
     }
 
@@ -252,6 +266,8 @@ class ApartmentController extends Controller
 
     private function apartmentPayload(Apartment $apartment): array
     {
+        $apartment->loadMissing('qrAccessToken');
+
         $base = $apartment->only([
             'id',
             'uuid',
@@ -269,6 +285,10 @@ class ApartmentController extends Controller
             'area_sqm',
             'apartment_shape',
             'corridor',
+            'north_boundary',
+            'south_boundary',
+            'east_boundary',
+            'west_boundary',
             'status',
             'qr_code',
             'additional_info',
@@ -299,7 +319,25 @@ class ApartmentController extends Controller
             ->values()
             ->all();
 
+        $base['qr_access_token'] = $apartment->qrAccessToken?->status === 'active'
+            ? $apartment->qrAccessToken?->token
+            : null;
+        $base['qr_access_status'] = $apartment->qrAccessToken?->status ?? null;
+
         return $base;
+    }
+
+    private function ensureQrAccessToken(Apartment $apartment, Request $request): void
+    {
+        ApartmentQrAccessToken::query()->firstOrCreate(
+            ['apartment_id' => $apartment->id],
+            [
+                'uuid' => (string) Str::uuid(),
+                'token' => Str::random(64),
+                'status' => 'active',
+                'created_by_user_id' => optional($request->user())->id,
+            ]
+        );
     }
 
     private function inferApartmentDocumentType(string $documentType, string $filePath): string
@@ -317,5 +355,3 @@ class ApartmentController extends Controller
             : 'apartment_document';
     }
 }
-
-

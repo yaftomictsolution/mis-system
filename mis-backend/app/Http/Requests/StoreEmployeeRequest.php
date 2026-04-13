@@ -41,6 +41,10 @@ class StoreEmployeeRequest extends FormRequest
             'job_title' => ['nullable', 'string', 'max:255'],
             'salary_type' => ['required', 'string', 'max:255'],
             'base_salary' => ['nullable', 'numeric', 'min:0'],
+            'salary_currency_code' => ['nullable', Rule::in(['USD', 'AFN'])],
+            'salary_change_reason' => ['nullable', 'string', 'max:2000'],
+            'salary_effective_from' => ['nullable', 'date'],
+            'salary_history_uuid' => ['nullable', 'string', 'size:36'],
             'address' => ['nullable', 'string', 'max:255'],
             'email' => [
                 'nullable',
@@ -48,13 +52,8 @@ class StoreEmployeeRequest extends FormRequest
                 'max:255',
                 Rule::unique('employees', 'email')->ignore($employeeId),
             ],
-            // 'phone' => [
-            //     'nullable',
-            //     'string',
-            //     'max:255',
-            //     Rule::unique('employees', 'phone')->ignore($employeeId),
-            // ],
-            // 'hire_date' => ['required', 'date'],
+            'phone' => ['nullable', 'string', 'max:255'],
+            'hire_date' => ['nullable', 'date'],
             'status' => ['nullable', 'string', 'max:255'],
         ];
     }
@@ -65,11 +64,10 @@ class StoreEmployeeRequest extends FormRequest
             'salary_type.required' => 'Salary type is required.',
             'base_salary.numeric' => 'Base salary must be a number.',
             'base_salary.min' => 'Base salary must not be less than 0.',
+            'salary_currency_code.in' => 'Salary currency must be USD or AFN.',
+            'salary_effective_from.date' => 'Salary effective date must be a valid date.',
             'email.email' => 'Please enter a valid email address.',
             'email.unique' => 'This email already exists.',
-            // 'phone.unique' => 'This phone number already exists.',
-            // 'uuid.unique' => 'This uuid already exists.',
-            // 'hire_date.required' => 'Hire date is required.',
             'hire_date.date' => 'Hire date must be a valid date.',
         ];
     }

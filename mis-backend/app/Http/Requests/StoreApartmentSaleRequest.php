@@ -24,6 +24,12 @@ class StoreApartmentSaleRequest extends FormRequest
             'discount' => ['nullable', 'numeric', 'min:0'],
             'payment_type' => ['required', Rule::in(['full', 'installment'])],
             'status' => ['nullable', Rule::in(['active', 'pending', 'approved', 'completed', 'cancelled', 'defaulted', 'terminated'])],
+            'receive_full_payment_now' => ['nullable', 'boolean'],
+            'payment_account_id' => ['nullable', 'integer', 'min:1', Rule::exists('accounts', 'id')],
+            'payment_date' => ['nullable', 'date'],
+            'payment_method' => ['nullable', 'string', 'max:30'],
+            'payment_reference_no' => ['nullable', 'string', 'max:100'],
+            'payment_notes' => ['nullable', 'string'],
 
             'frequency_type' => ['nullable', Rule::in(['weekly', 'monthly', 'quarterly', 'custom_dates'])],
             'interval_count' => ['nullable', 'integer', 'min:1'],
@@ -62,6 +68,14 @@ class StoreApartmentSaleRequest extends FormRequest
 
             if ($discount > $total) {
                 $validator->errors()->add('discount', 'Discount cannot exceed total price.');
+            }
+
+            $receiveNow = $this->boolean('receive_full_payment_now');
+            if ($receiveNow) {
+                $validator->errors()->add(
+                    'receive_full_payment_now',
+                    'Full payment can be received only after admin approval.'
+                );
             }
 
             if ($paymentType !== 'installment') {

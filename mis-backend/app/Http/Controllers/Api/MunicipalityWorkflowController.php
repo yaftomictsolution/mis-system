@@ -21,6 +21,16 @@ class MunicipalityWorkflowController extends Controller
     public function showLetter(string $uuid): JsonResponse
     {
         $sale = $this->findSale($uuid);
+        if ($this->isApprovalPending($sale)) {
+            return response()->json([
+                'message' => 'Admin approval is required before municipality workflow can continue.',
+            ], 409);
+        }
+        if ($this->isWorkflowClosed($sale)) {
+            return response()->json([
+                'message' => 'Cancelled/terminated/defaulted sales cannot continue municipality workflow.',
+            ], 409);
+        }
         $financial = $this->financials->recalculateForSale($sale);
         $letter = $this->workflow->ensurePaymentLetter($sale, $financial);
 
@@ -32,6 +42,16 @@ class MunicipalityWorkflowController extends Controller
     public function generateLetter(string $uuid): JsonResponse
     {
         $sale = $this->findSale($uuid);
+        if ($this->isApprovalPending($sale)) {
+            return response()->json([
+                'message' => 'Admin approval is required before municipality workflow can continue.',
+            ], 409);
+        }
+        if ($this->isWorkflowClosed($sale)) {
+            return response()->json([
+                'message' => 'Cancelled/terminated/defaulted sales cannot continue municipality workflow.',
+            ], 409);
+        }
         $financial = $this->financials->recalculateForSale($sale);
         $letter = $this->workflow->ensurePaymentLetter($sale, $financial);
 
@@ -82,13 +102,19 @@ class MunicipalityWorkflowController extends Controller
             'payment_date' => ['nullable', 'date'],
             'payment_method' => ['nullable', 'in:cash,bank,transfer,cheque'],
             'receipt_no' => ['nullable', 'string', 'max:50'],
+            'account_id' => ['required', 'integer', 'min:1', 'exists:accounts,id'],
             'notes' => ['nullable', 'string'],
         ]);
 
         $sale = $this->findSale($uuid);
-        if (strtolower(trim((string) $sale->status)) === 'cancelled') {
+        if ($this->isApprovalPending($sale)) {
             return response()->json([
-                'message' => 'Cannot add municipality receipt for a cancelled sale.',
+                'message' => 'Admin approval is required before municipality workflow can continue.',
+            ], 409);
+        }
+        if ($this->isWorkflowClosed($sale)) {
+            return response()->json([
+                'message' => 'Cancelled/terminated/defaulted sales cannot continue municipality workflow.',
             ], 409);
         }
 
@@ -144,9 +170,23 @@ class MunicipalityWorkflowController extends Controller
             'payment_method',
             'notes',
             'received_by',
+            'account_id',
+            'account_transaction_id',
+            'payment_currency_code',
+            'exchange_rate_snapshot',
+            'account_amount',
             'created_at',
             'updated_at',
         ]);
     }
-}
 
+    private function isApprovalPending(ApartmentSale $sale): bool
+    {
+        return strtolower(trim((string) ($sale->status ?? ''))) === 'pending';
+    }
+
+    private function isWorkflowClosed(ApartmentSale $sale): bool
+    {
+        return in_array(strtolower(trim((string) ($sale->status ?? ''))), ['cancelled', 'terminated', 'defaulted'], true);
+    }
+}

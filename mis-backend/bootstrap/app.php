@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\RestrictCustomerInternalApiAccess;
 use Illuminate\Foundation\Application;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -13,7 +14,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->alias([
+            'internal.user.only' => RestrictCustomerInternalApiAccess::class,
+        ]);
     })
     ->withSchedule(function (Schedule $schedule): void {
         $days = max(1, (int) env('CRM_REMINDER_DAYS_BEFORE_DUE', 10));
