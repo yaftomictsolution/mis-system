@@ -5,13 +5,21 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreEmployeeRequest;
 use App\Models\Employee;
+use App\Services\EmployeeSalaryHistoryService;
 use App\Support\PermanentDeleteDependencyInspector;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
 class EmployeeController extends Controller
 {
+    public function __construct(
+        private readonly EmployeeSalaryHistoryService $salaryHistoryService
+    ) {
+    }
+
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -35,6 +43,7 @@ class EmployeeController extends Controller
                 'job_title',
                 'salary_type',
                 'base_salary',
+                'salary_currency_code',
                 'address',
                 'email',
                 'phone',
@@ -107,52 +116,68 @@ class EmployeeController extends Controller
     public function store(StoreEmployeeRequest $request): JsonResponse
     {
         $data = $request->validated();
-
-        $incomingUuid = (string) ($data['uuid'] ?? '');
-        $email = trim((string) ($data['email'] ?? ''));
-        $matches = collect();
-
-        if ($incomingUuid !== '') {
-            $matchByUuid = Employee::withTrashed()->where('uuid', $incomingUuid)->first();
-            if ($matchByUuid) {
-                $matches->push($matchByUuid);
-            }
-        }
-        if ($email !== '') {
-            $matchByEmail = Employee::withTrashed()->where('email', $email)->first();
-            if ($matchByEmail) {
-                $matches->push($matchByEmail);
-            }
-        }
-        $uniqueMatches = $matches->unique('id')->values();
-        if ($uniqueMatches->count() > 1) {
-            return response()->json([
-                'message' => 'Conflicting identifiers for employee create request.',
-            ], 409);
-        }
-        $employee = $uniqueMatches->first();
         $created = false;
         $restored = false;
-        if (!$employee) {
-            $employee = new Employee();
-            $employee->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
-            $created = true;
-        } elseif ($employee->trashed()) {
-            $employee->restore();
-            $restored = true;
-        } elseif ($incomingUuid !== '' && $employee->uuid === $incomingUuid) {
-            // Idempotent create retry.
-        } else {
-            return response()->json([
-                'message' => 'Employee already exists.',
-                'data' => $this->employeePayload($employee),
-            ], 409);
-        }
+        $employee = null;
 
-        $updateData = $data;
-        unset($updateData['uuid']);
-        $employee->fill($updateData);
-        $employee->save();
+        DB::transaction(function () use ($data, &$employee, &$created, &$restored, $request): void {
+            $incomingUuid = (string) ($data['uuid'] ?? '');
+            $email = trim((string) ($data['email'] ?? ''));
+            $matches = collect();
+
+            if ($incomingUuid !== '') {
+                $matchByUuid = Employee::withTrashed()->where('uuid', $incomingUuid)->first();
+                if ($matchByUuid) {
+                    $matches->push($matchByUuid);
+                }
+            }
+            if ($email !== '') {
+                $matchByEmail = Employee::withTrashed()->where('email', $email)->first();
+                if ($matchByEmail) {
+                    $matches->push($matchByEmail);
+                }
+            }
+
+            $uniqueMatches = $matches->unique('id')->values();
+            if ($uniqueMatches->count() > 1) {
+                throw new HttpResponseException(response()->json([
+                    'message' => 'Conflicting identifiers for employee create request.',
+                ], 409));
+            }
+
+            $employee = $uniqueMatches->first();
+            if (! $employee) {
+                $employee = new Employee();
+                $employee->uuid = $incomingUuid !== '' ? $incomingUuid : (string) Str::uuid();
+                $created = true;
+            } elseif ($employee->trashed()) {
+                $employee->restore();
+                $restored = true;
+            } elseif ($incomingUuid !== '' && $employee->uuid === $incomingUuid) {
+                // Idempotent create retry.
+            } else {
+                throw new HttpResponseException(response()->json([
+                    'message' => 'Employee already exists.',
+                    'data' => $this->employeePayload($employee),
+                ], 409));
+            }
+
+            $updateData = $data;
+            unset(
+                $updateData['uuid'],
+                $updateData['salary_change_reason'],
+                $updateData['salary_effective_from'],
+                $updateData['salary_history_uuid']
+            );
+
+            $employee->fill($updateData);
+            $employee->save();
+
+            $this->salaryHistoryService->recordInitialSalary(
+                $employee,
+                (int) ($request->user()?->id ?? 0)
+            );
+        });
 
         return response()->json([
             'data' => $this->employeePayload($employee->fresh()),
@@ -163,17 +188,41 @@ class EmployeeController extends Controller
     public function update(StoreEmployeeRequest $request, string $uuid): JsonResponse
     {
         $employee = Employee::withTrashed()->where('uuid', $uuid)->firstOrFail();
-        if ($employee->trashed()) {
-            $employee->restore();
-        }
-
         $data = $request->validated();
-        unset($data['uuid']);
-        $employee->fill($data);
-        $employee->save();
+
+        DB::transaction(function () use ($employee, $data, $request): void {
+            if ($employee->trashed()) {
+                $employee->restore();
+            }
+
+            $previousSalary = $employee->base_salary;
+            $previousSalaryCurrency = $employee->salary_currency_code;
+            $updateData = $data;
+            unset(
+                $updateData['uuid'],
+                $updateData['salary_change_reason'],
+                $updateData['salary_effective_from'],
+                $updateData['salary_history_uuid']
+            );
+
+            $employee->fill($updateData);
+            $employee->save();
+
+            $this->salaryHistoryService->recordSalaryChange(
+                $employee,
+                $previousSalary,
+                $employee->base_salary,
+                $previousSalaryCurrency,
+                $employee->salary_currency_code,
+                isset($data['salary_effective_from']) ? (string) $data['salary_effective_from'] : null,
+                isset($data['salary_change_reason']) ? (string) $data['salary_change_reason'] : null,
+                isset($data['salary_history_uuid']) ? (string) $data['salary_history_uuid'] : null,
+                (int) ($request->user()?->id ?? 0)
+            );
+        });
 
         return response()->json([
-            'data' => $this->employeePayload($employee->fresh(['documents'])),
+            'data' => $this->employeePayload($employee->fresh()),
         ]);
     }
 
@@ -224,6 +273,7 @@ class EmployeeController extends Controller
             'job_title',
             'salary_type',
             'base_salary',
+            'salary_currency_code',
             'address',
             'email',
             'phone',
@@ -236,5 +286,3 @@ class EmployeeController extends Controller
     }
 
 }
-
-

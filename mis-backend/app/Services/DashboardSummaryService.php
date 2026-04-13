@@ -43,7 +43,7 @@ class DashboardSummaryService
         $totalNotifications = $user->notifications()->count();
 
         $recentSales = $this->recentSales();
-        [$pendingApprovalCount, $approvalSales, $approvalNotificationMap] = $this->pendingApprovals($user);
+        [$pendingApprovalCount, $approvalRows] = $this->pendingApprovals($user);
 
         $activities = $this->activities(
             $latestNotifications,
@@ -73,7 +73,7 @@ class DashboardSummaryService
             'salesChartData' => $this->salesChartData($lastSixMonthStart),
             'apartmentStatusData' => $this->apartmentStatusData($apartmentStats),
             'recentSales' => $recentSales,
-            'approvals' => $this->approvalRows($approvalSales, $approvalNotificationMap),
+            'approvals' => $approvalRows,
             'progressItems' => $this->progressItems($rentalStatusCounts),
             'activities' => $activities,
             'metrics' => $this->metrics(
@@ -228,10 +228,44 @@ class DashboardSummaryService
 
     private function pendingApprovals(Authenticatable $user): array
     {
-        $base = $this->pendingApprovalQuery();
-        $count = (clone $base)->count('apartment_sales.id');
+        $pendingSaleBase = ApartmentSale::query()
+            ->whereRaw("LOWER(COALESCE(status, '')) = 'pending'");
+        $pendingSaleCount = (clone $pendingSaleBase)->count();
 
-        $sales = (clone $base)
+        $pendingSales = (clone $pendingSaleBase)
+            ->with([
+                'customer:id,name',
+                'apartment:id,apartment_code',
+            ])
+            ->whereRaw("LOWER(COALESCE(status, '')) = 'pending'")
+            ->orderByDesc('updated_at')
+            ->limit(20)
+            ->get([
+                'id',
+                'uuid',
+                'sale_id',
+                'customer_id',
+                'apartment_id',
+                'status',
+                'updated_at',
+                'sale_date',
+            ]);
+
+        $pendingSaleUuids = $pendingSales
+            ->pluck('uuid')
+            ->filter(fn ($uuid): bool => is_string($uuid) && $uuid !== '')
+            ->values()
+            ->all();
+        $pendingSaleNotificationMap = $this->latestNotificationBySaleUuid(
+            $user,
+            $pendingSaleUuids,
+            ['sale_approval_required']
+        );
+
+        $deedBase = $this->pendingApprovalQuery();
+        $deedCount = (clone $deedBase)->count('apartment_sales.id');
+
+        $deedSales = (clone $deedBase)
             ->with([
                 'customer:id,name',
                 'apartment:id,apartment_code',
@@ -241,30 +275,81 @@ class DashboardSummaryService
             ->limit(20)
             ->get();
 
-        $saleUuids = $sales
+        $deedSaleUuids = $deedSales
             ->pluck('uuid')
             ->filter(fn ($uuid): bool => is_string($uuid) && $uuid !== '')
             ->values()
             ->all();
 
-        $notificationMap = $this->latestDeedNotificationBySaleUuid($user, $saleUuids);
+        $deedNotificationMap = $this->latestNotificationBySaleUuid(
+            $user,
+            $deedSaleUuids,
+            ['sale_deed_eligible']
+        );
 
-        $sortedSales = $sales
-            ->sortByDesc(function (ApartmentSale $sale) use ($notificationMap): int {
-                $notification = $notificationMap->get((string) $sale->uuid);
-                if ($notification instanceof DatabaseNotification && $notification->created_at) {
-                    return $notification->created_at->getTimestamp();
-                }
-                if ($sale->updated_at) {
-                    return $sale->updated_at->getTimestamp();
-                }
-                return $sale->sale_date?->getTimestamp() ?? 0;
-            })
-            ->values()
+        $pendingRows = $pendingSales
+            ->map(function (ApartmentSale $sale) use ($pendingSaleNotificationMap): array {
+                /** @var DatabaseNotification|null $notification */
+                $notification = $pendingSaleNotificationMap->get((string) $sale->uuid);
+                $data = is_array($notification?->data) ? $notification->data : [];
+                $saleId = trim((string) ($sale->sale_id ?? '')) ?: strtoupper(substr((string) $sale->uuid, 0, 8));
+                $customerName = trim((string) ($sale->customer?->name ?? 'Customer')) ?: 'Customer';
+                $apartmentName = trim((string) ($sale->apartment?->apartment_code ?? 'Apartment')) ?: 'Apartment';
+                $sortTs = $notification?->created_at?->getTimestamp()
+                    ?? $sale->updated_at?->getTimestamp()
+                    ?? $sale->sale_date?->getTimestamp()
+                    ?? 0;
+
+                return [
+                    'id' => (string) $sale->uuid,
+                    'desc' => trim((string) ($data['title'] ?? '')) ?: "Sale approval required for {$apartmentName}",
+                    'requester' => "{$customerName} - Sale {$saleId}",
+                    'time' => $this->relativeTime(
+                        $notification?->created_at?->toISOString()
+                            ?? $sale->updated_at?->toISOString()
+                            ?? $sale->sale_date?->toISOString()
+                    ),
+                    'href' => '/apartment-sales?tab=pending-approval',
+                    'sort_ts' => $sortTs,
+                ];
+            });
+
+        $deedRows = $deedSales
+            ->map(function (ApartmentSale $sale) use ($deedNotificationMap): array {
+                /** @var DatabaseNotification|null $notification */
+                $notification = $deedNotificationMap->get((string) $sale->uuid);
+                $data = is_array($notification?->data) ? $notification->data : [];
+                $saleId = trim((string) ($sale->sale_id ?? '')) ?: strtoupper(substr((string) $sale->uuid, 0, 8));
+                $customerName = trim((string) ($sale->customer?->name ?? 'Customer')) ?: 'Customer';
+                $apartmentName = trim((string) ($sale->apartment?->apartment_code ?? 'Apartment')) ?: 'Apartment';
+                $sortTs = $notification?->created_at?->getTimestamp()
+                    ?? $sale->updated_at?->getTimestamp()
+                    ?? $sale->sale_date?->getTimestamp()
+                    ?? 0;
+
+                return [
+                    'id' => (string) $sale->uuid,
+                    'desc' => trim((string) ($data['title'] ?? '')) ?: "Deed approval required for {$apartmentName}",
+                    'requester' => "{$customerName} - Sale {$saleId}",
+                    'time' => $this->relativeTime(
+                        $notification?->created_at?->toISOString()
+                            ?? $sale->updated_at?->toISOString()
+                            ?? $sale->sale_date?->toISOString()
+                    ),
+                    'href' => "/apartment-sales/{$sale->uuid}/financial",
+                    'sort_ts' => $sortTs,
+                ];
+            });
+
+        $rows = $pendingRows
+            ->concat($deedRows)
+            ->sortByDesc('sort_ts')
             ->take(6)
-            ->values();
+            ->map(fn (array $row): array => collect($row)->except('sort_ts')->all())
+            ->values()
+            ->all();
 
-        return [$count, $sortedSales, $notificationMap];
+        return [$pendingSaleCount + $deedCount, $rows];
     }
 
     private function pendingApprovalQuery(): Builder
@@ -286,57 +371,37 @@ class DashboardSummaryService
             ->where('financials.remaining_municipality', '<=', 0);
     }
 
-    private function latestDeedNotificationBySaleUuid(
+    private function latestNotificationBySaleUuid(
         Authenticatable $user,
-        array $saleUuids
+        array $saleUuids,
+        array $categories
     ): Collection {
         if ($saleUuids === []) {
             return collect();
         }
 
+        $normalizedCategories = collect($categories)
+            ->map(fn (string $category): string => strtolower(trim($category)))
+            ->filter(fn (string $category): bool => $category !== '')
+            ->values()
+            ->all();
+
         return $user->notifications()
             ->latest()
             ->limit(100)
             ->get()
-            ->filter(function (DatabaseNotification $notification) use ($saleUuids): bool {
+            ->filter(function (DatabaseNotification $notification) use ($saleUuids, $normalizedCategories): bool {
                 $data = is_array($notification->data) ? $notification->data : [];
                 $category = strtolower(trim((string) ($data['category'] ?? '')));
                 $saleUuid = trim((string) ($data['sale_uuid'] ?? ''));
 
-                return $category === 'sale_deed_eligible' && in_array($saleUuid, $saleUuids, true);
+                return in_array($category, $normalizedCategories, true) && in_array($saleUuid, $saleUuids, true);
             })
             ->groupBy(function (DatabaseNotification $notification): string {
                 $data = is_array($notification->data) ? $notification->data : [];
                 return trim((string) ($data['sale_uuid'] ?? ''));
             })
             ->map(fn (Collection $group) => $group->sortByDesc('created_at')->first());
-    }
-
-    private function approvalRows(Collection $sales, Collection $notificationMap): array
-    {
-        return $sales
-            ->map(function (ApartmentSale $sale) use ($notificationMap): array {
-                /** @var DatabaseNotification|null $notification */
-                $notification = $notificationMap->get((string) $sale->uuid);
-                $data = is_array($notification?->data) ? $notification->data : [];
-                $saleId = trim((string) ($sale->sale_id ?? '')) ?: strtoupper(substr((string) $sale->uuid, 0, 8));
-                $customerName = trim((string) ($sale->customer?->name ?? 'Customer')) ?: 'Customer';
-                $apartmentName = trim((string) ($sale->apartment?->apartment_code ?? 'Apartment')) ?: 'Apartment';
-
-                return [
-                    'id' => (string) $sale->uuid,
-                    'desc' => trim((string) ($data['title'] ?? '')) ?: "Deed approval required for {$apartmentName}",
-                    'requester' => "{$customerName} - Sale {$saleId}",
-                    'time' => $this->relativeTime(
-                        $notification?->created_at?->toISOString()
-                            ?? $sale->updated_at?->toISOString()
-                            ?? $sale->sale_date?->toISOString()
-                    ),
-                    'href' => "/apartment-sales/{$sale->uuid}/financial",
-                ];
-            })
-            ->values()
-            ->all();
     }
 
     private function salesChartData(CarbonImmutable $startMonth): array

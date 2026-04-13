@@ -8,11 +8,13 @@ use App\Models\ApartmentRental;
 use App\Models\ApartmentSale;
 use App\Models\Customer;
 use App\Models\Document;
+use App\Models\DocumentType;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -31,6 +33,7 @@ class DocumentController extends Controller
             'customer_image' => 'Customer Image',
             'customer_deed_document' => 'Customer Deed Document',
             'customer_attachment' => 'Customer Attachment',
+            'customer_representative_image' => 'Customer Representative Image',
         ],
         'apartment' => [
             'apartment_image' => 'Apartment Image',
@@ -47,6 +50,11 @@ class DocumentController extends Controller
             'tenant_document' => 'Tenant Document',
         ],
     ];
+
+    private ?bool $documentTypesTableReady = null;
+
+    /** @var array<string, array<string, string>> */
+    private array $documentTypeLabelCache = [];
 
     public function index(Request $request): JsonResponse
     {
@@ -100,10 +108,7 @@ class DocumentController extends Controller
         return response()->json([
             'module' => $module,
             'label' => self::MODULES[$module],
-            'document_types' => collect(self::DOCUMENT_TYPES[$module] ?? [])->map(fn (string $label, string $value): array => [
-                'value' => $value,
-                'label' => $label,
-            ])->values()->all(),
+            'document_types' => $this->documentTypeOptions($module, true),
             'data' => $this->loadReferenceOptions($module),
         ]);
     }
@@ -118,7 +123,7 @@ class DocumentController extends Controller
 
         $module = (string) $validated['module'];
         $typeValidated = $request->validate([
-            'document_type' => ['required', 'string', Rule::in($this->documentTypesForModule($module))],
+            'document_type' => ['required', 'string', Rule::in($this->documentTypesForModule($module, true))],
         ]);
 
         $referenceId = (int) $validated['reference_id'];
@@ -179,9 +184,44 @@ class DocumentController extends Controller
     }
 
     /** @return array<string> */
-    private function documentTypesForModule(string $module): array
+    private function documentTypesForModule(string $module, bool $activeOnly = true): array
     {
-        return array_keys(self::DOCUMENT_TYPES[$module] ?? []);
+        return array_map(
+            static fn (array $item): string => (string) $item['value'],
+            $this->documentTypeOptions($module, $activeOnly)
+        );
+    }
+
+    /** @return array<int, array{value:string,label:string}> */
+    private function documentTypeOptions(string $module, bool $activeOnly = true): array
+    {
+        if ($this->documentTypesTableReady()) {
+            $query = DocumentType::query()->where('module', $module)->orderBy('label');
+            if ($activeOnly) {
+                $query->where('is_active', true);
+            }
+
+            return $query->get(['code', 'label'])->map(fn (DocumentType $documentType): array => [
+                'value' => (string) $documentType->code,
+                'label' => (string) $documentType->label,
+            ])->values()->all();
+        }
+
+        return collect(self::DOCUMENT_TYPES[$module] ?? [])->map(fn (string $label, string $value): array => [
+            'value' => $value,
+            'label' => $label,
+        ])->values()->all();
+    }
+
+    private function documentTypesTableReady(): bool
+    {
+        if ($this->documentTypesTableReady !== null) {
+            return $this->documentTypesTableReady;
+        }
+
+        $this->documentTypesTableReady = Schema::hasTable('document_types');
+
+        return $this->documentTypesTableReady;
     }
 
     /** @return array<int, array{id:int,label:string}> */
@@ -355,7 +395,37 @@ class DocumentController extends Controller
 
     private function documentTypeLabel(string $module, string $documentType): string
     {
-        return self::DOCUMENT_TYPES[$module][$documentType]
+        $labels = $this->documentTypeLabelMap($module);
+
+        return $labels[$documentType]
             ?? Str::title(str_replace('_', ' ', $documentType));
     }
+
+    /** @return array<string, string> */
+    private function documentTypeLabelMap(string $module): array
+    {
+        if (array_key_exists($module, $this->documentTypeLabelCache)) {
+            return $this->documentTypeLabelCache[$module];
+        }
+
+        if ($this->documentTypesTableReady()) {
+            $map = [];
+            DocumentType::query()
+                ->where('module', $module)
+                ->orderBy('label')
+                ->get(['code', 'label'])
+                ->each(function (DocumentType $documentType) use (&$map): void {
+                    $map[(string) $documentType->code] = (string) $documentType->label;
+                });
+
+            $this->documentTypeLabelCache[$module] = $map;
+
+            return $this->documentTypeLabelCache[$module];
+        }
+
+        $this->documentTypeLabelCache[$module] = self::DOCUMENT_TYPES[$module] ?? [];
+
+        return $this->documentTypeLabelCache[$module];
+    }
 }
+

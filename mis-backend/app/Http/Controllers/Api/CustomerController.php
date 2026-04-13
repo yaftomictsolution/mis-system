@@ -37,11 +37,32 @@ class CustomerController extends Controller
                 'name',
                 'fname',
                 'gname',
+                'job_title',
+                'tazkira_number',
                 'phone',
                 'phone1',
                 'email',
                 'status',
                 'address',
+                'current_area',
+                'current_district',
+                'current_province',
+                'original_area',
+                'original_district',
+                'original_province',
+                'representative_name',
+                'representative_fname',
+                'representative_gname',
+                'representative_job_title',
+                'representative_relationship',
+                'representative_phone',
+                'representative_tazkira_number',
+                'representative_current_area',
+                'representative_current_district',
+                'representative_current_province',
+                'representative_original_area',
+                'representative_original_district',
+                'representative_original_province',
                 'updated_at',
                 'deleted_at',
             ])
@@ -63,7 +84,12 @@ class CustomerController extends Controller
                     ->orWhere('gname', 'like', "%{$search}%")
                     ->orWhere('phone', 'like', "%{$search}%")
                     ->orWhere('phone1', 'like', "%{$search}%")
-                    ->orWhere('email', 'like', "%{$search}%");
+                    ->orWhere('email', 'like', "%{$search}%")
+                    ->orWhere('job_title', 'like', "%{$search}%")
+                    ->orWhere('tazkira_number', 'like', "%{$search}%")
+                    ->orWhere('representative_name', 'like', "%{$search}%")
+                    ->orWhere('representative_phone', 'like', "%{$search}%")
+                    ->orWhere('representative_tazkira_number', 'like', "%{$search}%");
             });
         }
 
@@ -288,11 +314,32 @@ class CustomerController extends Controller
             'name',
             'fname',
             'gname',
+            'job_title',
+            'tazkira_number',
             'phone',
             'phone1',
             'email',
             'status',
             'address',
+            'current_area',
+            'current_district',
+            'current_province',
+            'original_area',
+            'original_district',
+            'original_province',
+            'representative_name',
+            'representative_fname',
+            'representative_gname',
+            'representative_job_title',
+            'representative_relationship',
+            'representative_phone',
+            'representative_tazkira_number',
+            'representative_current_area',
+            'representative_current_district',
+            'representative_current_province',
+            'representative_original_area',
+            'representative_original_district',
+            'representative_original_province',
             'updated_at',
             'deleted_at',
         ]);
@@ -398,5 +445,6 @@ class CustomerController extends Controller
         return 'customer_attachment';
     }
 }
+
 
 

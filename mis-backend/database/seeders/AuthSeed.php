@@ -3,16 +3,14 @@
 namespace Database\Seeders;
 
 use App\Models\Roles;
-use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Spatie\Permission\Models\Permission;
 
 class AuthSeed extends Seeder
 {
-    public function run()
+    public function run(): void
     {
         $roles = [
             'Admin',
@@ -23,11 +21,12 @@ class AuthSeed extends Seeder
             'Storekeeper',
             'ProcurementOfficer',
             'Auditor',
+            'Customer',
         ];
 
-        foreach ($roles as $r) {
+        foreach ($roles as $roleName) {
             $role = Roles::withTrashed()->firstOrNew([
-                'name' => $r,
+                'name' => $roleName,
                 'guard_name' => 'web',
             ]);
 
@@ -49,28 +48,11 @@ class AuthSeed extends Seeder
             ->values()
             ->all();
 
-        foreach ($permissions as $p) {
+        foreach ($permissions as $permissionName) {
             Permission::firstOrCreate([
-                'name' => $p,
+                'name' => $permissionName,
                 'guard_name' => 'web',
             ]);
         }
-
-        // Admin has all permissions
-        // $adminRole = Role::where('name', 'Admin')->first();
-        // $adminRole->syncPermissions(Permission::all());
-
-        // $admin = User::firstOrCreate(
-        //     ['email' => 'admin@example.com'],
-        //     [
-        //         'uuid' => (string) Str::uuid(),
-        //         'name' => 'System Admin',
-        //         'phone' => '000000000',
-        //         'password' => Hash::make('password123'),
-        //         'status' => 'active',
-        //     ]
-        // );
-
-        // $admin->assignRole('Admin');
     }
 }

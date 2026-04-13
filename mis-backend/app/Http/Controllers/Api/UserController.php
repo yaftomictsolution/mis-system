@@ -2,25 +2,21 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
+use App\Http\Requests\UserRequest;
 use App\Models\User;
 use App\Support\PermanentDeleteDependencyInspector;
-use Illuminate\Validation\Rule;
-use Spatie\Permission\Models\Role;
 use Illuminate\Http\JsonResponse;
-use App\Http\Requests\UserRequest;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
+use Spatie\Permission\Models\Role;
 
 class UserController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
-    public function index(Request $request)
+    public function index(Request $request): JsonResponse
     {
-        
         $validated = $request->validate([
             'q' => ['nullable', 'string', 'max:255'],
             'since' => ['nullable', 'date'],
@@ -29,10 +25,9 @@ class UserController extends Controller
             'per_page' => ['nullable', 'integer', 'min:1', 'max:200'],
         ]);
 
-        $offline = $request->boolean('offline');   // ✅ real boolean
-        $since   = $validated['since'] ?? null;
-
-        $includeDeleted = $offline || !is_null($since);
+        $offline = $request->boolean('offline');
+        $since = $validated['since'] ?? null;
+        $includeDeleted = $offline || ! is_null($since);
 
         $query = User::query()
             ->select([
@@ -41,9 +36,14 @@ class UserController extends Controller
                 'name',
                 'full_name',
                 'email',
+                'customer_id',
                 'updated_at',
                 'deleted_at',
-            ])->with(['roles:id,name'])
+            ])
+            ->with([
+                'roles:id,name',
+                'customer:id,uuid,name',
+            ])
             ->orderByDesc('updated_at');
 
         if ($includeDeleted) {
@@ -52,27 +52,31 @@ class UserController extends Controller
 
         $search = trim((string) ($validated['q'] ?? ''));
         if ($search !== '') {
-            $query->where(function ($builder) use ($search) {
+            $query->where(function ($builder) use ($search): void {
                 $builder
                     ->where('name', 'like', "%{$search}%")
-                    ->orWhere('full_name', 'like', "%{$search}%");
+                    ->orWhere('full_name', 'like', "%{$search}%")
+                    ->orWhere('email', 'like', "%{$search}%")
+                    ->orWhereHas('customer', function ($customerQuery) use ($search): void {
+                        $customerQuery->where('name', 'like', "%{$search}%");
+                    });
             });
         }
 
-        if (! empty($validated['since'])) {
-            $since = $validated['since'];
-            $query->where(function ($builder) use ($since) {
+        if ($since) {
+            $query->where(function ($builder) use ($since): void {
                 $builder
                     ->where('updated_at', '>', $since)
                     ->orWhere('deleted_at', '>', $since);
             });
         }
-        if (! empty($validated['offline'])) {
+
+        if ($offline) {
             $windowStart = now()->subMonths(6);
-            $query->where(function ($builder) use ($windowStart) {
+            $query->where(function ($builder) use ($windowStart): void {
                 $builder
                     ->where('updated_at', '>=', $windowStart)
-                    ->orWhere(function ($deleted) use ($windowStart) {
+                    ->orWhere(function ($deleted) use ($windowStart): void {
                         $deleted
                             ->whereNotNull('deleted_at')
                             ->where('deleted_at', '>=', $windowStart);
@@ -84,7 +88,7 @@ class UserController extends Controller
         $page = (int) ($validated['page'] ?? 1);
         $paginator = $query->paginate($perPage, ['*'], 'page', $page);
         $items = collect($paginator->items())
-            ->map(fn (User $user) => $this->UserPayload($user))
+            ->map(fn (User $user) => $this->userPayload($user))
             ->values()
             ->all();
 
@@ -98,26 +102,14 @@ class UserController extends Controller
                 'server_time' => now()->toISOString(),
             ],
         ]);
-
-    }
-    /**
-     * Show the form for creating a new resource.
-     */
-    public function create()
-    {
-        //
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
-    public function store(Request $request)
+    public function store(Request $request): JsonResponse
     {
         $incomingUuid = (string) ($request->input('uuid') ?? '');
-        $existingForValidation = null;
-        if ($incomingUuid !== '') {
-            $existingForValidation = User::withTrashed()->where('uuid', $incomingUuid)->first();
-        }
+        $existingForValidation = $incomingUuid !== ''
+            ? User::withTrashed()->where('uuid', $incomingUuid)->first()
+            : null;
 
         $data = $request->validate([
             'uuid' => ['nullable', 'uuid'],
@@ -132,7 +124,20 @@ class UserController extends Controller
             ],
             'password' => ['required', 'string', 'max:255'],
             'role' => ['nullable', 'string', 'max:255'],
+            'customer_id' => [
+                'nullable',
+                'integer',
+                'min:1',
+                Rule::exists('customers', 'id'),
+                Rule::unique('users', 'customer_id')
+                    ->whereNull('deleted_at')
+                    ->ignore($existingForValidation?->id),
+            ],
         ]);
+
+        $role = trim((string) ($data['role'] ?? ''));
+        $customerId = (int) ($data['customer_id'] ?? 0);
+        $this->validateCustomerPortalLink($role, $customerId);
 
         $incomingUuid = (string) ($data['uuid'] ?? '');
         $email = trim((string) ($data['email'] ?? ''));
@@ -160,80 +165,69 @@ class UserController extends Controller
         } else {
             return response()->json([
                 'message' => 'User already exists.',
-                'data' => $this->UserPayload($user->loadMissing('roles')),
+                'data' => $this->userPayload($user->loadMissing(['roles', 'customer'])),
             ], 409);
         }
 
-        $user->name = $data['name'];
-        $user->full_name = $data['name'];
+        $user->name = trim((string) $data['name']);
+        $user->full_name = trim((string) $data['name']);
         $user->email = $data['email'] ?? null;
-        $user->password = Hash::make($data['password']);
+        $user->password = Hash::make((string) $data['password']);
+        $user->customer_id = $role === 'Customer' && $customerId > 0 ? $customerId : null;
         $user->save();
 
-        $role = trim((string) ($data['role'] ?? ''));
         if ($role !== '') {
             $user->syncRoles([$role]);
+        } else {
+            $user->syncRoles([]);
         }
 
         return response()->json([
-            'data' => $this->UserPayload($user->fresh()),
+            'data' => $this->userPayload($user->fresh()->loadMissing(['roles', 'customer'])),
             'restored' => $restored,
         ], $created ? 201 : 200);
     }
 
-    /**
-     * Display the specified resource.
-     */
-    public function show(string $id)
-    {
-        //
-    }
-
-    /**
-     * Show the form for editing the specified resource.
-     */
-    public function edit(string $id)
-    {
-        //
-    }
-    /**
-     * Update the specified resource in storage.
-     */
-    public function update(UserRequest $request, string $uuid)
+    public function update(UserRequest $request, string $uuid): JsonResponse
     {
         $user = User::withTrashed()->where('uuid', $uuid)->firstOrFail();
         if ($user->trashed()) {
             $user->restore();
         }
+
         $data = $request->validated();
+        $role = trim((string) ($data['role'] ?? ''));
+        $customerId = (int) ($data['customer_id'] ?? 0);
+        $this->validateCustomerPortalLink($role, $customerId);
+
         $updateData = [
-            'name' => $data['name'],
-            'full_name' => $data['name'],
+            'name' => trim((string) $data['name']),
+            'full_name' => trim((string) $data['name']),
             'email' => $data['email'] ?? null,
+            'customer_id' => $role === 'Customer' && $customerId > 0 ? $customerId : null,
         ];
 
         if (! empty($data['password'])) {
-            $updateData['password'] = Hash::make($data['password']);
+            $updateData['password'] = Hash::make((string) $data['password']);
         }
+
         $user->fill($updateData);
         $user->save();
+
         if ($request->has('role')) {
-            $role = trim((string) ($data['role'] ?? ''));
             if ($role !== '') {
                 $user->syncRoles([$role]);
             } else {
                 $user->syncRoles([]);
             }
         }
+
         return response()->json([
-            'data' => $this->UserPayload($user->fresh()),
+            'data' => $this->userPayload($user->fresh()->loadMissing(['roles', 'customer'])),
         ]);
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
-    public function destroy(string $uuid)
+    public function destroy(string $uuid): JsonResponse
     {
         $user = User::withTrashed()->where('uuid', $uuid)->first();
         if ($user && ! $user->trashed()) {
@@ -271,8 +265,42 @@ class UserController extends Controller
         ]);
     }
 
-    private function UserPayload(User $user): array
+    public function roleOptions(): JsonResponse
     {
+        $roles = Role::query()
+            ->select('id', 'name')
+            ->orderBy('name')
+            ->get()
+            ->map(fn (Role $role): array => [
+                'id' => $role->id,
+                'name' => $role->name,
+            ])
+            ->values();
+
+        return response()->json([
+            'data' => $roles,
+        ]);
+    }
+
+    private function validateCustomerPortalLink(string $role, int $customerId): void
+    {
+        if ($role === 'Customer' && $customerId <= 0) {
+            throw ValidationException::withMessages([
+                'customer_id' => ['Linked customer is required for Customer portal accounts.'],
+            ]);
+        }
+
+        if ($role !== '' && $role !== 'Customer' && $customerId > 0) {
+            throw ValidationException::withMessages([
+                'customer_id' => ['Only the Customer role can be linked to a customer account.'],
+            ]);
+        }
+    }
+
+    private function userPayload(User $user): array
+    {
+        $user->loadMissing(['roles', 'customer']);
+
         $roles = $user->relationLoaded('roles')
             ? $user->roles->pluck('name')->filter()->values()->all()
             : $user->roles()->pluck('name')->filter()->values()->all();
@@ -282,29 +310,11 @@ class UserController extends Controller
             'name' => $user->full_name ?? $user->name,
             'email' => $user->email,
             'roles' => $roles,
-            'updated_at' => $user->updated_at,
+            'customer_id' => $user->customer_id,
+            'customer_uuid' => $user->customer?->uuid,
+            'customer_name' => $user->customer?->name,
+            'updated_at' => $user->updated_at?->toISOString(),
             'deleted_at' => $user->deleted_at?->toISOString(),
         ];
     }
-
-     public function roleOptions(): JsonResponse
-    {
-        $roles = Role::query()
-            ->select('id', 'name')
-            ->orderBy('name')
-            ->get()
-            ->map(function ($role) {
-                return [
-                    'id'   => $role->id,
-                    'name' => $role->name,
-                ];
-            })
-            ->values();
-        return response()->json([
-            'data' => $roles,
-        ]);
-    }
-
 }
-
-

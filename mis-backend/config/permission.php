@@ -198,6 +198,15 @@ return [
             'payroll.advance',
             'payroll.approve',
         ],
+        'Finance' => [
+            'accounts.view',
+            'accounts.create',
+            'accounts.update',
+            'account_transactions.view',
+            'exchange_rates.view',
+            'exchange_rates.create',
+            'exchange_rates.update',
+        ],
         'Apartment' => [
             'apartments.view',
             'apartments.create',

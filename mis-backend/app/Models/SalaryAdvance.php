@@ -16,6 +16,9 @@ class SalaryAdvance extends Model
         'uuid',
         'employee_id',
         'amount',
+        'currency_code',
+        'deducted_amount',
+        'remaining_amount',
         'user_id',
         'reason',
         'status',
@@ -24,6 +27,8 @@ class SalaryAdvance extends Model
     protected $casts = [
         'employee_id' => 'integer',
         'amount' => 'decimal:2',
+        'deducted_amount' => 'decimal:2',
+        'remaining_amount' => 'decimal:2',
         'user_id' => 'integer',
     ];
 
@@ -35,5 +40,10 @@ class SalaryAdvance extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id');
+    }
+
+    public function deductions()
+    {
+        return $this->hasMany(SalaryAdvanceDeduction::class, 'salary_advance_id');
     }
 }

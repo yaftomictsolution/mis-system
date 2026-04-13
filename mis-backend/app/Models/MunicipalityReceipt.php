@@ -16,6 +16,11 @@ class MunicipalityReceipt extends Model
         'payment_method',
         'notes',
         'received_by',
+        'account_id',
+        'account_transaction_id',
+        'payment_currency_code',
+        'exchange_rate_snapshot',
+        'account_amount',
     ];
 
     protected $casts = [
@@ -23,6 +28,10 @@ class MunicipalityReceipt extends Model
         'payment_date' => 'date',
         'amount' => 'decimal:2',
         'received_by' => 'integer',
+        'account_id' => 'integer',
+        'account_transaction_id' => 'integer',
+        'exchange_rate_snapshot' => 'decimal:6',
+        'account_amount' => 'decimal:2',
         'updated_at' => 'datetime',
     ];
 
@@ -30,5 +39,14 @@ class MunicipalityReceipt extends Model
     {
         return $this->belongsTo(ApartmentSale::class, 'apartment_sale_id');
     }
-}
 
+    public function account(): BelongsTo
+    {
+        return $this->belongsTo(Account::class, 'account_id')->withTrashed();
+    }
+
+    public function accountTransaction(): BelongsTo
+    {
+        return $this->belongsTo(AccountTransaction::class, 'account_transaction_id');
+    }
+}

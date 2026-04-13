@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Apartment extends Model
@@ -28,6 +29,10 @@ class Apartment extends Model
         'area_sqm',
         'apartment_shape',
         'corridor',
+        'north_boundary',
+        'south_boundary',
+        'east_boundary',
+        'west_boundary',
         'status',
         'qr_code',
         'additional_info',
@@ -54,5 +59,10 @@ class Apartment extends Model
     {
         return $this->hasMany(Document::class, 'reference_id')
             ->where('module', 'apartment');
+    }
+
+    public function qrAccessToken(): HasOne
+    {
+        return $this->hasOne(ApartmentQrAccessToken::class, 'apartment_id');
     }
 }
