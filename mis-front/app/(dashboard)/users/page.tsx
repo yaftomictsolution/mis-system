@@ -9,12 +9,14 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { DataTable, type Column } from "@/components/ui/DataTable";
 import { Modal } from "@/components/ui/modal";
 import { type UserRow } from "@/db/localDB";
+import { customersListLocal, customersPullToLocal } from "@/modules/customers/customers.repo";
+import { userRolePullToLocal } from "@/modules/userRoles/userRoles.repo";
 import {
   UserListLocal,
+  getRolesForDropdown,
   userCreate,
   userDelete,
   userPullToLocal,
-  userRoleOptions,
   userUpdate,
 } from "@/modules/users/users.repo";
 
@@ -22,6 +24,7 @@ const LOCAL_LIST_PAGE_SIZE = 200;
 const TABLE_PAGE_SIZE = 10;
 
 type UserViewRow = UserRow & { role?: string };
+type CustomerOption = { value: string; label: string };
 
 const emptyUser = (): Partial<UserViewRow> => ({});
 
@@ -45,6 +48,7 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [roleOptions, setRoleOptions] = useState<string[]>([]);
+  const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
   const [current, setCurrent] = useState<Partial<UserViewRow>>(emptyUser);
   const [formError, setFormError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -55,6 +59,18 @@ export default function UsersPage() {
   const loadLocal = useCallback(async () => {
     const local = await UserListLocal({ page: 1, pageSize: LOCAL_LIST_PAGE_SIZE });
     setData(local.items.map((item) => ({ ...item })));
+  }, []);
+
+  const loadRoleOptions = useCallback(async () => {
+    const initial = await getRolesForDropdown();
+    if (initial.length > 0) {
+      setRoleOptions([...new Set(initial)].sort((a, b) => a.localeCompare(b)));
+    }
+
+    await userRolePullToLocal().catch(() => undefined);
+
+    const refreshed = await getRolesForDropdown();
+    setRoleOptions([...new Set(refreshed)].sort((a, b) => a.localeCompare(b)));
   }, []);
 
   const refresh = useCallback(async () => {
@@ -73,7 +89,37 @@ export default function UsersPage() {
   }, [refresh]);
 
   useEffect(() => {
-    void userRoleOptions().then(setRoleOptions);
+    void loadRoleOptions();
+  }, [loadRoleOptions]);
+
+  useEffect(() => {
+    const loadCustomers = async () => {
+      const local = await customersListLocal({ page: 1, pageSize: 500 });
+      setCustomerOptions(
+        local.items
+          .filter((item) => Number(item.id ?? 0) > 0)
+          .map((item) => ({
+            value: String(item.id),
+            label: `${item.name} (${item.phone || "-"})`,
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label))
+      );
+
+      await customersPullToLocal().catch(() => undefined);
+
+      const refreshed = await customersListLocal({ page: 1, pageSize: 500 });
+      setCustomerOptions(
+        refreshed.items
+          .filter((item) => Number(item.id ?? 0) > 0)
+          .map((item) => ({
+            value: String(item.id),
+            label: `${item.name} (${item.phone || "-"})`,
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label))
+      );
+    };
+
+    void loadCustomers();
   }, []);
 
   useEffect(() => {
@@ -87,17 +133,19 @@ export default function UsersPage() {
     setFormError(null);
   }, []);
 
-  const openCreate = useCallback(() => {
+  const openCreate = useCallback(async () => {
     resetCurrent();
     setFormError(null);
+    await loadRoleOptions();
     setIsModalOpen(true);
-  }, [resetCurrent]);
+  }, [loadRoleOptions, resetCurrent]);
 
-  const openEdit = useCallback((item: UserViewRow) => {
+  const openEdit = useCallback(async (item: UserViewRow) => {
     setFormError(null);
+    await loadRoleOptions();
     setCurrent({ ...item, role: item.role ?? item.roles?.[0] ?? "" });
     setIsModalOpen(true);
-  }, []);
+  }, [loadRoleOptions]);
 
   const openDelete = useCallback((item: UserViewRow) => {
     setCurrent(item);
@@ -113,12 +161,19 @@ export default function UsersPage() {
     }
 
     const selectedRole = (current.role ?? current.roles?.[0] ?? "").trim();
+    const customerId = Number(current.customer_id ?? 0);
+    if (selectedRole.toLowerCase() === "customer" && customerId <= 0) {
+      setFormError("Linked customer is required for Customer portal users.");
+      return;
+    }
+
     const payload = {
       name,
       email: (current.email ?? "").trim() || null,
       password: (current.password ?? "").trim() || null,
       role: selectedRole || null,
       roles: selectedRole ? [selectedRole] : [],
+      customer_id: customerId > 0 ? customerId : null,
     };
 
     setSaving(true);
@@ -181,6 +236,16 @@ export default function UsersPage() {
         },
       },
       {
+        key: "customer_name",
+        label: "Linked Customer",
+        render: (item) =>
+          item.customer_name ? (
+            <div className="text-sm text-slate-700 dark:text-slate-300">{item.customer_name}</div>
+          ) : (
+            <span className="text-slate-400">-</span>
+          ),
+      },
+      {
         key: "createdAt",
         label: "Created At",
         render: (item) => <div className="font-medium">{formatDate(item.updated_at)}</div>,
@@ -208,7 +273,7 @@ export default function UsersPage() {
           loading={loading}
           onEdit={openEdit}
           onDelete={openDelete}
-          searchKeys={["name", "roles"]}
+          searchKeys={["name", "roles", "customer_name"]}
           pageSize={TABLE_PAGE_SIZE}
         />
 
@@ -239,6 +304,24 @@ export default function UsersPage() {
               options={roleOptions.map((role) => ({ value: role, label: role }))}
               placeholder="Select role"
               onChange={(val) => setCurrent({ ...current, role: val as string })}
+            />
+            <FormField
+              label="Linked Customer"
+              type="select"
+              value={current.customer_id ? String(current.customer_id) : ""}
+              options={customerOptions}
+              placeholder="Select customer"
+              onChange={(val) =>
+                setCurrent((prev) => {
+                  const selectedValue = String(val ?? "").trim();
+                  const selected = customerOptions.find((item) => item.value === selectedValue);
+                  return {
+                    ...prev,
+                    customer_id: selectedValue ? Number(selectedValue) : null,
+                    customer_name: selected ? selected.label : null,
+                  };
+                })
+              }
             />
           </div>
 

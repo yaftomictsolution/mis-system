@@ -11,18 +11,23 @@ import type { ApartmentRow, CustomerRow } from "@/db/localDB";
 import {
   createEmptyApartmentSaleForm,
   type ApartmentSaleFormData,
-  statusFromPaymentType,
 } from "@/components/apartment-sales/apartment-sale.type";
 import {
   LOOKUP_PAGE_SIZE,
+  buildSalePayload,
   normalizeCustomDates,
   normalizeFrequency,
 } from "@/components/apartment-sales/apartment-sale.page-helpers";
 import { apartmentSaleCreate, apartmentSaleListLocal } from "@/modules/apartment-sales/apartment-sales.repo";
-import { municipalityLetterGenerate } from "@/modules/apartment-sale-financials/municipality-workflow.repo";
 import { apartmentsListLocal, apartmentsPullToLocal } from "@/modules/apartments/apartments.repo";
 import { customersListLocal, customersPullToLocal } from "@/modules/customers/customers.repo";
-import { notifyError, notifySuccess } from "@/lib/notify";
+import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { subscribeAppEvent } from "@/lib/appEvents";
+import {
+  documentTypeOptionsLocal,
+  documentTypesPullToLocal,
+} from "@/modules/document-types/document-types.repo";
+import { documentUpload, type DocumentTypeOption } from "@/modules/documents/documents.repo";
 import type { RootState } from "@/store/store";
 
 export default function ApartmentSalesPage() {
@@ -38,6 +43,10 @@ export default function ApartmentSalesPage() {
 
   const [customers, setCustomers] = useState<CustomerRow[]>([]);
   const [apartments, setApartments] = useState<ApartmentRow[]>([]);
+  const [saleDocumentTypes, setSaleDocumentTypes] = useState<DocumentTypeOption[]>([]);
+  const [selectedSaleDocumentType, setSelectedSaleDocumentType] = useState("");
+  const [saleFiles, setSaleFiles] = useState<File[]>([]);
+  const [loadingSaleDocumentTypes, setLoadingSaleDocumentTypes] = useState(true);
   const [customerAssignedCountById, setCustomerAssignedCountById] = useState<Map<number, number>>(new Map());
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -95,6 +104,34 @@ export default function ApartmentSalesPage() {
     return countByCustomer;
   }, []);
 
+  const loadSaleDocumentTypes = useCallback(async (): Promise<DocumentTypeOption[]> => {
+    const local = await documentTypeOptionsLocal("apartment_sale");
+    return local;
+  }, []);
+
+  const refreshSaleDocumentTypes = useCallback(async (showLoader = true) => {
+    if (showLoader) setLoadingSaleDocumentTypes(true);
+    try {
+      const local = await loadSaleDocumentTypes();
+      if (local.length > 0) {
+        setSaleDocumentTypes(local);
+        setSelectedSaleDocumentType((current) => (local.some((item) => item.value === current) ? current : local[0]?.value ?? ""));
+      }
+
+      try {
+        await documentTypesPullToLocal();
+      } catch {
+        // Keep local document types if pull fails.
+      }
+
+      const fresh = await loadSaleDocumentTypes();
+      setSaleDocumentTypes(fresh);
+      setSelectedSaleDocumentType((current) => (fresh.some((item) => item.value === current) ? current : fresh[0]?.value ?? ""));
+    } finally {
+      if (showLoader) setLoadingSaleDocumentTypes(false);
+    }
+  }, [loadSaleDocumentTypes]);
+
   // Refreshes create lookups from local and online pull.
   const refreshLookups = useCallback(async () => {
     const [localCustomers, localApartments, localAssignedCount] = await Promise.all([
@@ -107,8 +144,13 @@ export default function ApartmentSalesPage() {
     setCustomerAssignedCountById(localAssignedCount);
 
     try {
-      const [customersPull, apartmentsPull] = await Promise.all([customersPullToLocal(), apartmentsPullToLocal()]);
-      const pulledAny = (customersPull?.pulled ?? 0) > 0 || (apartmentsPull?.pulled ?? 0) > 0;
+      const [customersPull, apartmentsPull] = await Promise.all([
+        customersPullToLocal(),
+        apartmentsPullToLocal(),
+      ]);
+      const pulledAny =
+        (customersPull?.pulled ?? 0) > 0 ||
+        (apartmentsPull?.pulled ?? 0) > 0;
       if (pulledAny) {
         const [freshCustomers, freshApartments, freshAssignedCount] = await Promise.all([
           loadAllCustomers(),
@@ -126,6 +168,26 @@ export default function ApartmentSalesPage() {
   useEffect(() => {
     void refreshLookups();
   }, [refreshLookups]);
+
+  useEffect(() => {
+    void refreshSaleDocumentTypes();
+  }, [refreshSaleDocumentTypes]);
+
+  useEffect(() => {
+    const onSyncComplete = () => {
+      void refreshLookups();
+      void refreshSaleDocumentTypes(false);
+    };
+    const unsubscribeTypes = subscribeAppEvent("document-types:changed", () => {
+      void refreshSaleDocumentTypes(false);
+    });
+
+    window.addEventListener("sync:complete", onSyncComplete as EventListener);
+    return () => {
+      unsubscribeTypes();
+      window.removeEventListener("sync:complete", onSyncComplete as EventListener);
+    };
+  }, [refreshLookups, refreshSaleDocumentTypes]);
 
   // Customer dropdown options for create form.
   const customerOptions = useMemo(
@@ -182,7 +244,59 @@ export default function ApartmentSalesPage() {
     setFormOpen(false);
     setFormError(null);
     setForm(createEmptyApartmentSaleForm());
-  }, []);
+    setSaleFiles([]);
+    setSelectedSaleDocumentType((current) =>
+      saleDocumentTypes.some((item) => item.value === current) ? current : saleDocumentTypes[0]?.value ?? ""
+    );
+  }, [saleDocumentTypes]);
+
+  const handleSaleDocumentUploads = useCallback(
+    async (sale: { id?: number; uuid: string; sale_id?: string }): Promise<void> => {
+      if (saleFiles.length === 0) return;
+
+      const selectedTypeLabel = saleDocumentTypes.find((item) => item.value === selectedSaleDocumentType)?.label;
+      const referenceId = typeof sale.id === "number" && sale.id > 0 ? sale.id : undefined;
+      const referenceLabel = sale.sale_id?.trim()
+        ? `${sale.sale_id} - ${referenceId ? "Apartment Sale" : "Awaiting sale sync"}`
+        : referenceId
+          ? "Apartment Sale"
+          : "Pending apartment sale sync";
+      const results = await Promise.allSettled(
+        saleFiles.map((file) =>
+          documentUpload({
+            module: "apartment_sale",
+            documentType: selectedSaleDocumentType,
+            documentTypeLabel: selectedTypeLabel,
+            referenceId,
+            referenceUuid: sale.uuid,
+            referenceLabel,
+            file,
+          })
+        )
+      );
+
+      const succeeded = results.filter((item) => item.status === "fulfilled").length;
+      const failed = results.length - succeeded;
+      const offlineSaved = results.filter(
+        (item) => item.status === "fulfilled" && item.value.local_only
+      ).length;
+
+      if (succeeded > 0) {
+        notifySuccess(
+          offlineSaved === succeeded
+            ? `${succeeded} sale document${succeeded === 1 ? "" : "s"} saved offline. They will sync when online.`
+            : `${succeeded} sale document${succeeded === 1 ? "" : "s"} attached successfully.`
+        );
+      }
+
+      if (failed > 0) {
+        notifyInfo(
+          `Sale created, but ${failed} attachment${failed === 1 ? "" : "s"} could not be uploaded. You can add them later from Documents.`
+        );
+      }
+    },
+    [saleDocumentTypes, saleFiles, selectedSaleDocumentType]
+  );
 
   // Validates and creates a new sale from page-level create form.
   const handleCreateSale = useCallback(async () => {
@@ -213,21 +327,16 @@ export default function ApartmentSalesPage() {
       setFormError("Discount must be between 0 and total price.");
       return;
     }
+    if (saleFiles.length > 0 && !selectedSaleDocumentType) {
+      setFormError("Please choose a document type for the sale attachments.");
+      return;
+    }
 
     setSaving(true);
     setFormError(null);
 
     try {
-      const payload: Record<string, unknown> = {
-        apartment_id: apartmentId,
-        customer_id: customerId,
-        sale_date: form.sale_date || new Date().toISOString().slice(0, 10),
-        total_price: totalPrice,
-        discount,
-        payment_type: form.payment_type,
-        status: statusFromPaymentType(form.payment_type),
-        schedule_locked: form.schedule_locked,
-      };
+      const payload = buildSalePayload(form);
 
       if (form.payment_type === "installment") {
         payload.frequency_type = normalizeFrequency(form.frequency_type);
@@ -263,14 +372,9 @@ export default function ApartmentSalesPage() {
         }
       }
 
-      const created = await apartmentSaleCreate(payload);
-      if (created?.uuid) {
-        try {
-          await municipalityLetterGenerate(created.uuid);
-          notifySuccess("Sale created. Municipality share auto-calculated and letter generated.");
-        } catch {
-          notifySuccess("Sale created. Municipality share auto-calculated.");
-        }
+      const saved = await apartmentSaleCreate(payload);
+      if (saleFiles.length > 0) {
+        await handleSaleDocumentUploads(saved);
       }
       closeCreateForm();
       setRefreshKey((prev) => prev + 1);
@@ -280,14 +384,27 @@ export default function ApartmentSalesPage() {
     } finally {
       setSaving(false);
     }
-  }, [closeCreateForm, form, readOnly, refreshLookups, saving]);
+  }, [
+    closeCreateForm,
+    form,
+    handleSaleDocumentUploads,
+    readOnly,
+    refreshLookups,
+    saleFiles.length,
+    saving,
+    selectedSaleDocumentType,
+  ]);
 
   return (
-    <RequirePermission permission="sales.create">
+    <RequirePermission permission={["sales.create", "sales.approve"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader
           title="Apartment Sales"
-          subtitle={readOnly ? "Read-only mode for non-admin users" : "Manage sales with full/installment plans"}
+          subtitle={
+            readOnly
+              ? "Review and approve pending sales"
+              : "Manage sales with full/installment plans"
+          }
           >
           {!readOnly && (
             <button
@@ -309,7 +426,15 @@ export default function ApartmentSalesPage() {
           submitting={saving}
           customerOptions={customerOptions}
           apartmentOptions={apartmentOptions}
+          saleDocumentTypes={saleDocumentTypes}
+          selectedSaleDocumentType={selectedSaleDocumentType}
+          saleFiles={saleFiles}
+          loadingSaleDocumentTypes={loadingSaleDocumentTypes}
           onApartmentSelect={applyApartmentSelection}
+          onSaleDocumentTypeChange={setSelectedSaleDocumentType}
+          onSaleFilesChange={setSaleFiles}
+          onRemoveSaleFile={(index) => setSaleFiles((current) => current.filter((_, currentIndex) => currentIndex !== index))}
+          onClearSaleFiles={() => setSaleFiles([])}
           onChange={setForm}
           onCancel={closeCreateForm}
           onSubmit={() => {

@@ -42,13 +42,12 @@ export async function listDynamicCacheRoutes(permissions: string[] = []): Promis
     }
   }
 
-  if (hasAnyPermission(permissions, "sales.create")) {
+  if (hasAnyPermission(permissions, ["sales.create", "sales.approve"])) {
     const sales = await db.apartment_sales.toArray();
     for (const sale of sales) {
       const uuid = String(sale.uuid ?? "").trim();
       const saleId = String(sale.sale_id ?? "").trim() || uuid.slice(0, 8).toUpperCase();
       if (!uuid) continue;
-      routeMap.set(`/print/apartment-sales/${uuid}/sale`, `${saleId} Summary`);
       routeMap.set(`/apartment-sales/${uuid}/financial`, `${saleId} Financial`);
       routeMap.set(`/apartment-sales/${uuid}/history`, `${saleId} History`);
     }
@@ -59,8 +58,16 @@ export async function listDynamicCacheRoutes(permissions: string[] = []): Promis
     for (const payment of salaryPayments) {
       const uuid = String(payment.uuid ?? "").trim();
       if (!uuid) continue;
-      const slipId = `PS-${uuid.slice(0, 8).toUpperCase()}`;
-      routeMap.set(`/print/payroll/${uuid}/payslip`, `${slipId} Payslip`);
+    }
+  }
+
+  if (hasAnyPermission(permissions, "employees.view")) {
+    const employees = await db.employees.toArray();
+    for (const employee of employees) {
+      const uuid = String(employee.uuid ?? "").trim();
+      if (!uuid) continue;
+      const name = [employee.first_name, employee.last_name].filter(Boolean).join(" ").trim() || "Employee";
+      routeMap.set(`/employees/${uuid}`, `${name} Profile`);
     }
   }
 
@@ -69,8 +76,6 @@ export async function listDynamicCacheRoutes(permissions: string[] = []): Promis
     for (const request of materialRequests) {
       const uuid = String(request.uuid ?? "").trim();
       if (!uuid) continue;
-      const requestId = String(request.issue_receipt_no ?? request.request_no ?? "").trim() || `MR-${uuid.slice(0, 8).toUpperCase()}`;
-      routeMap.set(`/print/material-requests/${uuid}/receipt`, `${requestId} Material Record`);
     }
   }
 

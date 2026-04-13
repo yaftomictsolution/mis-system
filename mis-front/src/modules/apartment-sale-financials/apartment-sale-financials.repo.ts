@@ -76,8 +76,8 @@ function buildFinancialRow(
   const saleStatus = String(sale.status ?? "").trim().toLowerCase();
   const paidFromSale = toMoney(sale.installments_paid_total ?? paidTotal);
   const assumedFullPaid = sale.payment_type === "full" && saleStatus === "completed";
-  const effectivePaid = assumedFullPaid ? netPrice : paidFromSale;
-  const customerDebt = money(Math.max(0, netPrice - effectivePaid - discountOrDeduction));
+  const effectivePaid = assumedFullPaid ? companyShare85 : paidFromSale;
+  const customerDebt = money(Math.max(0, companyShare85 - effectivePaid - discountOrDeduction));
 
   const baseRow: Omit<ApartmentSaleFinancialRow, "accounts_status"> = {
     id: existing?.id,
@@ -209,6 +209,13 @@ export async function apartmentSaleFinancialUpdateLocal(
 
   const sale = await db.apartment_sales.get(normalizedSaleUuid);
   if (!sale) throw new Error("Apartment sale not found locally.");
+  const saleStatus = String(sale.status ?? "").trim().toLowerCase();
+  if (saleStatus === "pending") {
+    throw new Error("Admin approval is required before financial workflow can continue.");
+  }
+  if (saleStatus === "cancelled" || saleStatus === "terminated" || saleStatus === "defaulted") {
+    throw new Error("Cancelled/terminated/defaulted sales cannot continue financial workflow.");
+  }
 
   const current = await db.apartment_sale_financials.get(normalizedSaleUuid);
   const paidTotal = await getInstallmentsPaidTotalForSale(sale);

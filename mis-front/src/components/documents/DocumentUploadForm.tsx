@@ -1,30 +1,29 @@
 "use client";
 
+import { useMemo } from "react";
 import type {
   DocumentModuleKey,
   DocumentReferenceOption,
   DocumentTypeOption,
 } from "@/modules/documents/documents.repo";
-
-type ModuleOption = {
-  value: DocumentModuleKey;
-  label: string;
-};
+import { DocumentFileDropzone } from "@/components/documents/DocumentFileDropzone";
 
 type Props = {
   module: DocumentModuleKey;
-  moduleOptions: ModuleOption[];
+  moduleOptions: Array<{ value: DocumentModuleKey; label: string }>;
   documentTypes: DocumentTypeOption[];
   selectedDocumentType: string;
   references: DocumentReferenceOption[];
   selectedReferenceId: string;
-  file: File | null;
+  files: File[];
   loadingReferences: boolean;
   saving: boolean;
   onModuleChange: (module: DocumentModuleKey) => void;
   onDocumentTypeChange: (value: string) => void;
   onReferenceChange: (value: string) => void;
-  onFileChange: (file: File | null) => void;
+  onFilesChange: (files: File[]) => void;
+  onRemoveFile: (index: number) => void;
+  onClearFiles: () => void;
   onSubmit: () => void;
 };
 
@@ -35,25 +34,32 @@ export function DocumentUploadForm({
   selectedDocumentType,
   references,
   selectedReferenceId,
-  file,
+  files,
   loadingReferences,
   saving,
   onModuleChange,
   onDocumentTypeChange,
   onReferenceChange,
-  onFileChange,
+  onFilesChange,
+  onRemoveFile,
+  onClearFiles,
   onSubmit,
 }: Props) {
+  const selectedTypeLabel = useMemo(
+    () => documentTypes.find((item) => item.value === selectedDocumentType)?.label ?? "document type",
+    [documentTypes, selectedDocumentType]
+  );
+
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
+    <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
       <div className="mb-4">
-        <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Upload Document</h2>
+        <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Upload Documents</h2>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Attach document to customer, apartment, sale deed, or rental record.
+          Drag and drop multiple files, or browse from your device, then attach them to the selected record.
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 lg:grid-cols-3">
         <label className="block">
           <span className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">Module</span>
           <select
@@ -74,15 +80,18 @@ export function DocumentUploadForm({
           <select
             value={selectedDocumentType}
             onChange={(event) => onDocumentTypeChange(event.target.value)}
-            disabled={saving}
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-blue-500 disabled:opacity-60 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
+            disabled={documentTypes.length === 0}
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
           >
-            <option value="">Select type</option>
-            {documentTypes.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
-              </option>
-            ))}
+            {documentTypes.length === 0 ? (
+              <option value="">No document types configured</option>
+            ) : (
+              documentTypes.map((type) => (
+                <option key={type.value} value={type.value}>
+                  {type.label}
+                </option>
+              ))
+            )}
           </select>
         </label>
 
@@ -91,39 +100,49 @@ export function DocumentUploadForm({
           <select
             value={selectedReferenceId}
             onChange={(event) => onReferenceChange(event.target.value)}
-            disabled={loadingReferences || saving}
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-blue-500 disabled:opacity-60 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
+            disabled={loadingReferences || references.length === 0}
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
           >
-            <option value="">{loadingReferences ? "Loading..." : "Select record"}</option>
-            {references.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
+            {loadingReferences ? (
+              <option value="">Loading records...</option>
+            ) : references.length === 0 ? (
+              <option value="">No records available</option>
+            ) : (
+              references.map((reference) => (
+                <option key={reference.id} value={String(reference.id)}>
+                  {reference.label}
+                </option>
+              ))
+            )}
           </select>
         </label>
-
-        <label className="block">
-          <span className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">Document File</span>
-          <input
-            type="file"
-            onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
-            className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-medium dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white dark:file:bg-[#1a1a2e]"
-          />
-          {file && <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{file.name}</p>}
-        </label>
       </div>
+
+      <DocumentFileDropzone
+        files={files}
+        onFilesChange={onFilesChange}
+        onRemoveFile={onRemoveFile}
+        onClearFiles={onClearFiles}
+        disabled={saving}
+        title="Drop files here"
+        subtitle={`Upload multiple files at once and attach them as ${selectedTypeLabel} to the selected record.`}
+        summaryDetails={[
+          { label: "Module", value: moduleOptions.find((item) => item.value === module)?.label ?? module },
+          { label: "Type", value: selectedTypeLabel },
+          { label: "Files Ready", value: String(files.length) },
+        ]}
+      />
 
       <div className="mt-4 flex justify-end">
         <button
           type="button"
+          disabled={saving || files.length === 0 || !selectedReferenceId || !selectedDocumentType}
           onClick={onSubmit}
-          disabled={saving || loadingReferences}
-          className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-60"
+          className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {saving ? "Uploading..." : "Upload Document"}
+          {saving ? "Uploading..." : `Upload ${files.length || ""} ${files.length === 1 ? "Document" : "Documents"}`.trim()}
         </button>
       </div>
-    </div>
+    </section>
   );
 }

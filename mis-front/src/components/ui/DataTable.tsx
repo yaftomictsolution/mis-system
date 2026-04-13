@@ -17,6 +17,7 @@ interface DataTableProps<T extends Record<string, unknown>> {
   data: T[]
   onEdit?: (item: T) => void
   onDelete?: (item: T) => void
+  canDelete?: (item: T) => boolean
   onView?: (item: T) => void
   expandableRows?: boolean
   renderExpandedRow?: (item: T) => ReactNode
@@ -34,6 +35,7 @@ export function DataTable<T extends Record<string, unknown>>({
   data,
   onEdit,
   onDelete,
+  canDelete,
   onView,
   expandableRows = false,
   renderExpandedRow,
@@ -241,7 +243,7 @@ export function DataTable<T extends Record<string, unknown>>({
                                 <Edit2 size={16} />
                               </button>
                             )}
-                            {onDelete && (
+                            {onDelete && (canDelete ? canDelete(item) : true) && (
                               <button
                                 type="button"
                                 onClick={() => onDelete(item)}

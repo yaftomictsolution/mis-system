@@ -1,5 +1,5 @@
 const CACHE_SCHEMA_KEY = "mis_cache_schema_version";
-const CACHE_SCHEMA_VERSION = "2026-03-02-v3";
+const CACHE_SCHEMA_VERSION = "2026-03-30-v4";
 
 const CURSOR_KEYS = [
   "customers_sync_cursor",
@@ -32,6 +32,18 @@ async function clearApiCacheBucket(): Promise<void> {
   }
 }
 
+async function clearAllCacheBuckets(): Promise<void> {
+  if (typeof window === "undefined") return;
+  if (!("caches" in window)) return;
+
+  try {
+    const names = await caches.keys();
+    await Promise.all(names.map((name) => caches.delete(name)));
+  } catch {
+    // ignore cache deletion failures, local key reset remains the critical fallback
+  }
+}
+
 export async function ensureCacheSchemaCompatibility(): Promise<void> {
   if (ensured || typeof window === "undefined") return;
   ensured = true;
@@ -44,5 +56,6 @@ export async function ensureCacheSchemaCompatibility(): Promise<void> {
   }
 
   await clearApiCacheBucket();
+  await clearAllCacheBuckets();
   window.localStorage.setItem(CACHE_SCHEMA_KEY, CACHE_SCHEMA_VERSION);
 }

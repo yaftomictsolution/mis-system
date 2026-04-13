@@ -4,6 +4,8 @@ import {
   customerAttachmentDropByCustomerUuid,
   customerAttachmentSyncPending,
 } from "@/modules/customers/customer-attachments.repo";
+import { customersPullToLocal } from "@/modules/customers/customers.repo";
+import { apartmentSalePullToLocal } from "@/modules/apartment-sales/apartment-sales.repo";
 import { syncPendingCrmOps } from "@/modules/crm/crm.repo";
 import { syncPendingDocumentOps } from "@/modules/documents/documents.repo";
 import { syncPendingNotificationOps } from "@/modules/notifications/notifications.repo";
@@ -31,6 +33,8 @@ export async function runSyncOnce() {
     let syncedAny = false;
     let hasRetryableFailure = false;
     const syncedEntities = new Set<string>();
+    let customerPullCount = 0;
+    let apartmentSalePullCount = 0;
     const items = await db.sync_queue.orderBy("created_at").toArray();
 
     for (const item of items) {
@@ -71,6 +75,24 @@ export async function runSyncOnce() {
     }
 
     if (!hasRetryableFailure) {
+      try {
+        const [customersResult, apartmentSalesResult] = await Promise.all([customersPullToLocal(), apartmentSalePullToLocal()]);
+        customerPullCount = Number(customersResult?.pulled ?? 0);
+        apartmentSalePullCount = Number(apartmentSalesResult?.pulled ?? 0);
+        if (customerPullCount > 0) {
+          syncedAny = true;
+          syncedEntities.add("customers");
+        }
+        if (apartmentSalePullCount > 0) {
+          syncedAny = true;
+          syncedEntities.add("apartment_sales");
+        }
+      } catch (error) {
+        console.warn("Entity pull before module-op sync failed", error);
+      }
+    }
+
+    if (!hasRetryableFailure) {
       for (const syncModule of [syncPendingDocumentOps, syncPendingCrmOps, syncPendingNotificationOps]) {
         const result = await syncModule();
         if (result.synced > 0) {
@@ -83,10 +105,18 @@ export async function runSyncOnce() {
       }
     }
 
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && syncedAny) {
       window.dispatchEvent(
         new CustomEvent("sync:complete", {
-          detail: { syncedAny, entities: [...syncedEntities] },
+          detail: {
+            syncedAny,
+            entities: [...syncedEntities],
+            changed: syncedAny,
+            pulls: {
+              customers: customerPullCount,
+              apartment_sales: apartmentSalePullCount,
+            },
+          },
         }),
       );
     }

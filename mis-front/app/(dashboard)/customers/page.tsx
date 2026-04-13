@@ -32,6 +32,37 @@ const STATUS_COLORS: Record<CustomerStatus, "blue" | "purple" | "slate"> = {
   Inactive: "slate",
 };
 
+function buildInitials(value: string | null | undefined): string {
+  return String(value ?? "")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase())
+    .join("")
+    .slice(0, 2);
+}
+
+function PersonThumb({
+  imageSrc,
+  name,
+}: {
+  imageSrc: string | null;
+  name: string | null | undefined;
+}) {
+  const initials = buildInitials(name);
+
+  return imageSrc ? (
+    <img
+      src={imageSrc}
+      alt={String(name ?? "").trim() || "Representative"}
+      className="h-12 w-12 rounded-xl border border-slate-200 object-cover shadow-sm dark:border-[#2a2a3e]"
+    />
+  ) : (
+    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-200 text-xs font-bold text-slate-600 dark:bg-[#2a2a3e] dark:text-slate-300">
+      {initials || "--"}
+    </div>
+  );
+}
+
 function normalizeStatus(value: string | null | undefined): CustomerStatus {
   const status = (value ?? "").trim().toLowerCase();
   if (status === "vip") return "VIP";
@@ -53,6 +84,8 @@ export default function CustomersPage() {
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [current, setCurrent] = useState<Partial<CustomerItem>>({});
   const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [customerPhotoFile, setCustomerPhotoFile] = useState<File | null>(null);
+  const [representativePhotoFile, setRepresentativePhotoFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -99,25 +132,9 @@ export default function CustomersPage() {
         key: "customer_image_url",
         label: "Image",
         render: (item) => {
-          const initials = (item.name || "")
-            .split(" ")
-            .filter(Boolean)
-            .map((n) => n[0]?.toUpperCase())
-            .join("")
-            .slice(0, 2);
           const imageSrc = resolveOfflineImageSrc(item);
 
-          return imageSrc ? (
-            <img
-              src={imageSrc}
-              alt={item.name}
-              className="h-12 w-12 rounded-xl border border-slate-200 object-cover shadow-sm dark:border-[#2a2a3e]"
-            />
-          ) : (
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-200 text-xs font-bold text-slate-600 dark:bg-[#2a2a3e] dark:text-slate-300">
-              {initials || "--"}
-            </div>
-          );
+          return <PersonThumb imageSrc={imageSrc} name={item.name} />;
         },
       },
       {
@@ -134,6 +151,39 @@ export default function CustomersPage() {
         key: "phone",
         label: "Phone",
         render: (item) => <div className="font-medium">{item.phone}</div>,
+      },
+      {
+        key: "representative",
+        label: "Representative",
+        render: (item) => {
+          const representativeName = String(item.representative_name ?? "").trim();
+          const representativePhone = String(item.representative_phone ?? "").trim() || "-";
+          const representativeRelationship = String(item.representative_relationship ?? "").trim() || "-";
+          const representativeImageSrc = resolveOfflineImageSrc({
+            representative_image_url: item.customer_representative_image_url,
+          });
+
+          if (!representativeName && !String(item.customer_representative_image_url ?? "").trim()) {
+            return <div className="text-xs text-slate-500">No representative</div>;
+          }
+
+          return (
+            <div className="flex min-w-[240px] items-start gap-3">
+              <PersonThumb imageSrc={representativeImageSrc} name={representativeName || "Representative"} />
+              <div className="min-w-0 space-y-1">
+                <div className="text-sm font-medium text-slate-900 dark:text-white">
+                  {representativeName || "Representative"}
+                </div>
+                <div className="text-xs text-slate-500">
+                  <span className="font-medium text-slate-600 dark:text-slate-300">Phone:</span> {representativePhone}
+                </div>
+                <div className="text-xs text-slate-500">
+                  <span className="font-medium text-slate-600 dark:text-slate-300">Relation:</span> {representativeRelationship}
+                </div>
+              </div>
+            </div>
+          );
+        },
       },
       {
         key: "status",
@@ -173,11 +223,34 @@ export default function CustomersPage() {
         name,
         fname: (current.fname ?? "").trim() || null,
         gname: (current.gname ?? "").trim() || null,
+        job_title: (current.job_title ?? "").trim() || null,
+        tazkira_number: (current.tazkira_number ?? "").trim() || null,
         phone,
         phone1: (current.phone1 ?? "").trim() || null,
         email: (current.email ?? "").trim() || null,
         status: normalizeStatus(current.status),
         address: (current.address ?? "").trim() || null,
+        current_area: (current.current_area ?? "").trim() || null,
+        current_district: (current.current_district ?? "").trim() || null,
+        current_province: (current.current_province ?? "").trim() || null,
+        original_area: (current.original_area ?? "").trim() || null,
+        original_district: (current.original_district ?? "").trim() || null,
+        original_province: (current.original_province ?? "").trim() || null,
+        representative_name: (current.representative_name ?? "").trim() || null,
+        representative_fname: (current.representative_fname ?? "").trim() || null,
+        representative_gname: (current.representative_gname ?? "").trim() || null,
+        representative_job_title: (current.representative_job_title ?? "").trim() || null,
+        representative_relationship: (current.representative_relationship ?? "").trim() || null,
+        representative_phone: (current.representative_phone ?? "").trim() || null,
+        representative_tazkira_number: (current.representative_tazkira_number ?? "").trim() || null,
+        representative_current_area: (current.representative_current_area ?? "").trim() || null,
+        representative_current_district: (current.representative_current_district ?? "").trim() || null,
+        representative_current_province: (current.representative_current_province ?? "").trim() || null,
+        representative_original_area: (current.representative_original_area ?? "").trim() || null,
+        representative_original_district: (current.representative_original_district ?? "").trim() || null,
+        representative_original_province: (current.representative_original_province ?? "").trim() || null,
+        customer_image_attachment: customerPhotoFile,
+        customer_representative_image_attachment: representativePhotoFile,
         attachment: attachmentFile,
       };
       if (current.uuid) {
@@ -188,13 +261,15 @@ export default function CustomersPage() {
       setIsModalOpen(false);
       setCurrent({});
       setAttachmentFile(null);
+      setCustomerPhotoFile(null);
+      setRepresentativePhotoFile(null);
       await refresh();
     } catch (error: unknown) {
       setFormError(error instanceof Error ? error.message : "Save failed.");
     } finally {
       setSaving(false);
     }
-  }, [attachmentFile, current, refresh, saving]);
+  }, [attachmentFile, current, customerPhotoFile, refresh, representativePhotoFile, saving]);
 
   const handleDelete = useCallback(async () => {
     if (!current.uuid) return;
@@ -216,6 +291,8 @@ export default function CustomersPage() {
           onClick={() => {
             setCurrent({});
             setAttachmentFile(null);
+            setCustomerPhotoFile(null);
+            setRepresentativePhotoFile(null);
             setIsModalOpen(true);
           }}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-lg shadow-blue-500/20"
@@ -232,13 +309,15 @@ export default function CustomersPage() {
             setFormError(null);
             setCurrent(item);
             setAttachmentFile(null);
+            setCustomerPhotoFile(null);
+            setRepresentativePhotoFile(null);
             setIsModalOpen(true);
           }}
           onDelete={(item) => {
             setCurrent(item);
             setIsDeleteOpen(true);
           }}
-          searchKeys={["name", "email", "phone"]}
+          searchKeys={["name", "email", "phone", "representative_name", "representative_phone", "representative_relationship"]}
           pageSize={TABLE_PAGE_SIZE}
         />
 
@@ -274,6 +353,16 @@ export default function CustomersPage() {
               label="G/Name"
               value={current.gname ?? ""}
               onChange={(val) => setCurrent({ ...current, gname: val as string })}
+            />
+            <FormField
+              label="Job Title"
+              value={current.job_title ?? ""}
+              onChange={(val) => setCurrent({ ...current, job_title: val as string })}
+            />
+            <FormField
+              label="Tazkira Number"
+              value={current.tazkira_number ?? ""}
+              onChange={(val) => setCurrent({ ...current, tazkira_number: val as string })}
             />
             <FormField
               label="Second Number"
@@ -320,6 +409,137 @@ export default function CustomersPage() {
                 onChange={(val) => setCurrent({ ...current, address: val as string })}
               />
             </div>
+            <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 dark:border-[#2a2a3e] dark:bg-[#0a0a0f]">
+              <div className="text-sm font-semibold text-slate-900 dark:text-white">Buyer Residence</div>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">Used in the deed print layout.</div>
+            </div>
+            <FormField
+              label="Current Village / Nahia"
+              value={current.current_area ?? ""}
+              onChange={(val) => setCurrent({ ...current, current_area: val as string })}
+            />
+            <FormField
+              label="Current District"
+              value={current.current_district ?? ""}
+              onChange={(val) => setCurrent({ ...current, current_district: val as string })}
+            />
+            <FormField
+              label="Current Province"
+              value={current.current_province ?? ""}
+              onChange={(val) => setCurrent({ ...current, current_province: val as string })}
+            />
+            <FormField
+              label="Original Village / Nahia"
+              value={current.original_area ?? ""}
+              onChange={(val) => setCurrent({ ...current, original_area: val as string })}
+            />
+            <FormField
+              label="Original District"
+              value={current.original_district ?? ""}
+              onChange={(val) => setCurrent({ ...current, original_district: val as string })}
+            />
+            <FormField
+              label="Original Province"
+              value={current.original_province ?? ""}
+              onChange={(val) => setCurrent({ ...current, original_province: val as string })}
+            />
+            <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 dark:border-[#2a2a3e] dark:bg-[#0a0a0f]">
+              <div className="text-sm font-semibold text-slate-900 dark:text-white">Representative</div>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">Fill this when the deed should print buyer representative details.</div>
+            </div>
+            <FormField
+              label="Representative Name"
+              value={current.representative_name ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_name: val as string })}
+            />
+            <FormField
+              label="Representative Phone"
+              value={current.representative_phone ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_phone: val as string })}
+            />
+            <FormField
+              label="Representative Father Name"
+              value={current.representative_fname ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_fname: val as string })}
+            />
+            <FormField
+              label="Representative Grandfather Name"
+              value={current.representative_gname ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_gname: val as string })}
+            />
+            <FormField
+              label="Representative Job Title"
+              value={current.representative_job_title ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_job_title: val as string })}
+            />
+            <FormField
+              label="Relationship To Buyer"
+              value={current.representative_relationship ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_relationship: val as string })}
+            />
+            <FormField
+              label="Representative Tazkira Number"
+              value={current.representative_tazkira_number ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_tazkira_number: val as string })}
+            />
+            <FormField
+              label="Representative Current Village / Nahia"
+              value={current.representative_current_area ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_current_area: val as string })}
+            />
+            <FormField
+              label="Representative Current District"
+              value={current.representative_current_district ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_current_district: val as string })}
+            />
+            <FormField
+              label="Representative Current Province"
+              value={current.representative_current_province ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_current_province: val as string })}
+            />
+            <FormField
+              label="Representative Original Village / Nahia"
+              value={current.representative_original_area ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_original_area: val as string })}
+            />
+            <FormField
+              label="Representative Original District"
+              value={current.representative_original_district ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_original_district: val as string })}
+            />
+            <FormField
+              label="Representative Original Province"
+              value={current.representative_original_province ?? ""}
+              onChange={(val) => setCurrent({ ...current, representative_original_province: val as string })}
+            />
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Buyer Photo</label>
+              <input
+                type="file"
+                accept=".jpg,.jpeg,.png"
+                onChange={(event) => {
+                  setCustomerPhotoFile(event.target.files?.[0] ?? null);
+                }}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
+              />
+              {customerPhotoFile && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">{customerPhotoFile.name}</p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Representative Photo</label>
+              <input
+                type="file"
+                accept=".jpg,.jpeg,.png"
+                onChange={(event) => {
+                  setRepresentativePhotoFile(event.target.files?.[0] ?? null);
+                }}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-white"
+              />
+              {representativePhotoFile && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">{representativePhotoFile.name}</p>
+              )}
+            </div>
           </div>
 
           {formError && <div className="mt-4 text-sm text-red-600">{formError}</div>}
@@ -331,6 +551,8 @@ export default function CustomersPage() {
                 setIsModalOpen(false);
                 setFormError(null);
                 setAttachmentFile(null);
+                setCustomerPhotoFile(null);
+                setRepresentativePhotoFile(null);
               }}
               className="rounded-lg px-4 py-2 text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-[#1a1a2e]"
             >

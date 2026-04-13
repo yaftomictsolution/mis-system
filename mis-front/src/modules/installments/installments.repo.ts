@@ -2,6 +2,7 @@ import { db, type InstallmentRow } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { emitAppEvent } from "@/lib/appEvents";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { accountTransactionsPullToLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { enqueueSync } from "@/sync/queue";
 import { apartmentSaleFinancialRecalculateForSaleUuid } from "../apartment-sale-financials/apartment-sale-financials.repo";
@@ -11,7 +12,7 @@ const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
 const PULL_PAGE_SIZE = 200;
-const CURSOR_KEY = "installments_sync_cursor";
+const CURSOR_KEY = "installments_sync_cursor_v2";
 const CLEANUP_KEY = "installments_last_cleanup_ms";
 
 type Obj = Record<string, unknown>;
@@ -36,6 +37,10 @@ export type InstallmentsLocalPage = {
 export type InstallmentPayInput = {
   amount: number;
   paid_date?: string;
+  account_id: number;
+  payment_method?: string;
+  reference_no?: string;
+  notes?: string;
 };
 
 const isOnline = () => typeof navigator !== "undefined" && navigator.onLine;
@@ -70,6 +75,10 @@ function normalizeStatus(v: unknown): string {
   const s = String(v ?? "").trim().toLowerCase();
   if (s === "paid" || s === "overdue" || s === "cancelled") return s;
   return "pending";
+}
+
+function normalizeSaleStatus(v: unknown): string {
+  return String(v ?? "").trim().toLowerCase();
 }
 
 function toIsoDate(v: unknown): string {
@@ -459,9 +468,18 @@ export async function installmentPay(uuid: string, input: InstallmentPayInput): 
   if (normalizeStatus(existing.status) === "cancelled") {
     throw new Error("Cancelled installment cannot be paid.");
   }
+  const saleStatus = normalizeSaleStatus(existing.sale_status);
+  if (saleStatus === "pending") {
+    throw new Error("Admin approval is required before installment payment can continue.");
+  }
+  if (saleStatus === "cancelled" || saleStatus === "terminated" || saleStatus === "defaulted") {
+    throw new Error("Cancelled/terminated/defaulted sales cannot receive installment payments.");
+  }
 
   const requested = toAmount(input.amount);
   if (requested <= 0) throw new Error("Payment amount must be greater than 0.");
+  const accountId = toPositiveInt(input.account_id);
+  if (accountId <= 0) throw new Error("Payment account is required.");
 
   const remaining = Math.max(0, Number((existing.amount - existing.paid_amount).toFixed(2)));
   if (remaining <= 0) throw new Error("Installment is already fully paid.");
@@ -489,7 +507,14 @@ export async function installmentPay(uuid: string, input: InstallmentPayInput): 
       uuid,
       localKey: uuid,
       action: "update",
-      payload: toApiPayload(updated),
+      payload: {
+        ...toApiPayload(updated),
+        payment_amount: paid,
+        account_id: accountId,
+        payment_method: String(input.payment_method ?? "cash").trim() || "cash",
+        reference_no: String(input.reference_no ?? "").trim() || null,
+        notes: String(input.notes ?? "").trim() || null,
+      },
       rollbackSnapshot: existing,
     });
     emitInstallmentsChanged({ saleUuid: updated.sale_uuid, installmentUuid: updated.uuid });
@@ -501,11 +526,19 @@ export async function installmentPay(uuid: string, input: InstallmentPayInput): 
     const res = await api.post(`/api/installments/${uuid}/pay`, {
       amount: paid,
       paid_date: toIsoDate(paidDateTs),
+      account_id: accountId,
+      payment_method: String(input.payment_method ?? "cash").trim() || "cash",
+      reference_no: String(input.reference_no ?? "").trim() || undefined,
+      notes: String(input.notes ?? "").trim() || undefined,
     });
     const parsed = sanitizeInstallment(asObj(res.data).data ?? updated);
     const saved = !parsed.uuid ? updated : parsed;
     await db.installments.put(saved);
-    await recalculateFinancialForInstallment(saved);
+    await Promise.all([
+      recalculateFinancialForInstallment(saved),
+      accountsPullToLocal(),
+      accountTransactionsPullToLocal(),
+    ]);
     emitInstallmentsChanged({ saleUuid: saved.sale_uuid, installmentUuid: saved.uuid });
     notifySuccess("Installment payment saved successfully.");
     return saved;
@@ -525,7 +558,14 @@ export async function installmentPay(uuid: string, input: InstallmentPayInput): 
       uuid,
       localKey: uuid,
       action: "update",
-      payload: toApiPayload(updated),
+      payload: {
+        ...toApiPayload(updated),
+        payment_amount: paid,
+        account_id: accountId,
+        payment_method: String(input.payment_method ?? "cash").trim() || "cash",
+        reference_no: String(input.reference_no ?? "").trim() || null,
+        notes: String(input.notes ?? "").trim() || null,
+      },
       rollbackSnapshot: existing,
     });
     emitInstallmentsChanged({ saleUuid: updated.sale_uuid, installmentUuid: updated.uuid });

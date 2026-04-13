@@ -4,6 +4,7 @@ import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { enqueueSync } from "@/sync/queue";
 import { customerAttachmentEnqueueLocal } from "@/modules/customers/customer-attachments.repo";
+import { documentUpload } from "@/modules/documents/documents.repo";
 import {
   createImageThumbFromBlob,
   createImageThumbFromUrl,
@@ -26,12 +27,35 @@ type CustomerMutationPayload = {
   name?: unknown;
   fname?: unknown;
   gname?: unknown;
+  job_title?: unknown;
+  tazkira_number?: unknown;
   phone?: unknown;
   phone1?: unknown;
   email?: unknown;
   status?: unknown;
   address?: unknown;
+  current_area?: unknown;
+  current_district?: unknown;
+  current_province?: unknown;
+  original_area?: unknown;
+  original_district?: unknown;
+  original_province?: unknown;
+  representative_name?: unknown;
+  representative_fname?: unknown;
+  representative_gname?: unknown;
+  representative_job_title?: unknown;
+  representative_relationship?: unknown;
+  representative_phone?: unknown;
+  representative_tazkira_number?: unknown;
+  representative_current_area?: unknown;
+  representative_current_district?: unknown;
+  representative_current_province?: unknown;
+  representative_original_area?: unknown;
+  representative_original_district?: unknown;
+  representative_original_province?: unknown;
   customer_image_thumb?: unknown;
+  customer_image_attachment?: unknown;
+  customer_representative_image_attachment?: unknown;
   attachment?: unknown;
 };
 
@@ -109,10 +133,11 @@ function toCustomerImageThumb(v: unknown): string | null {
   return thumb || null;
 }
 
-function firstCustomerImageUrl(input: unknown): string | null {
+function firstCustomerDocumentUrl(input: unknown, documentTypes: string[]): string | null {
   const root = obj(input);
   const documents = Array.isArray(root.documents) ? root.documents : [];
   const imageCandidates: Array<{ fileUrl: string; createdAt: number }> = [];
+  const allowedTypes = new Set(documentTypes.map((item) => item.trim().toLowerCase()).filter(Boolean));
 
   for (const item of documents) {
     const row = obj(item);
@@ -121,12 +146,12 @@ function firstCustomerImageUrl(input: unknown): string | null {
     const filePath = String(row.file_path ?? "").trim().toLowerCase();
     const createdAt = toTs(row.created_at ?? 0);
 
-    if (documentType === "customer_image" && fileUrl) {
+    if (allowedTypes.has(documentType) && fileUrl) {
       imageCandidates.push({ fileUrl, createdAt });
       continue;
     }
 
-    if (!documentType && (/\.(jpg|jpeg|png|webp|gif|bmp|svg)(\?|$)/i.test(fileUrl) || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(filePath))) {
+    if (!documentType && allowedTypes.has("customer_image") && (/\.(jpg|jpeg|png|webp|gif|bmp|svg)(\?|$)/i.test(fileUrl) || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(filePath))) {
       imageCandidates.push({
         fileUrl: fileUrl || String(row.file_path ?? "").trim(),
         createdAt,
@@ -147,13 +172,35 @@ function sanitizeCustomer(input: unknown): CustomerRow {
     name: String(r.name ?? "").trim().slice(0, 255),
     fname: trimOrNull(r.fname, 255),
     gname: trimOrNull(r.gname, 255),
+    job_title: trimOrNull(r.job_title, 255),
+    tazkira_number: trimOrNull(r.tazkira_number, 255),
     phone: toPhone(r.phone),
     phone1: trimOrNull(r.phone1, 50),
     email: toEmail(r.email),
     status: trimOrNull(r.status, 50),
     address: trimOrNull(r.address, MAX_LOCAL_TEXT),
-    customer_image_url: firstCustomerImageUrl(r),
+    current_area: trimOrNull(r.current_area, 255),
+    current_district: trimOrNull(r.current_district, 255),
+    current_province: trimOrNull(r.current_province, 255),
+    original_area: trimOrNull(r.original_area, 255),
+    original_district: trimOrNull(r.original_district, 255),
+    original_province: trimOrNull(r.original_province, 255),
+    representative_name: trimOrNull(r.representative_name, 255),
+    representative_fname: trimOrNull(r.representative_fname, 255),
+    representative_gname: trimOrNull(r.representative_gname, 255),
+    representative_job_title: trimOrNull(r.representative_job_title, 255),
+    representative_relationship: trimOrNull(r.representative_relationship, 255),
+    representative_phone: trimOrNull(r.representative_phone, 50),
+    representative_tazkira_number: trimOrNull(r.representative_tazkira_number, 255),
+    representative_current_area: trimOrNull(r.representative_current_area, 255),
+    representative_current_district: trimOrNull(r.representative_current_district, 255),
+    representative_current_province: trimOrNull(r.representative_current_province, 255),
+    representative_original_area: trimOrNull(r.representative_original_area, 255),
+    representative_original_district: trimOrNull(r.representative_original_district, 255),
+    representative_original_province: trimOrNull(r.representative_original_province, 255),
+    customer_image_url: firstCustomerDocumentUrl(r, ["customer_image"]),
     customer_image_thumb: toCustomerImageThumb(r.customer_image_thumb),
+    customer_representative_image_url: firstCustomerDocumentUrl(r, ["customer_representative_image"]),
     updated_at: toTs(r.updated_at ?? r.server_updated_at),
   };
 }
@@ -197,12 +244,82 @@ function appendCustomerFormData(
   form.append("name", row.name);
   form.append("fname", row.fname ?? "");
   form.append("gname", row.gname ?? "");
+  form.append("job_title", row.job_title ?? "");
+  form.append("tazkira_number", row.tazkira_number ?? "");
   form.append("phone", row.phone);
   form.append("phone1", row.phone1 ?? "");
   form.append("email", row.email ?? "");
   form.append("status", row.status ?? "");
   form.append("address", row.address ?? "");
+  form.append("current_area", row.current_area ?? "");
+  form.append("current_district", row.current_district ?? "");
+  form.append("current_province", row.current_province ?? "");
+  form.append("original_area", row.original_area ?? "");
+  form.append("original_district", row.original_district ?? "");
+  form.append("original_province", row.original_province ?? "");
+  form.append("representative_name", row.representative_name ?? "");
+  form.append("representative_fname", row.representative_fname ?? "");
+  form.append("representative_gname", row.representative_gname ?? "");
+  form.append("representative_job_title", row.representative_job_title ?? "");
+  form.append("representative_relationship", row.representative_relationship ?? "");
+  form.append("representative_phone", row.representative_phone ?? "");
+  form.append("representative_tazkira_number", row.representative_tazkira_number ?? "");
+  form.append("representative_current_area", row.representative_current_area ?? "");
+  form.append("representative_current_district", row.representative_current_district ?? "");
+  form.append("representative_current_province", row.representative_current_province ?? "");
+  form.append("representative_original_area", row.representative_original_area ?? "");
+  form.append("representative_original_district", row.representative_original_district ?? "");
+  form.append("representative_original_province", row.representative_original_province ?? "");
   form.append("attachment", attachment);
+}
+
+async function uploadCustomerDeedImages(
+  row: CustomerRow,
+  input: CustomerMutationPayload,
+): Promise<void> {
+  const customerImage = toAttachment(input.customer_image_attachment);
+  const representativeImage = toAttachment(input.customer_representative_image_attachment);
+
+  if (!customerImage && !representativeImage) return;
+
+  const referenceId = typeof row.id === "number" && row.id > 0 ? row.id : undefined;
+  const referenceUuid = row.uuid;
+  const referenceLabel = `${row.name} (${row.phone || "-"})`;
+
+  if (customerImage) {
+    await documentUpload({
+      module: "customer",
+      documentType: "customer_image",
+      documentTypeLabel: "Customer Image",
+      referenceId,
+      referenceUuid,
+      referenceLabel,
+      file: customerImage,
+    });
+  }
+
+  if (representativeImage) {
+    await documentUpload({
+      module: "customer",
+      documentType: "customer_representative_image",
+      documentTypeLabel: "Customer Representative Image",
+      referenceId,
+      referenceUuid,
+      referenceLabel,
+      file: representativeImage,
+    });
+  }
+}
+
+async function uploadCustomerDeedImagesSafely(
+  row: CustomerRow,
+  input: CustomerMutationPayload,
+): Promise<void> {
+  try {
+    await uploadCustomerDeedImages(row, input);
+  } catch {
+    notifyInfo("Customer saved, but one or more deed photos could not be attached right now.");
+  }
 }
 
 function isDeletedRecord(input: unknown): boolean {
@@ -290,7 +407,26 @@ async function removeQueuedOpsForEntityUuids(entity: string, uuids: string[]): P
 }
 
 function matchesSearch(row: CustomerRow, q: string): boolean {
-  return [row.name, row.fname, row.gname, row.phone, row.phone1, row.email]
+  return [
+    row.name,
+    row.fname,
+    row.gname,
+    row.job_title,
+    row.tazkira_number,
+    row.phone,
+    row.phone1,
+    row.email,
+    row.current_area,
+    row.current_district,
+    row.current_province,
+    row.original_area,
+    row.original_district,
+    row.original_province,
+    row.representative_name,
+    row.representative_phone,
+    row.representative_relationship,
+    row.representative_tazkira_number,
+  ]
     .some((v) => (v ?? "").toLowerCase().includes(q));
 }
 
@@ -455,6 +591,7 @@ export async function customerCreate(payload: unknown): Promise<CustomerRow> {
       row.customer_image_thumb ?? null
     );
     await db.customers.put(saved);
+    await uploadCustomerDeedImagesSafely(saved, input);
     notifySuccess("Customer created successfully.");
     return saved;
   } catch (error: unknown) {
@@ -471,6 +608,7 @@ export async function customerCreate(payload: unknown): Promise<CustomerRow> {
     if (attachment) {
       await customerAttachmentEnqueueLocal(uuid, attachment);
     }
+    await uploadCustomerDeedImagesSafely(row, input);
     notifyInfo("Customer saved locally. Server sync will retry later.");
     return row;
   }
@@ -529,6 +667,7 @@ export async function customerUpdate(uuid: string, patch: unknown): Promise<Cust
       updated.customer_image_thumb ?? null
     );
     await db.customers.put(saved);
+    await uploadCustomerDeedImagesSafely(saved, input);
     notifySuccess("Customer updated successfully.");
     return saved;
   } catch (error: unknown) {
@@ -542,6 +681,7 @@ export async function customerUpdate(uuid: string, patch: unknown): Promise<Cust
     if (attachment) {
       await customerAttachmentEnqueueLocal(uuid, attachment);
     }
+    await uploadCustomerDeedImagesSafely(updated, input);
     notifyInfo("Customer updated locally. Server sync will retry later.");
     return updated;
   }

@@ -3,6 +3,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { PlusCircle, Trash2 } from "lucide-react";
+import { DocumentFileDropzone } from "@/components/documents/DocumentFileDropzone";
 import { FormField } from "@/components/ui/FormField";
 import type {
   ApartmentSaleCustomDate,
@@ -10,6 +11,7 @@ import type {
   InstallmentFrequency,
 } from "@/components/apartment-sales/apartment-sale.type";
 import { statusFromPaymentType } from "@/components/apartment-sales/apartment-sale.type";
+import type { DocumentTypeOption } from "@/modules/documents/documents.repo";
 
 type Option = { value: string; label: string };
 
@@ -21,7 +23,15 @@ type ApartmentSaleFormProps = {
   submitting?: boolean;
   customerOptions: Option[];
   apartmentOptions: Option[];
+  saleDocumentTypes?: DocumentTypeOption[];
+  selectedSaleDocumentType?: string;
+  saleFiles?: File[];
+  loadingSaleDocumentTypes?: boolean;
   onApartmentSelect: (apartmentId: string) => void;
+  onSaleDocumentTypeChange?: (value: string) => void;
+  onSaleFilesChange?: (files: File[]) => void;
+  onRemoveSaleFile?: (index: number) => void;
+  onClearSaleFiles?: () => void;
   onChange: Dispatch<SetStateAction<ApartmentSaleFormData>>;
   onCancel: () => void;
   onSubmit: () => void;
@@ -42,12 +52,22 @@ export default function ApartmentSaleForm({
   submitting = false,
   customerOptions,
   apartmentOptions,
+  saleDocumentTypes = [],
+  selectedSaleDocumentType = "",
+  saleFiles = [],
+  loadingSaleDocumentTypes = false,
   onApartmentSelect,
+  onSaleDocumentTypeChange = () => {},
+  onSaleFilesChange = () => {},
+  onRemoveSaleFile = () => {},
+  onClearSaleFiles = () => {},
   onChange,
   onCancel,
   onSubmit,
 }: ApartmentSaleFormProps) {
   const isEditing = mode === "edit";
+  const selectedSaleDocumentTypeLabel =
+    saleDocumentTypes.find((item) => item.value === selectedSaleDocumentType)?.label ?? "document type";
 
   return (
     <AnimatePresence initial={false}>
@@ -101,6 +121,9 @@ export default function ApartmentSaleForm({
                       ...prev,
                       payment_type: paymentType,
                       status: statusFromPaymentType(paymentType),
+                      receive_full_payment_now: paymentType === "full" ? prev.receive_full_payment_now : false,
+                      payment_account_id: paymentType === "full" ? prev.payment_account_id : "",
+                      payment_date: paymentType === "full" ? prev.payment_date : prev.sale_date,
                     };
                   })
                 }
@@ -260,6 +283,47 @@ export default function ApartmentSaleForm({
                   Lock payment schedule after approval
                 </label>
               </div>
+
+              {mode === "create" ? (
+                <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-[#2a2a3e] dark:bg-[#0a0a0f]">
+                  <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-900 dark:text-white">Sale Documents</h3>
+                      <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                        Attach one or more files while creating the sale. Document type CRUD is available from the Documents page.
+                      </p>
+                    </div>
+                    <div className="w-full md:max-w-xs">
+                      <FormField
+                        label="Document Type"
+                        type="select"
+                        value={selectedSaleDocumentType}
+                        onChange={(val) => onSaleDocumentTypeChange(String(val))}
+                        options={saleDocumentTypes.map((item) => ({ value: item.value, label: item.label }))}
+                        placeholder={loadingSaleDocumentTypes ? "Loading types..." : "Select document type"}
+                        disabled={loadingSaleDocumentTypes || saleDocumentTypes.length === 0 || submitting}
+                      />
+                    </div>
+                  </div>
+
+                  <DocumentFileDropzone
+                    files={saleFiles}
+                    onFilesChange={onSaleFilesChange}
+                    onRemoveFile={onRemoveSaleFile}
+                    onClearFiles={onClearSaleFiles}
+                    disabled={submitting}
+                    showSummary={false}
+                    title="Drop sale files here"
+                    subtitle={`Upload multiple files and attach them as ${selectedSaleDocumentTypeLabel} once the sale is created.`}
+                    summaryTitle="Attachment Summary"
+                    summaryText="Each file will be attached as its own document record after the sale is saved."
+                    summaryDetails={[
+                      { label: "Document Type", value: selectedSaleDocumentTypeLabel },
+                      { label: "Files Ready", value: String(saleFiles.length) },
+                    ]}
+                  />
+                </div>
+              ) : null}
             </div>
 
             {error && <p className="mt-3 text-sm text-red-600">{error}</p>}

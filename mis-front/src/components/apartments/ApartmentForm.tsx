@@ -153,6 +153,30 @@ export default function ApartmentForm({
                 placeholder="North Wing"
               />
               <FormField
+                label="North Boundary"
+                value={value.north_boundary}
+                onChange={(v) => onChange((p) => ({ ...p, north_boundary: String(v) }))}
+                placeholder="Road / Building / Plot"
+              />
+              <FormField
+                label="South Boundary"
+                value={value.south_boundary}
+                onChange={(v) => onChange((p) => ({ ...p, south_boundary: String(v) }))}
+                placeholder="Road / Building / Plot"
+              />
+              <FormField
+                label="East Boundary"
+                value={value.east_boundary}
+                onChange={(v) => onChange((p) => ({ ...p, east_boundary: String(v) }))}
+                placeholder="Road / Building / Plot"
+              />
+              <FormField
+                label="West Boundary"
+                value={value.west_boundary}
+                onChange={(v) => onChange((p) => ({ ...p, west_boundary: String(v) }))}
+                placeholder="Road / Building / Plot"
+              />
+              <FormField
                 label="QR Code"
                 value={value.qr_code}
                 onChange={(v) => onChange((p) => ({ ...p, qr_code: String(v) }))}

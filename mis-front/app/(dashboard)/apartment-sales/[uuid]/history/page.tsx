@@ -144,7 +144,7 @@ export default function ApartmentSaleHistoryPage() {
   );
 
   return (
-    <RequirePermission permission="sales.create">
+    <RequirePermission permission={["sales.create", "sales.approve"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader
           title="Sale History"
@@ -290,4 +290,3 @@ export default function ApartmentSaleHistoryPage() {
     </RequirePermission>
   );
 }
-

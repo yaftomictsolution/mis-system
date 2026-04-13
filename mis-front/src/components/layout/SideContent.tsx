@@ -89,6 +89,7 @@ export default function SideContent(){
                           <Link
                             key={item.path}
                             href={item.path}
+                            prefetch={false}
                             onClick={() => {
                               if (isMobile) dispatch(setSidebarOpen(false));
                             }}

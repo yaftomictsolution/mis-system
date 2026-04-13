@@ -8,9 +8,13 @@ import { DataTable, type Column } from "@/components/ui/DataTable";
 import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
-import type { EmployeeRow, SalaryAdvanceRow, SalaryPaymentRow } from "@/db/localDB";
+import type { AccountRow, EmployeeRow, ExchangeRateRow, SalaryAdvanceRow, SalaryPaymentRow } from "@/db/localDB";
+import { convertAmountBetweenCurrencies, convertCurrencyToUsd, formatExchangeRate, formatMoney, normalizeCurrency } from "@/lib/currency";
 import { employeePullToLocal, employeesListLocal } from "@/modules/employees/employees.repo";
+import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
+import { exchangeRatesPullToLocal, getActiveExchangeRateLocal } from "@/modules/exchange-rates/exchange-rates.repo";
 import {
+  employeeSalaryHistoriesPullToLocal,
   salaryAdvanceCreate,
   salaryAdvanceDelete,
   salaryAdvanceUpdate,
@@ -33,21 +37,34 @@ type EmployeeOption = {
   uuid: string;
   label: string;
   baseSalary: number;
+  salaryCurrency: string;
+};
+
+type AccountOption = {
+  id: number;
+  uuid: string;
+  label: string;
+  currency: string;
+  currentBalance: number;
 };
 
 type AdvanceFormState = {
   employee_id: string;
   amount: string;
   reason: string;
-  status: "pending" | "approved" | "deducted" | "rejected";
+  status: "pending" | "approved" | "partial_deducted" | "deducted" | "rejected";
 };
 
 type PaymentFormState = {
   employee_id: string;
   period: string;
   gross_salary: string;
+  salary_currency_code: "USD" | "AFN";
   advance_deducted: string;
+  tax_percentage: string;
+  other_deductions: string;
   status: "draft" | "paid" | "cancelled";
+  account_id: string;
   paid_at: string;
 };
 
@@ -57,11 +74,11 @@ type SyncCompleteDetail = {
   entities?: string[];
 };
 
-type PayrollSyncEntity = "employees" | "salary_advances" | "salary_payments";
+type PayrollSyncEntity = "employees" | "salary_advances" | "salary_payments" | "accounts" | "exchange_rates";
 
 const LOCAL_PAGE_SIZE = 500;
 const TABLE_PAGE_SIZE = 10;
-const PAYROLL_SYNC_ENTITIES = new Set<PayrollSyncEntity>(["salary_advances", "salary_payments", "employees"]);
+const PAYROLL_SYNC_ENTITIES = new Set<PayrollSyncEntity>(["salary_advances", "salary_payments", "employees", "accounts", "exchange_rates"]);
 const today = () => new Date().toISOString().slice(0, 10);
 const monthValue = () => today().slice(0, 7);
 
@@ -70,12 +87,8 @@ function toDateLabel(value?: number | null): string {
   return new Date(value).toLocaleDateString();
 }
 
-function money(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 2,
-  }).format(value || 0);
+function money(value: number, currency: string = "USD"): string {
+  return formatMoney(value, normalizeCurrency(currency));
 }
 
 function createEmptyAdvanceForm(): AdvanceFormState {
@@ -92,8 +105,12 @@ function createEmptyPaymentForm(): PaymentFormState {
     employee_id: "",
     period: monthValue(),
     gross_salary: "0",
+    salary_currency_code: "USD",
     advance_deducted: "0",
+    tax_percentage: "0",
+    other_deductions: "0",
     status: "draft",
+    account_id: "",
     paid_at: today(),
   };
 }
@@ -112,8 +129,14 @@ function normalizePaymentForm(row: SalaryPaymentRow): PaymentFormState {
     employee_id: String(row.employee_id),
     period: row.period || monthValue(),
     gross_salary: String(row.gross_salary ?? 0),
+    salary_currency_code: normalizeCurrency(row.salary_currency_code ?? "USD"),
     advance_deducted: String(row.advance_deducted ?? 0),
+    tax_percentage: String(
+      row.tax_percentage ?? (Number(row.gross_salary ?? 0) > 0 ? Number((((row.tax_deducted ?? 0) / Number(row.gross_salary ?? 0)) * 100).toFixed(2)) : 0)
+    ),
+    other_deductions: String(row.other_deductions ?? 0),
     status: (row.status as PaymentFormState["status"]) || "draft",
+    account_id: row.account_id ? String(row.account_id) : "",
     paid_at: row.paid_at ? new Date(row.paid_at).toISOString().slice(0, 10) : today(),
   };
 }
@@ -123,6 +146,8 @@ export default function PayrollPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [employees, setEmployees] = useState<EmployeeOption[]>([]);
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  const [activeExchangeRate, setActiveExchangeRate] = useState<ExchangeRateRow | null>(null);
   const [advances, setAdvances] = useState<SalaryAdvanceRow[]>([]);
   const [payments, setPayments] = useState<SalaryPaymentRow[]>([]);
   const [advanceFormOpen, setAdvanceFormOpen] = useState(false);
@@ -136,8 +161,10 @@ export default function PayrollPage() {
   const [pendingDelete, setPendingDelete] = useState<{ type: PayrollTab; row: SalaryAdvanceRow | SalaryPaymentRow } | null>(null);
 
   const loadLocal = useCallback(async () => {
-    const [employeePage, advancePage, paymentPage] = await Promise.all([
+    const [employeePage, accountPage, activeRate, advancePage, paymentPage] = await Promise.all([
       employeesListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+      accountsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+      getActiveExchangeRateLocal(),
       salaryAdvancesListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       salaryPaymentsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
     ]);
@@ -149,10 +176,24 @@ export default function PayrollPage() {
         uuid: item.uuid,
         label: [item.first_name, item.last_name].filter(Boolean).join(" ").trim() || item.email,
         baseSalary: Number(item.base_salary ?? 0),
+        salaryCurrency: normalizeCurrency(item.salary_currency_code ?? "USD"),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+
+    const accountOptions = accountPage.items
+      .filter((item: AccountRow) => Number(item.id) > 0)
+      .map((item: AccountRow) => ({
+        id: Number(item.id),
+        uuid: item.uuid,
+        label: `${item.name} (${item.currency})`,
+        currency: item.currency,
+        currentBalance: Number(item.current_balance ?? 0),
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
 
     setEmployees(employeeOptions);
+    setAccounts(accountOptions);
+    setActiveExchangeRate(activeRate);
     setAdvances(advancePage.items);
     setPayments(paymentPage.items);
   }, []);
@@ -164,7 +205,7 @@ export default function PayrollPage() {
   }) => {
     const showLoader = options?.showLoader ?? true;
     const showFailureToast = options?.showFailureToast ?? true;
-    const entitiesToPull = options?.entitiesToPull ?? ["employees", "salary_advances", "salary_payments"];
+    const entitiesToPull = options?.entitiesToPull ?? ["employees", "accounts", "exchange_rates", "salary_advances", "salary_payments"];
 
     if (showLoader) {
       setLoading(true);
@@ -181,12 +222,19 @@ export default function PayrollPage() {
         if (entitiesToPull.includes("employees")) {
           tasks.push(employeePullToLocal());
         }
+        if (entitiesToPull.includes("accounts")) {
+          tasks.push(accountsPullToLocal());
+        }
+        if (entitiesToPull.includes("exchange_rates")) {
+          tasks.push(exchangeRatesPullToLocal());
+        }
         if (entitiesToPull.includes("salary_advances")) {
           tasks.push(salaryAdvancesPullToLocal());
         }
         if (entitiesToPull.includes("salary_payments")) {
           tasks.push(salaryPaymentsPullToLocal());
         }
+        tasks.push(employeeSalaryHistoriesPullToLocal());
         await Promise.all(tasks);
       } catch {
         pullFailed = true;
@@ -222,7 +270,12 @@ export default function PayrollPage() {
         return;
       }
 
-      void refresh({ showLoader: false, showFailureToast: false, entitiesToPull: touchedPayrollData });
+      const nextEntities = new Set<PayrollSyncEntity>(touchedPayrollData);
+      if (nextEntities.has("salary_payments")) {
+        nextEntities.add("accounts");
+      }
+
+      void refresh({ showLoader: false, showFailureToast: false, entitiesToPull: Array.from(nextEntities) });
     };
     window.addEventListener("sync:complete", onSyncComplete as EventListener);
     return () => {
@@ -235,35 +288,160 @@ export default function PayrollPage() {
     [employees]
   );
 
+  const accountOptions = useMemo(
+    () => accounts.map((item) => ({ value: String(item.id), label: item.label })),
+    [accounts]
+  );
+
   const advanceSummary = useMemo(() => {
     const approved = advances.filter((row) => row.status === "approved");
     const pending = advances.filter((row) => row.status === "pending");
     return {
       approvedCount: approved.length,
-      approvedAmount: approved.reduce((sum, row) => sum + Number(row.amount ?? 0), 0),
+      approvedAmountUsd: approved.reduce(
+        (sum, row) =>
+          sum +
+          Number(
+            convertCurrencyToUsd(
+              Number(row.amount ?? 0),
+              normalizeCurrency(row.currency_code ?? "USD"),
+              Number(activeExchangeRate?.rate ?? 0) || null
+            ) ?? 0
+          ),
+        0
+      ),
       pendingCount: pending.length,
     };
-  }, [advances]);
+  }, [activeExchangeRate, advances]);
 
   const paymentSummary = useMemo(() => {
     const paid = payments.filter((row) => row.status === "paid");
     return {
       paidCount: paid.length,
-      totalNet: paid.reduce((sum, row) => sum + Number(row.net_salary ?? 0), 0),
-      totalGross: paid.reduce((sum, row) => sum + Number(row.gross_salary ?? 0), 0),
+      totalNetUsd: paid.reduce((sum, row) => sum + Number(row.net_salary_usd ?? convertCurrencyToUsd(Number(row.net_salary ?? 0), normalizeCurrency(row.salary_currency_code ?? "USD"), Number(activeExchangeRate?.rate ?? 0) || null) ?? 0), 0),
+      totalGrossUsd: paid.reduce((sum, row) => sum + Number(row.gross_salary_usd ?? convertCurrencyToUsd(Number(row.gross_salary ?? 0), normalizeCurrency(row.salary_currency_code ?? "USD"), Number(activeExchangeRate?.rate ?? 0) || null) ?? 0), 0),
     };
-  }, [payments]);
+  }, [activeExchangeRate, payments]);
 
   const currentNetSalary = useMemo(() => {
     const gross = Number(paymentForm.gross_salary || 0);
     const advanceDeducted = Math.min(gross, Math.max(0, Number(paymentForm.advance_deducted || 0)));
-    return Math.max(0, gross - advanceDeducted);
-  }, [paymentForm.advance_deducted, paymentForm.gross_salary]);
+    const taxDeducted = Math.min(gross, Number((gross * (Math.min(100, Math.max(0, Number(paymentForm.tax_percentage || 0))) / 100)).toFixed(2)));
+    const otherDeductions = Math.min(gross, Math.max(0, Number(paymentForm.other_deductions || 0)));
+    return Math.max(0, gross - advanceDeducted - taxDeducted - otherDeductions);
+  }, [paymentForm.advance_deducted, paymentForm.gross_salary, paymentForm.other_deductions, paymentForm.tax_percentage]);
+
+  const currentTaxDeducted = useMemo(() => {
+    const gross = Number(paymentForm.gross_salary || 0);
+    const taxPercentage = Math.min(100, Math.max(0, Number(paymentForm.tax_percentage || 0)));
+    return Math.min(gross, Number((gross * (taxPercentage / 100)).toFixed(2)));
+  }, [paymentForm.gross_salary, paymentForm.tax_percentage]);
 
   const selectedEmployee = useMemo(
     () => employees.find((item) => String(item.id) === paymentForm.employee_id) ?? null,
     [employees, paymentForm.employee_id]
   );
+
+  const selectedAdvanceEmployee = useMemo(
+    () => employees.find((item) => String(item.id) === advanceForm.employee_id) ?? null,
+    [advanceForm.employee_id, employees]
+  );
+
+  const selectedSalaryCurrency = useMemo(
+    () => normalizeCurrency(paymentForm.salary_currency_code || selectedEmployee?.salaryCurrency || "USD"),
+    [paymentForm.salary_currency_code, selectedEmployee]
+  );
+
+  const selectedAccount = useMemo(
+    () => accounts.find((item) => String(item.id) === paymentForm.account_id) ?? null,
+    [accounts, paymentForm.account_id]
+  );
+
+  const selectedAccountCurrency = useMemo(
+    () => normalizeCurrency(selectedAccount?.currency ?? "USD"),
+    [selectedAccount]
+  );
+
+  const selectedAccountRateSnapshot = useMemo(() => {
+    if (!selectedAccount) return null;
+    if (selectedAccountCurrency === selectedSalaryCurrency) return 1;
+    const rate = Number(activeExchangeRate?.rate ?? 0);
+    return rate > 0 ? rate : null;
+  }, [activeExchangeRate, selectedAccount, selectedAccountCurrency, selectedSalaryCurrency]);
+
+  const selectedAccountPaymentAmount = useMemo(() => {
+    if (!selectedAccount) return null;
+    return convertAmountBetweenCurrencies(currentNetSalary, selectedSalaryCurrency, selectedAccountCurrency, selectedAccountRateSnapshot);
+  }, [currentNetSalary, selectedAccount, selectedAccountCurrency, selectedAccountRateSnapshot, selectedSalaryCurrency]);
+
+  const editingPaymentRestoredAccountAmount = useMemo(() => {
+    if (!editingPayment || editingPayment.status !== "paid" || !selectedAccount) return 0;
+    if (Number(editingPayment.account_id ?? 0) !== Number(selectedAccount.id)) return 0;
+
+    if (editingPayment.net_salary_account_amount !== null && editingPayment.net_salary_account_amount !== undefined) {
+      return Number(editingPayment.net_salary_account_amount ?? 0);
+    }
+
+    const previousAccountCurrency = normalizeCurrency(editingPayment.payment_currency_code ?? editingPayment.account_currency ?? selectedAccount.currency);
+    const previousSalaryCurrency = normalizeCurrency(editingPayment.salary_currency_code ?? "USD");
+    const previousRate =
+      previousAccountCurrency === previousSalaryCurrency
+        ? 1
+        : Number(editingPayment.exchange_rate_snapshot ?? editingPayment.salary_exchange_rate_snapshot ?? activeExchangeRate?.rate ?? 0) || null;
+    return (
+      convertAmountBetweenCurrencies(Number(editingPayment.net_salary ?? 0), previousSalaryCurrency, previousAccountCurrency, previousRate) ?? 0
+    );
+  }, [activeExchangeRate, editingPayment, selectedAccount]);
+
+  const effectiveSelectedAccountBalance = useMemo(() => {
+    if (!selectedAccount) return 0;
+
+    const editingUsesSamePaidAccount =
+      Boolean(editingPayment) &&
+      editingPayment?.status === "paid" &&
+      Number(editingPayment.account_id ?? 0) === Number(selectedAccount.id);
+
+    if (!editingUsesSamePaidAccount) {
+      return Number(selectedAccount.currentBalance ?? 0);
+    }
+
+    return Number((Number(selectedAccount.currentBalance ?? 0) + editingPaymentRestoredAccountAmount).toFixed(2));
+  }, [editingPayment, editingPaymentRestoredAccountAmount, selectedAccount]);
+
+  const missingExchangeRateForSelectedAccount = useMemo(() => {
+    return paymentForm.status === "paid" && Boolean(selectedAccount) && selectedAccountCurrency !== selectedSalaryCurrency && selectedAccountRateSnapshot === null;
+  }, [paymentForm.status, selectedAccount, selectedAccountCurrency, selectedAccountRateSnapshot, selectedSalaryCurrency]);
+
+  const accountBalanceInsufficient = useMemo(() => {
+    if (paymentForm.status !== "paid" || !selectedAccount) return false;
+    if (selectedAccountPaymentAmount === null) return false;
+    return effectiveSelectedAccountBalance < selectedAccountPaymentAmount;
+  }, [effectiveSelectedAccountBalance, paymentForm.status, selectedAccount, selectedAccountPaymentAmount]);
+
+  const availableAdvanceBalance = useMemo(() => {
+    if (!selectedEmployee) return 0;
+    const rateSnapshot = Number(activeExchangeRate?.rate ?? 0) || null;
+    return advances
+      .filter((item) => Number(item.employee_id) === Number(selectedEmployee.id))
+      .filter((item) => ["approved", "partial_deducted"].includes(String(item.status)))
+      .reduce((sum, item) => {
+        const converted = convertAmountBetweenCurrencies(
+          Number(item.remaining_amount ?? 0),
+          normalizeCurrency(item.currency_code ?? selectedEmployee.salaryCurrency ?? "USD"),
+          selectedSalaryCurrency,
+          rateSnapshot
+        );
+        return sum + Number(converted ?? 0);
+      }, 0);
+  }, [activeExchangeRate, advances, selectedEmployee, selectedSalaryCurrency]);
+
+  const suggestedAdvanceDeduction = useMemo(() => {
+    const gross = Number(paymentForm.gross_salary || 0);
+    const taxDeducted = currentTaxDeducted;
+    const otherDeductions = Math.max(0, Number(paymentForm.other_deductions || 0));
+    const maxAllowed = Math.max(0, gross - taxDeducted - otherDeductions);
+    return Math.min(availableAdvanceBalance, maxAllowed);
+  }, [availableAdvanceBalance, currentTaxDeducted, paymentForm.gross_salary, paymentForm.other_deductions]);
 
   useEffect(() => {
     if (!paymentFormOpen || editingPayment || !selectedEmployee) return;
@@ -273,9 +451,22 @@ export default function PayrollPage() {
       return {
         ...prev,
         gross_salary: String(selectedEmployee.baseSalary || 0),
+        salary_currency_code: normalizeCurrency(selectedEmployee.salaryCurrency || "USD"),
       };
     });
   }, [editingPayment, paymentFormOpen, selectedEmployee]);
+
+  useEffect(() => {
+    if (!paymentFormOpen || editingPayment || !selectedEmployee) return;
+    setPaymentForm((prev) => {
+      const currentAdvance = Number(prev.advance_deducted || 0);
+      if (currentAdvance > 0) return prev;
+      return {
+        ...prev,
+        advance_deducted: String(Number(suggestedAdvanceDeduction.toFixed(2))),
+      };
+    });
+  }, [editingPayment, paymentFormOpen, selectedEmployee, suggestedAdvanceDeduction]);
 
   const openAdvanceCreate = useCallback(() => {
     setEditingAdvance(null);
@@ -332,6 +523,7 @@ export default function PayrollPage() {
       const payload: SalaryAdvanceInput = {
         employee_id: Number(advanceForm.employee_id),
         amount: Number(advanceForm.amount),
+        currency_code: editingAdvance?.currency_code || selectedAdvanceEmployee?.salaryCurrency || "USD",
         reason: advanceForm.reason,
         status: advanceForm.status,
       };
@@ -347,20 +539,38 @@ export default function PayrollPage() {
     } finally {
       setSaving(false);
     }
-  }, [advanceForm, closeAdvanceForm, editingAdvance?.uuid, loadLocal, saving]);
+  }, [advanceForm, closeAdvanceForm, editingAdvance?.currency_code, editingAdvance?.uuid, loadLocal, saving, selectedAdvanceEmployee?.salaryCurrency]);
 
   const submitPayment = useCallback(async () => {
     if (saving) return;
     setSaving(true);
     setPaymentFormError(null);
     try {
+      if (paymentForm.status === "paid" && selectedAccount && missingExchangeRateForSelectedAccount) {
+        throw new Error("No active USD to AFN exchange rate is available for the selected payment account.");
+      }
+
+      if (
+        paymentForm.status === "paid" &&
+        selectedAccount &&
+        selectedAccountPaymentAmount !== null &&
+        effectiveSelectedAccountBalance < selectedAccountPaymentAmount
+      ) {
+        throw new Error("Selected account balance is smaller than the converted salary payment amount.");
+      }
+
       const payload: SalaryPaymentInput = {
         employee_id: Number(paymentForm.employee_id),
         period: paymentForm.period,
         gross_salary: Number(paymentForm.gross_salary),
         advance_deducted: Number(paymentForm.advance_deducted),
+        tax_percentage: Number(paymentForm.tax_percentage),
+        tax_deducted: currentTaxDeducted,
+        other_deductions: Number(paymentForm.other_deductions),
         net_salary: currentNetSalary,
+        salary_currency_code: selectedSalaryCurrency,
         status: paymentForm.status,
+        account_id: paymentForm.account_id ? Number(paymentForm.account_id) : null,
         paid_at: paymentForm.status === "paid" ? paymentForm.paid_at : null,
       };
       if (editingPayment?.uuid) {
@@ -369,13 +579,27 @@ export default function PayrollPage() {
         await salaryPaymentCreate(payload);
       }
       closePaymentForm();
+      await salaryAdvancesPullToLocal();
       await loadLocal();
     } catch (error: unknown) {
       setPaymentFormError(error instanceof Error ? error.message : "Unable to save salary payment.");
     } finally {
       setSaving(false);
     }
-  }, [closePaymentForm, currentNetSalary, editingPayment?.uuid, loadLocal, paymentForm, saving]);
+  }, [
+    closePaymentForm,
+    currentNetSalary,
+    currentTaxDeducted,
+    editingPayment?.uuid,
+    effectiveSelectedAccountBalance,
+    loadLocal,
+    missingExchangeRateForSelectedAccount,
+    paymentForm,
+    saving,
+    selectedAccount,
+    selectedAccountPaymentAmount,
+    selectedSalaryCurrency,
+  ]);
 
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
@@ -396,12 +620,14 @@ export default function PayrollPage() {
     () => [
       { key: "employee_name", label: "Employee", render: (item) => <span className="font-semibold">{item.employee_name || "-"}</span> },
       { key: "amount", label: "Amount", render: (item) => money(Number(item.amount ?? 0)) },
+      { key: "deducted_amount", label: "Deducted", render: (item) => money(Number(item.deducted_amount ?? 0)) },
+      { key: "remaining_amount", label: "Remaining", render: (item) => <span className="font-semibold">{money(Number(item.remaining_amount ?? 0))}</span> },
       { key: "reason", label: "Reason", render: (item) => <span>{item.reason || "-"}</span> },
       {
         key: "status",
         label: "Status",
         render: (item) => (
-          <Badge color={item.status === "approved" ? "emerald" : item.status === "deducted" ? "blue" : item.status === "rejected" ? "red" : "amber"}>
+          <Badge color={item.status === "approved" ? "emerald" : item.status === "partial_deducted" ? "blue" : item.status === "deducted" ? "purple" : item.status === "rejected" ? "red" : "amber"}>
             {item.status}
           </Badge>
         ),
@@ -415,9 +641,24 @@ export default function PayrollPage() {
     () => [
       { key: "employee_name", label: "Employee", render: (item) => <span className="font-semibold">{item.employee_name || "-"}</span> },
       { key: "period", label: "Period", render: (item) => <span>{item.period || "-"}</span> },
-      { key: "gross_salary", label: "Gross", render: (item) => money(Number(item.gross_salary ?? 0)) },
-      { key: "advance_deducted", label: "Advance", render: (item) => money(Number(item.advance_deducted ?? 0)) },
-      { key: "net_salary", label: "Net", render: (item) => <span className="font-semibold text-emerald-700 dark:text-emerald-400">{money(Number(item.net_salary ?? 0))}</span> },
+      { key: "gross_salary", label: "Gross", render: (item) => money(Number(item.gross_salary ?? 0), item.salary_currency_code || "USD") },
+      { key: "advance_deducted", label: "Advance", render: (item) => money(Number(item.advance_deducted ?? 0), item.salary_currency_code || "USD") },
+      { key: "tax_deducted", label: "Tax", render: (item) => `${Number(item.tax_percentage ?? 0).toFixed(2)}% (${money(Number(item.tax_deducted ?? 0), item.salary_currency_code || "USD")})` },
+      { key: "other_deductions", label: "Other", render: (item) => money(Number(item.other_deductions ?? 0), item.salary_currency_code || "USD") },
+      { key: "net_salary", label: "Net", render: (item) => <span className="font-semibold text-emerald-700 dark:text-emerald-400">{money(Number(item.net_salary ?? 0), item.salary_currency_code || "USD")}</span> },
+      {
+        key: "net_salary_account_amount",
+        label: "Payout",
+        render: (item) =>
+          item.net_salary_account_amount !== null && item.net_salary_account_amount !== undefined
+            ? money(Number(item.net_salary_account_amount ?? 0), item.payment_currency_code || item.account_currency || "USD")
+            : "-",
+      },
+      {
+        key: "account_name",
+        label: "Paid From",
+        render: (item) => <span>{item.account_name ? `${item.account_name} (${item.payment_currency_code || item.account_currency || "USD"})` : "-"}</span>,
+      },
       {
         key: "status",
         label: "Status",
@@ -485,13 +726,13 @@ export default function PayrollPage() {
           </div>
           <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
             <div className="text-sm font-medium text-slate-500">Approved Advances</div>
-            <div className="mt-2 text-3xl font-semibold text-slate-900 dark:text-white">{money(advanceSummary.approvedAmount)}</div>
-            <div className="mt-1 text-xs text-slate-500">{advanceSummary.approvedCount} approved, {advanceSummary.pendingCount} pending</div>
+            <div className="mt-2 text-3xl font-semibold text-slate-900 dark:text-white">{money(advanceSummary.approvedAmountUsd, "USD")}</div>
+            <div className="mt-1 text-xs text-slate-500">{advanceSummary.approvedCount} approved, {advanceSummary.pendingCount} pending (USD eq.)</div>
           </div>
           <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
             <div className="text-sm font-medium text-slate-500">Paid Salary</div>
-            <div className="mt-2 text-3xl font-semibold text-slate-900 dark:text-white">{money(paymentSummary.totalNet)}</div>
-            <div className="mt-1 text-xs text-slate-500">{paymentSummary.paidCount} paid records, gross {money(paymentSummary.totalGross)}</div>
+            <div className="mt-2 text-3xl font-semibold text-slate-900 dark:text-white">{money(paymentSummary.totalNetUsd, "USD")}</div>
+            <div className="mt-1 text-xs text-slate-500">{paymentSummary.paidCount} paid records, gross {money(paymentSummary.totalGrossUsd, "USD")} (USD eq.)</div>
           </div>
         </div>
 
@@ -558,6 +799,7 @@ export default function PayrollPage() {
               options={[
                 { value: "pending", label: "Pending" },
                 { value: "approved", label: "Approved" },
+                { value: "partial_deducted", label: "Partial Deducted" },
                 { value: "deducted", label: "Deducted" },
                 { value: "rejected", label: "Rejected" },
               ]}
@@ -607,7 +849,17 @@ export default function PayrollPage() {
               label="Employee"
               type="select"
               value={paymentForm.employee_id}
-              onChange={(value) => setPaymentForm((prev) => ({ ...prev, employee_id: String(value) }))}
+              onChange={(value) => {
+                const nextEmployeeId = String(value);
+                const nextEmployee = employees.find((item) => String(item.id) === nextEmployeeId) ?? null;
+                setPaymentForm((prev) => ({
+                  ...prev,
+                  employee_id: nextEmployeeId,
+                  gross_salary: !editingPayment && nextEmployee ? String(nextEmployee.baseSalary || 0) : prev.gross_salary,
+                  salary_currency_code: !editingPayment && nextEmployee ? normalizeCurrency(nextEmployee.salaryCurrency || "USD") : prev.salary_currency_code,
+                  advance_deducted: !editingPayment ? "0" : prev.advance_deducted,
+                }));
+              }}
               options={employeeOptions}
               required
             />
@@ -619,17 +871,23 @@ export default function PayrollPage() {
               required
             />
             <FormField
-              label="Gross Salary"
+              label={`Gross Salary (${selectedSalaryCurrency})`}
               type="number"
               value={paymentForm.gross_salary}
               onChange={(value) => setPaymentForm((prev) => ({ ...prev, gross_salary: String(value) }))}
               required
             />
             <FormField
-              label="Advance Deducted"
+              label={`Advance Deducted (${selectedSalaryCurrency})`}
               type="number"
               value={paymentForm.advance_deducted}
               onChange={(value) => setPaymentForm((prev) => ({ ...prev, advance_deducted: String(value) }))}
+            />
+            <FormField
+              label="Tax Percentage (%)"
+              type="number"
+              value={paymentForm.tax_percentage}
+              onChange={(value) => setPaymentForm((prev) => ({ ...prev, tax_percentage: String(value) }))}
             />
             <FormField
               label="Status"
@@ -649,14 +907,54 @@ export default function PayrollPage() {
               required
             />
             <FormField
+              label="Payment Account"
+              type="select"
+              value={paymentForm.account_id}
+              onChange={(value) => setPaymentForm((prev) => ({ ...prev, account_id: String(value) }))}
+              options={accountOptions}
+              placeholder="Select account"
+            />
+            <FormField
               label="Paid At"
               type="date"
               value={paymentForm.paid_at}
               onChange={(value) => setPaymentForm((prev) => ({ ...prev, paid_at: String(value) }))}
             />
           </div>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-slate-200">
+            Salary currency for this payroll record: <span className="font-semibold">{selectedSalaryCurrency}</span>
+          </div>
+          {selectedAccount && (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 dark:border-[#2a2a3e] dark:bg-[#0a0a0f] dark:text-slate-200">
+              Selected account balance: <span className="font-semibold">{money(selectedAccount.currentBalance, selectedAccount.currency)}</span>
+              <span className="ml-2 text-slate-500">({selectedAccount.currency})</span>
+            </div>
+          )}
+          {selectedAccount && selectedAccountCurrency !== selectedSalaryCurrency && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-200">
+              Official rate in use: <span className="font-semibold">{formatExchangeRate(selectedAccountRateSnapshot)}</span>
+            </div>
+          )}
+          {selectedAccount && paymentForm.status === "paid" && missingExchangeRateForSelectedAccount && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-200">
+              No active official USD to AFN rate is cached. Create or sync today&apos;s rate before paying from an AFN account.
+            </div>
+          )}
+          {selectedAccount && paymentForm.status === "paid" && selectedAccountPaymentAmount !== null && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-200">
+              This payment will post as <span className="font-semibold">{money(selectedAccountPaymentAmount, selectedAccount.currency)}</span> from the selected account.
+              <span className="ml-2 text-blue-700/80 dark:text-blue-200/80">Base payroll amount remains {money(currentNetSalary, selectedSalaryCurrency)}.</span>
+            </div>
+          )}
+          {selectedAccount && paymentForm.status === "paid" && accountBalanceInsufficient && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-200">
+              Insufficient account balance. Available for this payment:{" "}
+              <span className="font-semibold">{money(effectiveSelectedAccountBalance, selectedAccount.currency)}</span>. Required converted payout:{" "}
+              <span className="font-semibold">{money(selectedAccountPaymentAmount ?? 0, selectedAccount.currency)}</span>.
+            </div>
+          )}
           <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200">
-            Net salary will be saved as <span className="font-semibold">{money(currentNetSalary)}</span>
+            Net salary will be saved as <span className="font-semibold">{money(currentNetSalary, selectedSalaryCurrency)}</span>
           </div>
           {paymentFormError && <p className="text-sm text-red-600">{paymentFormError}</p>}
           <div className="flex justify-end gap-3">

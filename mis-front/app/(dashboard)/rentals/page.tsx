@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import RequirePermission from "@/components/auth/RequirePermission";
@@ -8,9 +8,10 @@ import { DataTable, type Column } from "@/components/ui/DataTable";
 import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
-import type { ApartmentRentalRow, RentalPaymentRow } from "@/db/localDB";
+import type { AccountRow, ApartmentRentalRow, RentalPaymentRow } from "@/db/localDB";
 import { apartmentsListLocal, apartmentsPullToLocal } from "@/modules/apartments/apartments.repo";
 import { customersListLocal, customersPullToLocal } from "@/modules/customers/customers.repo";
+import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import {
   rentalClose,
   rentalCreate,
@@ -38,6 +39,11 @@ type Option = {
   status?: string;
 };
 
+type AccountOption = {
+  id: number;
+  label: string;
+};
+
 type RentalFormState = {
   apartment_id: string;
   tenant_id: string;
@@ -47,6 +53,7 @@ type RentalFormState = {
   advance_months: string;
   initial_advance_paid: string;
   initial_payment_method: string;
+  initial_account_id: string;
   notes: string;
 };
 
@@ -108,6 +115,7 @@ const emptyRentalForm = (): RentalFormState => ({
   advance_months: "3",
   initial_advance_paid: "0",
   initial_payment_method: "cash",
+  initial_account_id: "",
   notes: "",
 });
 
@@ -177,6 +185,7 @@ export default function RentalsPage() {
   const [saving, setSaving] = useState(false);
   const [apartments, setApartments] = useState<Option[]>([]);
   const [customers, setCustomers] = useState<Option[]>([]);
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [editing, setEditing] = useState<ApartmentRentalRow | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<RentalFormState>(emptyRentalForm());
@@ -185,10 +194,11 @@ export default function RentalsPage() {
   const [pendingDelete, setPendingDelete] = useState<ApartmentRentalRow | null>(null);
 
   const loadLookups = useCallback(async () => {
-    await Promise.allSettled([apartmentsPullToLocal(), customersPullToLocal()]);
-    const [apartmentsLocal, customersLocal] = await Promise.all([
+    await Promise.allSettled([apartmentsPullToLocal(), customersPullToLocal(), accountsPullToLocal()]);
+    const [apartmentsLocal, customersLocal, accountsLocal] = await Promise.all([
       apartmentsListLocal({ page: 1, pageSize: 500 }),
       customersListLocal({ page: 1, pageSize: 500 }),
+      accountsListLocal({ page: 1, pageSize: 500 }),
     ]);
 
     const apartmentOptions = apartmentsLocal.items
@@ -208,8 +218,21 @@ export default function RentalsPage() {
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
 
+    const accountOptions = accountsLocal.items
+      .filter((item: AccountRow) => Number(item.id) > 0 && item.status === "active")
+      .map((item: AccountRow) => ({
+        id: Number(item.id),
+        label: `${item.name} (${item.currency}) - ${new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: String(item.currency || "USD").toUpperCase(),
+          maximumFractionDigits: 2,
+        }).format(Number(item.current_balance ?? 0))}`,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+
     setApartments(apartmentOptions);
     setCustomers(customerOptions);
+    setAccounts(accountOptions);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -323,6 +346,7 @@ export default function RentalsPage() {
       advance_months: String(row.advance_months ?? 3),
       initial_advance_paid: "0",
       initial_payment_method: "cash",
+      initial_account_id: "",
       notes: "",
     });
     setShowForm(true);
@@ -363,6 +387,13 @@ export default function RentalsPage() {
       return;
     }
 
+    const initialAdvancePaid = Number(form.initial_advance_paid || 0);
+    const initialAccountId = Number(form.initial_account_id || 0);
+    if (!editing && initialAdvancePaid > 0 && (!Number.isFinite(initialAccountId) || initialAccountId <= 0)) {
+      notifyError("Payment account is required when initial advance is received.");
+      return;
+    }
+
     setSaving(true);
     try {
       if (editing?.uuid) {
@@ -381,8 +412,9 @@ export default function RentalsPage() {
           contract_end: form.contract_end,
           monthly_rent: monthlyRent,
           advance_months: Math.trunc(advanceMonths),
-          initial_advance_paid: Number(form.initial_advance_paid || 0),
+          initial_advance_paid: initialAdvancePaid,
           initial_payment_method: form.initial_payment_method,
+          initial_account_id: initialAccountId > 0 ? initialAccountId : null,
           notes: form.notes.trim() || undefined,
         };
         await rentalCreate(payload);
@@ -393,7 +425,7 @@ export default function RentalsPage() {
     finally {
       setSaving(false);
     }
-  }, [closeFormModal, editing?.uuid, form, loadLookups, refresh, saving]);
+  }, [closeFormModal, editing, form, loadLookups, refresh, saving]);
 
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete?.uuid) return;
@@ -838,6 +870,16 @@ export default function RentalsPage() {
                 ]}
               />
             )}
+            {!editing && Number(form.initial_advance_paid || 0) > 0 && (
+              <FormField
+                label="Payment Account"
+                type="select"
+                value={form.initial_account_id}
+                onChange={(value) => setForm((prev) => ({ ...prev, initial_account_id: String(value) }))}
+                options={accounts.map((item) => ({ value: String(item.id), label: item.label }))}
+                required
+              />
+            )}
           </div>
           {!editing && (
             <FormField
@@ -1015,3 +1057,9 @@ export default function RentalsPage() {
     </RequirePermission>
   );
 }
+
+
+
+
+
+

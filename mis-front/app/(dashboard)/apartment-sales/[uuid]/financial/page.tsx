@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -13,8 +13,8 @@ import ApartmentSaleFinancialPanel, {
   type FinancialFormData,
   type ReceiptFormData,
 } from "@/components/apartment-sales/ApartmentSaleFinancialPanel";
-import type { ApartmentSaleFinancialRow, ApartmentSaleRow, InstallmentRow } from "@/db/localDB";
-import { notifyError, notifySuccess } from "@/lib/notify";
+import type { AccountRow, ApartmentSaleFinancialRow, ApartmentSaleRow, InstallmentRow } from "@/db/localDB";
+import { notifySuccess } from "@/lib/notify";
 import {
   apartmentSaleGetLocal,
   apartmentSaleIssueDeed,
@@ -25,6 +25,7 @@ import {
   apartmentSaleFinancialUpdateLocal,
 } from "@/modules/apartment-sale-financials/apartment-sale-financials.repo";
 import { installmentsListLocal, installmentsPullToLocal } from "@/modules/installments/installments.repo";
+import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import {
   municipalityLetterGenerate,
   municipalityLetterGet,
@@ -34,35 +35,35 @@ import {
   type MunicipalityReceipt,
 } from "@/modules/apartment-sale-financials/municipality-workflow.repo";
 
+const COMPANY_SHARE_RATIO = 0.85;
+
+function toMoney(value: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Number(n.toFixed(2));
+}
+
+function toCompanyInstallmentRow(item: InstallmentRow): CompanyInstallmentPaymentRow {
+  const installmentAmount = toMoney(item.amount ?? 0);
+  const paidAmount = toMoney(item.paid_amount ?? 0);
+  const companyShareAmount = toMoney(installmentAmount * COMPANY_SHARE_RATIO);
+  const companySharePaid = toMoney(paidAmount * COMPANY_SHARE_RATIO);
+  const companyShareRemaining = toMoney(Math.max(0, companyShareAmount - companySharePaid));
+
+  return {
+    uuid: item.uuid,
+    installment_no: item.installment_no,
+    due_date: item.due_date,
+    amount: installmentAmount,
+    paid_amount: paidAmount,
+    status: item.status,
+    company_share_amount: companyShareAmount,
+    company_share_paid: companySharePaid,
+    company_share_remaining: companyShareRemaining,
+  };
+}
+
 export default function ApartmentSaleFinancialPage() {
-  const COMPANY_SHARE_RATIO = 0.85;
-
-  const toMoney = (value: number): number => {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return 0;
-    return Number(n.toFixed(2));
-  };
-
-  const toCompanyInstallmentRow = (item: InstallmentRow): CompanyInstallmentPaymentRow => {
-    const installmentAmount = toMoney(item.amount ?? 0);
-    const paidAmount = toMoney(item.paid_amount ?? 0);
-    const companyShareAmount = toMoney(installmentAmount * COMPANY_SHARE_RATIO);
-    const companySharePaid = toMoney(paidAmount * COMPANY_SHARE_RATIO);
-    const companyShareRemaining = toMoney(Math.max(0, companyShareAmount - companySharePaid));
-
-    return {
-      uuid: item.uuid,
-      installment_no: item.installment_no,
-      due_date: item.due_date,
-      amount: installmentAmount,
-      paid_amount: paidAmount,
-      status: item.status,
-      company_share_amount: companyShareAmount,
-      company_share_paid: companySharePaid,
-      company_share_remaining: companyShareRemaining,
-    };
-  };
-
   const params = useParams<{ uuid?: string | string[] }>();
   const saleUuid = useMemo(() => {
     const raw = params?.uuid;
@@ -86,6 +87,7 @@ export default function ApartmentSaleFinancialPage() {
   const [receiptSaving, setReceiptSaving] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
   const [receiptForm, setReceiptForm] = useState<ReceiptFormData>(createEmptyReceiptForm());
+  const [accountOptions, setAccountOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [companyInstallmentRows, setCompanyInstallmentRows] = useState<CompanyInstallmentPaymentRow[]>([]);
   const [companyInstallmentLoading, setCompanyInstallmentLoading] = useState(false);
   const [deedIssuing, setDeedIssuing] = useState(false);
@@ -97,6 +99,23 @@ export default function ApartmentSaleFinancialPage() {
     setSale(row);
     return row;
   }, [saleUuid]);
+
+  const loadAccountOptions = useCallback(async () => {
+    const accountPage = await accountsListLocal({ page: 1, pageSize: 500 });
+    setAccountOptions(
+      accountPage.items
+        .filter((item: AccountRow) => Number(item.id) > 0 && item.status === "active")
+        .map((item: AccountRow) => ({
+          value: String(item.id),
+          label: `${item.name} (${item.currency}) - ${new Intl.NumberFormat("en-US", {
+            style: "currency",
+            currency: String(item.currency || "USD").toUpperCase(),
+            maximumFractionDigits: 2,
+          }).format(Number(item.current_balance ?? 0))}`,
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label))
+    );
+  }, []);
 
   const loadFinancialEditor = useCallback(async (options: { soft?: boolean } = {}) => {
     if (!saleUuid) return;
@@ -176,8 +195,9 @@ export default function ApartmentSaleFinancialPage() {
     setLoadError(null);
     try {
       try {
-        await Promise.all([apartmentSalePullToLocal(), installmentsPullToLocal()]);
+        await Promise.all([apartmentSalePullToLocal(), installmentsPullToLocal(), accountsPullToLocal()]);
       } catch {}
+      await loadAccountOptions();
       const row = await loadSaleLocal();
       if (!row) {
         setLoadError("Sale not found.");
@@ -187,7 +207,7 @@ export default function ApartmentSaleFinancialPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadFinancialEditor, loadSaleLocal, saleUuid]);
+  }, [loadAccountOptions, loadFinancialEditor, loadSaleLocal, saleUuid]);
 
   useEffect(() => {
     void refresh();
@@ -198,6 +218,7 @@ export default function ApartmentSaleFinancialPage() {
       void (async () => {
         const row = await loadSaleLocal();
         if (!row) return;
+        await loadAccountOptions();
         await loadFinancialEditor({ soft: true });
       })();
     };
@@ -205,9 +226,23 @@ export default function ApartmentSaleFinancialPage() {
     return () => {
       window.removeEventListener("sync:complete", onSyncComplete as EventListener);
     };
-  }, [loadFinancialEditor, loadSaleLocal]);
+  }, [loadAccountOptions, loadFinancialEditor, loadSaleLocal]);
 
   const deedStatus = useMemo(() => String(sale?.deed_status ?? "not_issued").trim().toLowerCase(), [sale?.deed_status]);
+  const workflowBlockedReason = useMemo(() => {
+    if (!sale) return "Sale not found.";
+    const saleStatus = String(sale.status ?? "").trim().toLowerCase();
+    if (saleStatus === "pending") {
+      return "Admin approval is required before payments, municipality receipts, and deed workflow can continue.";
+    }
+    if (saleStatus === "cancelled") {
+      return "This sale was rejected and cancelled. Payment and municipality workflow are locked.";
+    }
+    if (saleStatus === "terminated" || saleStatus === "defaulted") {
+      return "This sale is closed. Payment and municipality workflow are locked.";
+    }
+    return null;
+  }, [sale]);
   const deedIssuedAtLabel = useMemo(() => {
     if (!sale?.deed_issued_at || !Number.isFinite(sale.deed_issued_at)) return "-";
     return new Date(sale.deed_issued_at).toLocaleString();
@@ -307,6 +342,11 @@ export default function ApartmentSaleFinancialPage() {
       setReceiptError(`Amount cannot exceed remaining municipality (${remainingMunicipality.toFixed(2)}).`);
       return false;
     }
+    const accountId = Number(receiptForm.account_id);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      setReceiptError("Payment account is required.");
+      return false;
+    }
 
     setReceiptSaving(true);
     setReceiptError(null);
@@ -315,6 +355,7 @@ export default function ApartmentSaleFinancialPage() {
         amount,
         payment_date: receiptForm.payment_date,
         payment_method: receiptForm.payment_method,
+        account_id: accountId,
         receipt_no: receiptForm.receipt_no.trim() || undefined,
         notes: receiptForm.notes.trim() || undefined,
       });
@@ -361,7 +402,7 @@ export default function ApartmentSaleFinancialPage() {
   }, [deedIssuing, loadFinancialEditor, saleUuid]);
 
   return (
-    <RequirePermission permission="sales.create">
+    <RequirePermission permission={["sales.create", "sales.approve"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader
           title="Sale Financial Breakdown"
@@ -413,6 +454,7 @@ export default function ApartmentSaleFinancialPage() {
             deedStatus={deedStatus}
             deedIssuedAtLabel={deedIssuedAtLabel}
             saleLabel={sale.sale_id || sale.uuid}
+            workflowBlockedReason={workflowBlockedReason}
             deedBlockReason={deedBlockReason}
             canIssueDeed={canIssueDeed}
             deedIssuing={deedIssuing}
@@ -429,6 +471,7 @@ export default function ApartmentSaleFinancialPage() {
             onPrintLetter={handleLetterPrint}
             receiptForm={receiptForm}
             receiptRows={receiptRows}
+            accountOptions={accountOptions}
             receiptLoading={receiptLoading}
             receiptSaving={receiptSaving}
             receiptError={receiptError}
@@ -442,3 +485,6 @@ export default function ApartmentSaleFinancialPage() {
     </RequirePermission>
   );
 }
+
+
+

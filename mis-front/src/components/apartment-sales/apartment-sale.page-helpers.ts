@@ -90,6 +90,12 @@ export const toForm = (row: ApartmentSaleRow): ApartmentSaleFormData => ({
     due_date: toDateInput(item.due_date),
     amount: String(item.amount ?? ""),
   })),
+  receive_full_payment_now: false,
+  payment_account_id: "",
+  payment_date: toDateInput(row.sale_date),
+  payment_method: "cash",
+  payment_reference_no: "",
+  payment_notes: "",
 });
 
 /**
@@ -136,6 +142,23 @@ export const buildSalePayload = (form: ApartmentSaleFormData): Record<string, un
     schedule_locked: form.schedule_locked,
   };
 
+  if (form.payment_type === "full" && form.receive_full_payment_now) {
+    const paymentAccountId = Number(form.payment_account_id);
+    if (!Number.isFinite(paymentAccountId) || paymentAccountId <= 0) {
+      throw new Error("Payment account is required when receiving full payment now.");
+    }
+
+    payload.receive_full_payment_now = true;
+    payload.payment_account_id = Math.trunc(paymentAccountId);
+    payload.payment_date = (form.payment_date || form.sale_date || new Date().toISOString().slice(0, 10)).trim();
+    payload.payment_method = (form.payment_method || "cash").trim() || "cash";
+
+    const referenceNo = form.payment_reference_no.trim();
+    if (referenceNo) payload.payment_reference_no = referenceNo;
+    const paymentNotes = form.payment_notes.trim();
+    if (paymentNotes) payload.payment_notes = paymentNotes;
+  }
+
   if (form.payment_type === "installment") {
     payload.frequency_type = normalizeFrequency(form.frequency_type);
 
@@ -179,6 +202,7 @@ export const customerRemainingAmount = (
 ): number => {
   const netRaw = row.net_price ?? Number(row.total_price) - Number(row.discount);
   const net = Number.isFinite(Number(netRaw)) ? Number(netRaw) : 0;
+  const customerReceivable = toMoney2(net * 0.85);
   const status = String(row.status ?? "").trim().toLowerCase();
 
   if (status === "terminated" || status === "defaulted") {
@@ -186,8 +210,8 @@ export const customerRemainingAmount = (
     return Number.isFinite(debt) ? Math.max(0, debt) : 0;
   }
 
-  if (row.payment_type !== "installment") {
-    return status === "completed" ? 0 : Math.max(0, net);
+  if (row.payment_type !== "installment" && Number(row.installments_count ?? 0) <= 0) {
+    return status === "completed" ? 0 : Math.max(0, customerReceivable);
   }
 
   const paidFromMap = installmentPaidBySaleUuid?.get(row.uuid);
@@ -197,7 +221,7 @@ export const customerRemainingAmount = (
       ? Number(row.installments_paid_total)
       : 0;
 
-  return Math.max(0, net - paid);
+  return Math.max(0, customerReceivable - paid);
 };
 
 export type RowEditScope = "full" | "limited" | "none";
@@ -216,4 +240,20 @@ export const resolveRowEditScope = (row: ApartmentSaleRow): RowEditScope => {
   if (status === "completed" || status === "cancelled" || status === "terminated" || status === "defaulted") return "none";
   if (status === "approved" || row.has_paid_installments) return "limited";
   return status === "active" || status === "pending" ? "full" : "none";
+};
+
+/**
+ * Resolves whether a sale can be deleted without reopening edit permissions.
+ * Cancelled sales are deletable only when no payment was recorded and no deed was issued.
+ */
+export const canDeleteRow = (row: ApartmentSaleRow): boolean => {
+  if (typeof row.can_delete === "boolean") return row.can_delete;
+  if (row.deed_status === "issued") return false;
+
+  const status = String(row.status ?? "").trim().toLowerCase();
+  const hasPaid = Boolean(row.has_paid_installments) || Number(row.installments_paid_total ?? 0) > 0;
+
+  if (status === "cancelled") return !hasPaid;
+  if (status === "completed" || status === "terminated" || status === "defaulted" || status === "approved") return false;
+  return status === "active" || status === "pending";
 };

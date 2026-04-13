@@ -16,6 +16,9 @@ export default function ApartmentSaleSummaryPrintPage() {
     sale: null,
     customer: null,
     apartment: null,
+    installments: [],
+    financial: null,
+    customerDocuments: [],
   });
   const [loading, setLoading] = useState(() => Boolean(uuid));
 
@@ -45,7 +48,7 @@ export default function ApartmentSaleSummaryPrintPage() {
 
     const timer = window.setTimeout(() => {
       window.print();
-    }, 400);
+    }, 800);
 
     return () => {
       window.clearTimeout(timer);
@@ -55,7 +58,7 @@ export default function ApartmentSaleSummaryPrintPage() {
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-100 text-sm text-slate-600">
-        Loading sale summary...
+        Loading payment receipt...
       </div>
     );
   }
@@ -63,10 +66,17 @@ export default function ApartmentSaleSummaryPrintPage() {
   if (!state.sale) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-100 text-sm text-red-600">
-        Sale record not found in local storage.
+        Sale receipt is not available in local storage.
       </div>
     );
   }
 
-  return <ApartmentSaleSummaryPrintView sale={state.sale} customer={state.customer} apartment={state.apartment} />;
+  return (
+    <ApartmentSaleSummaryPrintView
+      sale={state.sale}
+      customer={state.customer}
+      apartment={state.apartment}
+      installments={state.installments}
+    />
+  );
 }

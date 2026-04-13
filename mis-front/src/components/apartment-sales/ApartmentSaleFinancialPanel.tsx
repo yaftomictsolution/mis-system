@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, type Dispatch, type SetStateAction } from "react";
 import { FormField } from "@/components/ui/FormField";
@@ -25,6 +25,7 @@ export type ReceiptFormData = {
   amount: string;
   payment_date: string;
   payment_method: "cash" | "bank" | "transfer" | "cheque";
+  account_id: string;
   receipt_no: string;
   notes: string;
 };
@@ -55,6 +56,7 @@ export const createEmptyReceiptForm = (): ReceiptFormData => ({
   amount: "",
   payment_date: new Date().toISOString().slice(0, 10),
   payment_method: "cash",
+  account_id: "",
   receipt_no: "",
   notes: "",
 });
@@ -72,6 +74,7 @@ type ApartmentSaleFinancialPanelProps = {
   deedStatus: string;
   deedIssuedAtLabel: string;
   saleLabel: string;
+  workflowBlockedReason?: string | null;
   deedBlockReason: string | null;
   canIssueDeed: boolean;
   deedIssuing: boolean;
@@ -84,6 +87,7 @@ type ApartmentSaleFinancialPanelProps = {
   onPrintLetter: () => void;
   receiptForm: ReceiptFormData;
   receiptRows: MunicipalityReceipt[];
+  accountOptions: Array<{ value: string; label: string }>;
   receiptLoading: boolean;
   receiptSaving: boolean;
   receiptError: string | null;
@@ -106,6 +110,7 @@ export default function ApartmentSaleFinancialPanel({
   deedStatus,
   deedIssuedAtLabel,
   saleLabel,
+  workflowBlockedReason,
   deedBlockReason,
   canIssueDeed,
   deedIssuing,
@@ -118,6 +123,7 @@ export default function ApartmentSaleFinancialPanel({
   onPrintLetter,
   receiptForm,
   receiptRows,
+  accountOptions,
   receiptLoading,
   receiptSaving,
   receiptError,
@@ -130,7 +136,9 @@ export default function ApartmentSaleFinancialPanel({
   if (!open) return null;
 
   const remainingMunicipality = Number(financial?.remaining_municipality ?? 0);
-  const canAddReceipt = Number.isFinite(remainingMunicipality) && remainingMunicipality > 0;
+  const workflowBlocked = Boolean(workflowBlockedReason);
+  const canAddReceipt = !workflowBlocked && Number.isFinite(remainingMunicipality) && remainingMunicipality > 0;
+  const addReceiptLabel = workflowBlocked ? "Workflow Blocked" : canAddReceipt ? "Add Receipt" : "Municipality Settled";
 
   const toDate = (value: number): string => {
     if (!value || !Number.isFinite(value)) return "-";
@@ -154,6 +162,11 @@ export default function ApartmentSaleFinancialPanel({
         <p className="text-sm text-slate-500">Financial breakdown is not available for this sale yet.</p>
       ) : (
         <>
+          {workflowBlockedReason && (
+            <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+              {workflowBlockedReason}
+            </div>
+          )}
           <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr]">
             <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 dark:border-[#2a2a3e] dark:bg-[#0f111a]">
               <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -278,7 +291,7 @@ export default function ApartmentSaleFinancialPanel({
                 onClick={() => setReceiptModalOpen(true)}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {canAddReceipt ? "Add Receipt" : "Municipality Settled"}
+                {addReceiptLabel}
               </button>
             </div>
 
@@ -362,6 +375,14 @@ export default function ApartmentSaleFinancialPanel({
                   required
                 />
                 <FormField
+                  label="Payment Account"
+                  type="select"
+                  value={receiptForm.account_id}
+                  onChange={(value) => onReceiptFormChange((prev) => ({ ...prev, account_id: String(value) }))}
+                  options={accountOptions}
+                  required
+                />
+                <FormField
                   label="Receipt No (optional)"
                   value={receiptForm.receipt_no}
                   onChange={(value) => onReceiptFormChange((prev) => ({ ...prev, receipt_no: String(value) }))}
@@ -374,7 +395,7 @@ export default function ApartmentSaleFinancialPanel({
               </div>
 
                   {receiptError && <p className="mt-3 text-sm text-red-600">{receiptError}</p>}
-                  {!canAddReceipt && (
+                  {!canAddReceipt && !workflowBlocked && (
                     <p className="mt-3 text-sm text-emerald-700 dark:text-emerald-400">
                       Municipality share is fully paid. New receipts are disabled.
                     </p>
@@ -461,7 +482,7 @@ export default function ApartmentSaleFinancialPanel({
             <div className="mt-3 flex flex-wrap gap-3">
               <button
                 type="button"
-                disabled={letterLoading}
+                disabled={letterLoading || workflowBlocked}
                 onClick={onGenerateLetter}
                 className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-[#1a1a2e]"
               >
@@ -482,3 +503,6 @@ export default function ApartmentSaleFinancialPanel({
     </div>
   );
 }
+
+
+
