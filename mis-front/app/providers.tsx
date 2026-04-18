@@ -11,13 +11,14 @@ import DebugRegister from '@/pwa/debugRegister';
 import ToastHost from "@/components/ui/ToastHost";
 import { ensureCacheSchemaCompatibility } from "@/sync/cacheSchema";
 import { seedDefaultData } from "@/lib/seedData";
+import { getStoredAuthToken, isOfflineSessionToken } from "@/lib/api";
 
 function Bootstrap() {
   useEffect(() => {
     void ensureCacheSchemaCompatibility();
     void seedDefaultData();
 
-    const token = localStorage.getItem("token");
+    const token = getStoredAuthToken();
     const userRaw = localStorage.getItem("user");
     let user = null;
 
@@ -29,10 +30,12 @@ function Bootstrap() {
       }
     }
 
+    const allowSession = Boolean(token) && (!navigator.onLine || !isOfflineSessionToken(token));
+
     store.dispatch(
       hydrateAuth({
-        token: token || null,
-        user,
+        token: allowSession ? token : null,
+        user: allowSession ? user : null,
       })
     );
   }, []);

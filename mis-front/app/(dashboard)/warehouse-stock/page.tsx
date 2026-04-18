@@ -374,7 +374,7 @@ export default function WarehouseStockPage() {
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader
           title="Warehouse Stock"
-          subtitle="Materials and company assets are now both warehouse-based stock views. Materials are consumable balances, while company assets are reusable stock quantities with allocation history."
+          subtitle=""
         >
           <button
             type="button"
@@ -425,9 +425,9 @@ export default function WarehouseStockPage() {
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
             <div className="mb-3">
               <h3 className="text-base font-semibold text-slate-900 dark:text-white">Consumable Materials By Warehouse</h3>
-              <p className="text-sm text-slate-500">
+              {/* <p className="text-sm text-slate-500">
                 Warehouse-managed material stock with on-hand, reserved, and available quantities. This now mirrors the clarity of company asset storage.
-              </p>
+              </p> */}
             </div>
             <DataTable
               columns={materialColumns}
@@ -442,7 +442,7 @@ export default function WarehouseStockPage() {
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-[#2a2a3e] dark:bg-[#12121a]">
             <div className="mb-3">
               <h3 className="text-base font-semibold text-slate-900 dark:text-white">Reusable Company Assets In Warehouses</h3>
-              <p className="text-sm text-slate-500">Reusable company asset stock by warehouse. Available, maintenance, damaged, and retired quantities are all tracked on the same stock line.</p>
+              {/* <p className="text-sm text-slate-500">Reusable company asset stock by warehouse. Available, maintenance, damaged, and retired quantities are all tracked on the same stock line.</p> */}
             </div>
             <DataTable
               columns={assetColumns}

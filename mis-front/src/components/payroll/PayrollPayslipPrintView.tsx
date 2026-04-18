@@ -2,6 +2,7 @@
 
 import type { EmployeeRow, SalaryPaymentRow } from "@/db/localDB";
 import { formatMoney, normalizeCurrency } from "@/lib/currency";
+import LetterheadPrintShell from "@/components/print/LetterheadPrintShell";
 
 type Props = {
   payment: SalaryPaymentRow;
@@ -17,14 +18,14 @@ function dateLabel(value?: number | null): string {
   return new Date(value).toLocaleDateString();
 }
 
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 print:border-slate-300 print:bg-white">
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-1 text-sm font-semibold text-slate-900">{value || "-"}</div>
-    </div>
-  );
-}
+type BreakdownRow = {
+  key: string;
+  title: string;
+  description: string;
+  basis: string;
+  amount: number;
+  color?: string;
+};
 
 export default function PayrollPayslipPrintView({ payment, employee }: Props) {
   const slipLabel = `PS-${payment.uuid.slice(0, 8).toUpperCase()}`;
@@ -34,132 +35,195 @@ export default function PayrollPayslipPrintView({ payment, employee }: Props) {
       ? String(employee.phone)
       : "-";
   const preparedBy = payment.user_name || "System";
+  const salaryCurrency = normalizeCurrency(payment.salary_currency_code || "USD");
+  const paymentCurrency = normalizeCurrency(payment.payment_currency_code || payment.account_currency || payment.salary_currency_code || "USD");
+  const grossSalary = Number(payment.gross_salary || 0);
+  const advanceDeducted = Number(payment.advance_deducted || 0);
+  const taxDeducted = Number(payment.tax_deducted || 0);
+  const otherDeductions = Number(payment.other_deductions || 0);
+  const totalDeductions = Number((advanceDeducted + taxDeducted + otherDeductions).toFixed(2));
+  const netSalary = Number(payment.net_salary || 0);
+  const accountPayout = payment.net_salary_account_amount !== null && payment.net_salary_account_amount !== undefined
+    ? Number(payment.net_salary_account_amount)
+    : null;
+  const exchangeRateLabel =
+    payment.exchange_rate_snapshot && Number(payment.exchange_rate_snapshot) > 0
+      ? `1 USD = ${Number(payment.exchange_rate_snapshot).toFixed(4)} AFN`
+      : "-";
+  const note =
+    "This payslip shows the recorded salary payment, including approved advance recovery and tax deduction where applicable.";
+
+  const rows: BreakdownRow[] = [
+    {
+      key: "gross",
+      title: "Gross Salary",
+      description: `Contract salary for ${payment.period || "the selected period"}`,
+      basis: salaryCurrency,
+      amount: grossSalary,
+    },
+    {
+      key: "advance",
+      title: "Advance Deducted",
+      description: "Approved advance amount recovered from this salary payment",
+      basis: salaryCurrency,
+      amount: advanceDeducted,
+      color: "text-amber-800",
+    },
+    {
+      key: "tax",
+      title: "Tax Deducted",
+      description: "Employee tax deduction calculated automatically from the saved percentage",
+      basis: `${Number(payment.tax_percentage || 0).toFixed(2)}%`,
+      amount: taxDeducted,
+      color: "text-rose-800",
+    },
+    {
+      key: "other",
+      title: "Other Deductions",
+      description: "Any remaining manual payroll adjustment kept on the salary payment record",
+      basis: salaryCurrency,
+      amount: otherDeductions,
+    },
+    {
+      key: "net",
+      title: "Net Salary",
+      description: "Final payable amount after all deductions",
+      basis: salaryCurrency,
+      amount: netSalary,
+      color: "text-emerald-800",
+    },
+  ].filter((row) => {
+    if (row.key === "advance" || row.key === "other") {
+      return Math.abs(row.amount) > 0;
+    }
+
+    return true;
+  });
+
+  const summaryRows = [
+    { label: "Gross Salary", value: money(grossSalary, salaryCurrency) },
+    { label: "Total Deductions", value: money(totalDeductions, salaryCurrency) },
+    { label: "Net Salary", value: money(netSalary, salaryCurrency) },
+    { label: "Account Payout", value: accountPayout !== null ? money(accountPayout, paymentCurrency) : "-" },
+    { label: "Rate Used", value: exchangeRateLabel },
+    { label: "Salary Currency", value: salaryCurrency },
+  ];
 
   return (
-    <>
-      <style jsx global>{`
-        @page {
-          size: A4 portrait;
-          margin: 14mm;
-        }
-
-        html,
-        body {
-          -webkit-print-color-adjust: exact;
-          print-color-adjust: exact;
-        }
-      `}</style>
-
-      <div className="min-h-screen bg-slate-100 py-6 text-slate-950 print:bg-white print:py-0">
-        <div className="mx-auto mb-4 flex max-w-5xl items-center justify-between gap-3 px-4 print:hidden">
-          <div>
-            <div className="text-lg font-bold text-slate-900">Payslip</div>
-            <div className="text-sm text-slate-500">{employeeName}</div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => window.print()}
-              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-            >
-              Print
-            </button>
-            <button
-              type="button"
-              onClick={() => window.close()}
-              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-            >
-              Close
-            </button>
+    <LetterheadPrintShell
+      title="Salary Payslip"
+      subtitle={`${employeeName} - ${slipLabel}`}
+      contentClassName="px-[12mm] pb-[12mm] pt-[34mm]"
+    >
+      <div className="mt-4 flex items-start justify-between gap-4">
+        <div className="w-[60%]">
+          <p className="text-[14px] font-bold">Employee Name: <span className="font-normal">{employeeName}</span></p>
+          <p className="mt-1 text-[14px] font-bold">Job Title: <span className="font-normal">{employee?.job_title || "-"}</span></p>
+          <div className="mt-2">
+            <table className="w-full border-collapse text-[12px]">
+              <tbody>
+                <tr>
+                  <th className="w-[28%] border border-black px-2 py-1.5 text-left">Phone No:</th>
+                  <td className="border border-black px-2 py-1.5">{phoneLabel}</td>
+                </tr>
+                <tr>
+                  <th className="w-[28%] border border-black px-2 py-1.5 text-left">Email:</th>
+                  <td className="border border-black px-2 py-1.5">{employee?.email || "-"}</td>
+                </tr>
+                <tr>
+                  <th className="w-[28%] border border-black px-2 py-1.5 text-left">Address:</th>
+                  <td className="border border-black px-2 py-1.5">{employee?.address || "-"}</td>
+                </tr>
+                <tr>
+                  <th className="w-[28%] border border-black px-2 py-1.5 text-left">Employment Status:</th>
+                  <td className="border border-black px-2 py-1.5">{employee?.status || "-"}</td>
+                </tr>
+                <tr>
+                  <th className="w-[28%] border border-black px-2 py-1.5 text-left">Prepared By:</th>
+                  <td className="border border-black px-2 py-1.5">{preparedBy}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
-        <div className="mx-auto max-w-5xl rounded-2xl border border-slate-200 bg-white shadow-xl print:max-w-none print:rounded-none print:border-0 print:shadow-none">
-          <div className="border-b border-slate-200 px-8 py-8 print:px-0 print:pt-0">
-            <div className="flex items-start justify-between gap-6">
-              <div>
-                <h1 className="text-3xl font-bold tracking-tight text-slate-900">Salary Payslip</h1>
-                <p className="mt-2 text-sm text-slate-500">
-                  Printable payroll summary generated from the locally cached salary payment data.
-                </p>
-              </div>
-              <div className="rounded-2xl bg-slate-900 px-5 py-4 text-right text-white">
-                <div className="text-xs uppercase tracking-[0.24em] text-slate-300">Slip ID</div>
-                <div className="mt-1 text-lg font-bold">{slipLabel}</div>
-              </div>
+        <div className="w-[32%] text-[12px]">
+          <div className="space-y-3 border border-black bg-white/70 px-3 py-3">
+            <p><span className="font-bold">Receipt Type:</span> Salary Payment</p>
+            <p><span className="font-bold">Period:</span> {payment.period || "-"}</p>
+            <p><span className="font-bold">Status:</span> {payment.status || "-"}</p>
+            <div className="mt-2 border-t border-black pt-2 text-[12px]">
+              <p><span className="font-bold">Date:</span> {dateLabel(payment.paid_at)}</p>
+              <p className="mt-1.5"><span className="font-bold">S.No:</span> {slipLabel}</p>
+              <p className="mt-1.5"><span className="font-bold">Payment Account:</span> {payment.account_name || "-"}</p>
             </div>
-          </div>
-
-          <div className="space-y-8 px-8 py-8 print:px-0">
-            <section>
-              <div className="mb-4 text-sm font-bold uppercase tracking-[0.2em] text-slate-500">Employee</div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <Field label="Full Name" value={employeeName} />
-                <Field label="Job Title" value={employee?.job_title || "-"} />
-                <Field label="Email" value={employee?.email || "-"} />
-                <Field label="Phone" value={phoneLabel} />
-              </div>
-            </section>
-
-            <section>
-              <div className="mb-4 text-sm font-bold uppercase tracking-[0.2em] text-slate-500">Payment Details</div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <Field label="Period" value={payment.period || "-"} />
-                <Field label="Status" value={payment.status || "-"} />
-                <Field label="Paid At" value={dateLabel(payment.paid_at)} />
-                <Field label="Prepared By" value={preparedBy} />
-                <Field label="Salary Currency" value={payment.salary_currency_code || "USD"} />
-                <Field label="Payment Account" value={payment.account_name ? `${payment.account_name} (${payment.payment_currency_code || payment.account_currency || "USD"})` : "-"} />
-              </div>
-            </section>
-
-            <section className="rounded-2xl border border-slate-200 p-6">
-              <div className="mb-4 text-sm font-bold uppercase tracking-[0.2em] text-slate-500">Salary Breakdown</div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Gross Salary</div>
-                  <div className="mt-2 text-2xl font-bold text-slate-900">{money(payment.gross_salary, payment.salary_currency_code || "USD")}</div>
-                </div>
-                <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-amber-700">Advance Deducted</div>
-                  <div className="mt-2 text-2xl font-bold text-amber-800">{money(payment.advance_deducted, payment.salary_currency_code || "USD")}</div>
-                </div>
-                <div className="rounded-xl border border-rose-200 bg-rose-50 p-5">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-rose-700">Tax Deducted</div>
-                  <div className="mt-2 text-2xl font-bold text-rose-800">
-                    {money(payment.tax_deducted || 0, payment.salary_currency_code || "USD")}
-                    <span className="ml-2 text-sm font-semibold">({Number(payment.tax_percentage || 0).toFixed(2)}%)</span>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Other Deductions</div>
-                  <div className="mt-2 text-2xl font-bold text-slate-900">{money(payment.other_deductions || 0, payment.salary_currency_code || "USD")}</div>
-                </div>
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Net Salary</div>
-                  <div className="mt-2 text-2xl font-bold text-emerald-800">{money(payment.net_salary, payment.salary_currency_code || "USD")}</div>
-                </div>
-              </div>
-              {payment.net_salary_account_amount !== null && payment.net_salary_account_amount !== undefined ? (
-                <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-5">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">Account Payout</div>
-                  <div className="mt-2 text-2xl font-bold text-blue-800">
-                    {formatMoney(Number(payment.net_salary_account_amount ?? 0), normalizeCurrency(payment.payment_currency_code ?? payment.account_currency ?? "USD"))}
-                  </div>
-                </div>
-              ) : null}
-            </section>
-
-            <section className="rounded-2xl border border-slate-200 p-6">
-              <div className="mb-3 text-sm font-bold uppercase tracking-[0.2em] text-slate-500">Notes</div>
-              <p className="text-sm leading-6 text-slate-600">
-                This payslip reflects the salary payment record stored in the payroll module. If a salary advance was
-                approved and deducted, it is already included in the net salary amount shown above.
-              </p>
-            </section>
           </div>
         </div>
       </div>
-    </>
+
+      <div className="mt-4">
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr>
+              <th className="w-[6%] border border-black px-2 py-1.5 text-center">Item</th>
+              <th className="w-[40%] border border-black px-2 py-1.5 text-left">Description</th>
+              <th className="w-[22%] border border-black px-2 py-1.5 text-center">Basis</th>
+              <th className="w-[32%] border border-black px-2 py-1.5 text-center">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={row.key}>
+                <td className="border border-black px-2 py-1.5 text-center">{index + 1}</td>
+                <td className="border border-black px-2 py-1.5">
+                  <div className="font-semibold">{row.title}</div>
+                  <div className="text-[10.5px] leading-4 text-slate-600">{row.description}</div>
+                </td>
+                <td className="border border-black px-2 py-1.5 text-center">{row.basis}</td>
+                <td className={`border border-black px-2 py-1.5 text-center font-semibold ${row.color || "text-slate-900"}`}>
+                  {money(row.amount, salaryCurrency)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4">
+        <table className="w-full border-collapse text-[12px]">
+          <tbody>
+            <tr>
+              <td rowSpan={summaryRows.length} className="w-[63%] border border-black align-top px-3 py-2">
+                <div className="font-bold">Note or Special Comments:</div>
+                <div className="mt-1.5 leading-5">{note}</div>
+              </td>
+              <th className="w-[17%] border border-black px-2 py-1.5 text-center">{summaryRows[0]?.label}</th>
+              <td className="w-[20%] border border-black px-2 py-1.5 text-center">{summaryRows[0]?.value}</td>
+            </tr>
+            {summaryRows.slice(1).map((row) => (
+              <tr key={row.label}>
+                <th className="border border-black px-2 py-1.5 text-center">{row.label}</th>
+                <td className="border border-black px-2 py-1.5 text-center">{row.value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-6 flex justify-evenly text-[11px] font-semibold">
+        <div className="min-w-[45mm] text-center">
+          <div className="border-b border-black pb-4" />
+          <p className="mt-2">Prepared By</p>
+        </div>
+        <div className="min-w-[45mm] text-center">
+          <div className="border-b border-black pb-4" />
+          <p className="mt-2">Employee Signature</p>
+        </div>
+        <div className="min-w-[45mm] text-center">
+          <div className="border-b border-black pb-4" />
+          <p className="mt-2">Authorized Signature</p>
+        </div>
+      </div>
+    </LetterheadPrintShell>
   );
 }

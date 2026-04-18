@@ -252,6 +252,9 @@ export type ApartmentRentalRow = {
   apartment_id: number;
   tenant_id: number;
   created_by?: number | null;
+  approved_by?: number | null;
+  approved_at?: number | null;
+  approved_by_name?: string | null;
   contract_start: number;
   contract_end?: number | null;
   monthly_rent: number;
@@ -531,11 +534,21 @@ export type CompanyAssetRow = {
 export type ProjectRow = {
   id?: number;
   uuid: string;
+  project_manager_user_id?: number | null;
+  project_manager_name?: string | null;
   name: string;
   location?: string | null;
   status: string;
   start_date?: number | null;
   end_date?: number | null;
+  assigned_employee_ids?: number[];
+  assigned_employees?: Array<{
+    id?: number | null;
+    uuid?: string | null;
+    name?: string | null;
+    job_title?: string | null;
+    status?: string | null;
+  }>;
   updated_at: number;
   created_at?: number;
 };
@@ -550,6 +563,7 @@ export type MaterialRequestItemRow = {
   quantity_requested: number;
   quantity_approved: number;
   quantity_issued: number;
+  quantity_returned?: number;
   notes?: string | null;
 };
 
@@ -563,19 +577,28 @@ export type MaterialRequestRow = {
   warehouse_id: number;
   warehouse_uuid?: string | null;
   warehouse_name?: string | null;
-  requested_by_employee_id: number;
+  requested_by_user_id?: number | null;
+  requested_by_user_name?: string | null;
+  requested_by_name?: string | null;
+  requested_by_employee_id?: number | null;
   requested_by_employee_uuid?: string | null;
   requested_by_employee_name?: string | null;
   status: string;
   approved_by_user_id?: number | null;
   approved_by_user_name?: string | null;
   approved_at?: number | null;
+  rejected_by_user_id?: number | null;
+  rejected_by_user_name?: string | null;
+  rejected_at?: number | null;
+  rejection_reason?: string | null;
   issued_by_user_id?: number | null;
   issued_by_user_name?: string | null;
   issued_at?: number | null;
   issue_receipt_no?: string | null;
   requested_at?: number | null;
   notes?: string | null;
+  can_edit?: boolean;
+  can_delete?: boolean;
   items?: MaterialRequestItemRow[];
   updated_at: number;
   created_at?: number;
@@ -622,19 +645,45 @@ export type PurchaseRequestRow = {
   vendor_id?: number | null;
   vendor_uuid?: string | null;
   vendor_name?: string | null;
-  requested_by_employee_id: number;
+  requested_by_user_id?: number | null;
+  requested_by_user_name?: string | null;
+  requested_by_name?: string | null;
+  requested_by_employee_id?: number | null;
   requested_by_employee_uuid?: string | null;
   requested_by_employee_name?: string | null;
   status: string;
   approved_by_user_id?: number | null;
   approved_by_user_name?: string | null;
   approved_at?: number | null;
+  rejected_by_user_id?: number | null;
+  rejected_by_user_name?: string | null;
+  rejected_at?: number | null;
+  rejection_reason?: string | null;
+  payment_processed_by_user_id?: number | null;
+  payment_processed_by_user_name?: string | null;
+  payment_processed_at?: number | null;
+  payment_account_id?: number | null;
+  payment_account_uuid?: string | null;
+  payment_account_name?: string | null;
+  payment_account_currency?: string | null;
+  payment_account_transaction_id?: number | null;
+  payment_amount?: number | null;
+  payment_currency_code?: string | null;
+  payment_exchange_rate_snapshot?: number | null;
+  payment_account_amount?: number | null;
+  payment_slip_no?: string | null;
+  payment_notes?: string | null;
   received_by_user_id?: number | null;
   received_by_user_name?: string | null;
   received_at?: number | null;
   purchase_receipt_no?: string | null;
   requested_at?: number | null;
   notes?: string | null;
+  estimated_grand_total?: number | null;
+  approved_grand_total?: number | null;
+  received_grand_total?: number | null;
+  can_edit?: boolean;
+  can_delete?: boolean;
   items?: PurchaseRequestItemRow[];
   updated_at: number;
   created_at?: number;
@@ -647,7 +696,10 @@ export type AssetRequestRow = {
   project_id?: number | null;
   project_uuid?: string | null;
   project_name?: string | null;
-  requested_by_employee_id: number;
+  requested_by_user_id?: number | null;
+  requested_by_user_name?: string | null;
+  requested_by_name?: string | null;
+  requested_by_employee_id?: number | null;
   requested_by_employee_uuid?: string | null;
   requested_by_employee_name?: string | null;
   requested_asset_id?: number | null;
@@ -662,12 +714,18 @@ export type AssetRequestRow = {
   approved_by_user_id?: number | null;
   approved_by_user_name?: string | null;
   approved_at?: number | null;
+  rejected_by_user_id?: number | null;
+  rejected_by_user_name?: string | null;
+  rejected_at?: number | null;
+  rejection_reason?: string | null;
   allocated_by_user_id?: number | null;
   allocated_by_user_name?: string | null;
   allocated_at?: number | null;
   allocation_receipt_no?: string | null;
   requested_at?: number | null;
   notes?: string | null;
+  can_edit?: boolean;
+  can_delete?: boolean;
   assignment_uuid?: string | null;
   assignment_status?: string | null;
   assigned_date?: number | null;
@@ -1509,6 +1567,46 @@ export class LocalDB extends Dexie {
       projects: "&uuid, updated_at, name, status, start_date, end_date",
       material_requests: "&uuid, updated_at, request_no, status, warehouse_id, requested_by_employee_id, project_id, requested_at",
       purchase_requests: "&uuid, updated_at, request_no, request_type, status, warehouse_id, vendor_id, requested_by_employee_id, project_id, requested_at, received_at",
+      asset_requests: "&uuid, updated_at, request_no, status, requested_by_employee_id, requested_asset_id, project_id, requested_at, assigned_date",
+      stock_movements: "&uuid, updated_at, movement_date, material_id, warehouse_id, project_id, movement_type, reference_type",
+      warehouse_material_stocks: "&uuid, updated_at, warehouse_id, material_id, warehouse_name, material_name",
+      project_material_stocks: "&uuid, updated_at, project_id, material_id, project_name, material_name",
+      system_documents: "id, updated_at, module, reference_id, reference_uuid, document_type, created_at",
+      document_types: "&uuid, updated_at, module, code, label, is_active",
+      crm_messages: "id, updated_at, customer_id, status, channel, created_at",
+      admin_notifications: "&id, updated_at, read_at, category, created_at",
+    });
+
+    this.version(27).stores({
+      sync_queue: "++id, created_at, entity, uuid, local_key",
+      pending_module_ops: "++id, created_at, module, action, target_id",
+      pending_attachments: "++id, created_at, entity, entity_uuid",
+      session: "++id, expires_at",
+      api_cache: "&key, updated_at",
+      customers: "&uuid, updated_at, phone, name",
+      roles: "&uuid, updated_at, name",
+      users: "&uuid, updated_at, name,phone",
+      apartments: "&uuid, updated_at, apartment_code, usage_type",
+      employees: "&uuid, updated_at, last_name, first_name, status, salary_type, salary_currency_code, email, phone",
+      apartment_sales: "&uuid, updated_at, sale_date, status, apartment_id, customer_id",
+      installments: "&uuid, updated_at, due_date, status, apartment_sale_id, sale_uuid",
+      apartment_sale_financials: "&sale_uuid, updated_at, apartment_sale_id",
+      rentals: "&uuid, updated_at, status, apartment_id, tenant_id, rental_id, next_due_date",
+      rental_payments: "&uuid, updated_at, rental_id, due_date, status, payment_type, tenant_id, rental_uuid, bill_no, approved_at",
+      salary_advances: "&uuid, updated_at, employee_id, status, currency_code, amount, remaining_amount, created_at",
+      salary_advance_deductions: "&uuid, salary_payment_uuid, salary_advance_uuid, updated_at, created_at",
+      salary_payments: "&uuid, updated_at, employee_id, status, period, salary_currency_code, paid_at, account_id, payment_currency_code, created_at",
+      accounts: "&uuid, updated_at, name, account_type, currency, status",
+      account_transactions: "&uuid, updated_at, account_id, transaction_date, module, reference_type, status, currency_code",
+      exchange_rates: "&uuid, updated_at, effective_date, is_active, base_currency, quote_currency",
+      employee_salary_histories: "&uuid, updated_at, employee_id, effective_from, source, created_at",
+      vendors: "&uuid, updated_at, name, email, status",
+      warehouses: "&uuid, updated_at, name, location, status",
+      materials: "&uuid, updated_at, name, material_type, status, supplier_id, quantity, reference_unit_price, min_stock_level, expiry_date",
+      company_assets: "&uuid, updated_at, asset_code, asset_name, asset_type, status, supplier_id, current_employee_id, current_project_id, current_warehouse_id",
+      projects: "&uuid, updated_at, name, status, start_date, end_date, project_manager_user_id",
+      material_requests: "&uuid, updated_at, request_no, status, warehouse_id, requested_by_user_id, project_id, requested_at",
+      purchase_requests: "&uuid, updated_at, request_no, request_type, status, warehouse_id, vendor_id, requested_by_user_id, project_id, requested_at, payment_processed_at, received_at",
       asset_requests: "&uuid, updated_at, request_no, status, requested_by_employee_id, requested_asset_id, project_id, requested_at, assigned_date",
       stock_movements: "&uuid, updated_at, movement_date, material_id, warehouse_id, project_id, movement_type, reference_type",
       warehouse_material_stocks: "&uuid, updated_at, warehouse_id, material_id, warehouse_name, material_name",

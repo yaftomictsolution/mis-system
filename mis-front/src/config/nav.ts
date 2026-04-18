@@ -15,7 +15,9 @@ import {
   FolderKanban,
   ArrowLeftRight,
   ShoppingCart,
+  BarChart3,
 } from 'lucide-react'
+import { REPORT_DEFINITIONS } from "@/config/report-nav";
 
 export const NAV_ITEMS = [
   // { label: "Dashboard", href: "/", icon: Home },
@@ -60,7 +62,7 @@ export const NAV_ITEMS = [
       { icon: Boxes, label: 'Master Data', permission: ["inventory_master.view", "inventory.request"], path: '/inventories' },
       { icon: Boxes, label: 'Warehouse Stock', permission: ["warehouse_stock.view", "inventory.request"], path: '/warehouse-stock' },
       { icon: ClipboardList, label: 'Material Requests', permission: ["material_requests.view", "inventory.request"], path: '/inventory-requests' },
-      { icon: ShoppingCart, label: 'Purchase Requests', permission: ["purchase_requests.view", "inventory.request"], path: '/purchase-requests' },
+      { icon: ShoppingCart, label: 'Purchase Requests', permission: ["purchase_requests.view", "inventory.request", "purchase_requests.finance", "purchase_requests.receive"], path: '/purchase-requests' },
       { icon: PackageCheck, label: 'Asset Requests', permission: ["asset_requests.view", "inventory.request"], path: '/asset-requests' },
       { icon: ArrowLeftRight, label: 'Movement History', permission: ["stock_movements.view", "inventory.request"], path: '/inventory-movements' },
     ],
@@ -70,7 +72,26 @@ export const NAV_ITEMS = [
     title: 'Rental Apartment',
     items: [
       { icon: KeyRound, label: 'Rentals', permission: "apartments.view", path: '/rentals' },
-      { icon: BadgeDollarSign, label: 'Rental Payments', permission: "apartments.view", path: '/rental-payments' },
+      {
+        icon: BadgeDollarSign,
+        label: 'Rental Payments',
+        permission: ["installments.pay", "sales.approve", "accounts.view", "apartments.view"],
+        role: ["Admin", "Accountant", "Finance", "FinanceManager", "Finance Manager"],
+        path: '/rental-payments'
+      },
+    ],
+  },
+  {
+    title: 'MIS Reports',
+    items: [
+      { icon: BarChart3, label: 'Reports Hub', path: '/reports', permission: "reports.view" },
+      ...REPORT_DEFINITIONS.map((definition) => ({
+        icon: definition.icon,
+        label: definition.label,
+        path: definition.path,
+        permission: definition.permission,
+        role: definition.role,
+      })),
     ],
   },
 ];

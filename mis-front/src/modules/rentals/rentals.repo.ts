@@ -48,16 +48,24 @@ export type RentalCreateInput = {
   contract_end?: string;
   monthly_rent: number;
   advance_months: number;
-  initial_advance_paid?: number;
-  initial_payment_method?: string;
-  initial_account_id?: number | null;
   notes?: string;
+  status?: "pending" | "draft" | "advance_pending" | "active" | "pending_admin_approval";
 };
 
 export type RentalUpdateInput = Partial<
   Pick<RentalCreateInput, "contract_start" | "contract_end" | "monthly_rent" | "advance_months">
 > & {
-  status?: "draft" | "advance_pending" | "active" | "completed" | "terminated" | "defaulted" | "cancelled";
+  status?:
+    | "pending"
+    | "draft"
+    | "advance_pending"
+    | "active"
+    | "pending_admin_approval"
+    | "rejected"
+    | "completed"
+    | "terminated"
+    | "defaulted"
+    | "cancelled";
 };
 
 export type RentalPaymentInput = {
@@ -119,10 +127,28 @@ function toMoney(v: unknown): number {
 
 function normalizeStatus(v: unknown): string {
   const status = String(v ?? "").trim().toLowerCase();
-  if (["draft", "advance_pending", "active", "completed", "terminated", "defaulted", "cancelled"].includes(status)) {
+  if (
+    [
+      "pending",
+      "pending_admin_approval",
+      "draft",
+      "advance_pending",
+      "rejected",
+      "active",
+      "completed",
+      "terminated",
+      "defaulted",
+      "cancelled",
+    ].includes(status)
+  ) {
     return status;
   }
-  return "draft";
+  return "pending";
+}
+
+function isPendingApprovalStatus(value: unknown): boolean {
+  const status = String(value ?? "").trim().toLowerCase();
+  return status === "pending" || status === "pending_admin_approval";
 }
 
 function normalizeAdvanceStatus(v: unknown): string {
@@ -137,6 +163,12 @@ function normalizeKeyStatus(v: unknown): string {
   return "not_handed_over";
 }
 
+function normalizeRentalPaymentStatus(v: unknown): string {
+  const status = String(v ?? "").trim().toLowerCase();
+  if (status === "pending") return "pending_admin_approval";
+  return status || "pending_admin_approval";
+}
+
 function sanitizeRental(input: unknown): ApartmentRentalRow {
   const r = asObj(input);
   const apartment = asObj(r.apartment);
@@ -145,7 +177,9 @@ function sanitizeRental(input: unknown): ApartmentRentalRow {
   const advanceRemaining = toMoney(r.advance_remaining_amount);
   const normalizedStatus = normalizeStatus(r.status);
   const status =
-    advanceRemaining <= 0 && !["completed", "terminated", "defaulted", "cancelled"].includes(normalizedStatus)
+    advanceRemaining <= 0 &&
+    !["completed", "terminated", "defaulted", "cancelled", "rejected"].includes(normalizedStatus) &&
+    !isPendingApprovalStatus(normalizedStatus)
       ? "active"
       : normalizedStatus;
 
@@ -156,6 +190,9 @@ function sanitizeRental(input: unknown): ApartmentRentalRow {
     apartment_id: toInt(r.apartment_id),
     tenant_id: toInt(r.tenant_id),
     created_by: r.created_by == null ? null : toInt(r.created_by),
+    approved_by: r.approved_by == null ? null : toInt(r.approved_by),
+    approved_at: r.approved_at ? toTs(r.approved_at) : null,
+    approved_by_name: String(r.approved_by_name ?? "").trim() || null,
     contract_start: toTs(r.contract_start),
     contract_end: r.contract_end ? toTs(r.contract_end) : null,
     monthly_rent: toMoney(r.monthly_rent),
@@ -207,7 +244,7 @@ function sanitizeRentalPayment(input: unknown): RentalPaymentRow {
     amount_paid: toMoney(r.amount_paid),
     remaining_amount: toMoney(r.remaining_amount),
     paid_date: r.paid_date ? toTs(r.paid_date) : null,
-    status: String(r.status ?? "pending").trim().toLowerCase(),
+    status: normalizeRentalPaymentStatus(r.status),
     notes: String(r.notes ?? "").trim() || null,
     approved_by: r.approved_by == null ? null : toInt(r.approved_by),
     approved_at: r.approved_at ? toTs(r.approved_at) : null,
@@ -298,6 +335,7 @@ function matchesSearch(row: ApartmentRentalRow, q: string): boolean {
 }
 
 function createPayload(input: RentalCreateInput): Obj {
+  const status = String(input.status ?? "pending").trim().toLowerCase();
   return {
     apartment_id: Math.trunc(input.apartment_id),
     tenant_id: Math.trunc(input.tenant_id),
@@ -305,13 +343,8 @@ function createPayload(input: RentalCreateInput): Obj {
     contract_end: input.contract_end || null,
     monthly_rent: toMoney(input.monthly_rent),
     advance_months: Math.max(1, Math.min(12, Math.trunc(input.advance_months || 3))),
-    initial_advance_paid: toMoney(input.initial_advance_paid ?? 0),
-    initial_payment_method: (input.initial_payment_method ?? "cash").trim() || "cash",
-    initial_account_id:
-      input.initial_account_id !== null && input.initial_account_id !== undefined && Number.isFinite(Number(input.initial_account_id)) && Number(input.initial_account_id) > 0
-        ? Math.trunc(Number(input.initial_account_id))
-        : null,
     notes: (input.notes ?? "").trim() || null,
+    status: ["pending", "pending_admin_approval", "draft", "advance_pending", "active"].includes(status) ? status : "pending",
   };
 }
 
@@ -325,8 +358,8 @@ export async function rentalsListLocal(query: RentalsLocalQuery = {}): Promise<R
   let rows = await db.rentals.orderBy("updated_at").reverse().toArray();
   rows = rows.map((row) => {
     const status = String(row.status ?? "").trim().toLowerCase();
-    const isClosed = ["completed", "terminated", "defaulted", "cancelled"].includes(status);
-    if (!isClosed && Number(row.advance_remaining_amount ?? 0) <= 0) {
+    const isClosed = ["completed", "terminated", "defaulted", "cancelled", "rejected"].includes(status);
+    if (!isClosed && !isPendingApprovalStatus(status) && Number(row.advance_remaining_amount ?? 0) <= 0) {
       return { ...row, status: "active" };
     }
     return row;
@@ -405,18 +438,61 @@ export async function rentalCreate(input: RentalCreateInput): Promise<ApartmentR
     throw new Error("Rental creation requires internet connection.");
   }
 
-  if (toMoney(input.initial_advance_paid ?? 0) > 0 && (!Number.isFinite(Number(input.initial_account_id)) || Number(input.initial_account_id) <= 0)) {
-    throw new Error("Payment account is required when initial advance is received.");
-  }
-
   try {
     const res = await api.post("/api/rentals", createPayload(input));
     const row = sanitizeRental(asObj(res.data).data);
     await db.rentals.put(row);
-    if (toMoney(input.initial_advance_paid ?? 0) > 0) {
-      await Promise.all([accountsPullToLocal(), accountTransactionsPullToLocal()]);
+    if (!isPendingApprovalStatus(row.status)) {
+      try {
+        await rentalPaymentsPullToLocal();
+      } catch {}
     }
-    notifySuccess("Rental contract created.");
+    notifySuccess(
+      isPendingApprovalStatus(row.status)
+        ? "Rental contract submitted for admin approval."
+        : "Rental contract created and finance notified."
+    );
+    emitRentalsChanged(row.uuid);
+    return row;
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
+export async function rentalApprove(uuid: string): Promise<ApartmentRentalRow> {
+  if (!isOnline()) {
+    throw new Error("Rental approval requires internet connection.");
+  }
+
+  try {
+    const res = await api.post(`/api/rentals/${uuid}/approve`);
+    const row = sanitizeRental(asObj(res.data).data);
+    await db.rentals.put(row);
+    try {
+      await rentalPaymentsPullToLocal();
+    } catch {}
+    notifySuccess("Rental contract approved and finance notified.");
+    emitRentalsChanged(row.uuid);
+    return row;
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
+export async function rentalReject(uuid: string): Promise<ApartmentRentalRow> {
+  if (!isOnline()) {
+    throw new Error("Rental rejection requires internet connection.");
+  }
+
+  try {
+    const res = await api.post(`/api/rentals/${uuid}/reject`);
+    const row = sanitizeRental(asObj(res.data).data);
+    await db.rentals.put(row);
+    notifyInfo("Rental contract rejected.");
     emitRentalsChanged(row.uuid);
     return row;
   } catch (error: unknown) {
@@ -544,7 +620,7 @@ export async function rentalGenerateBill(
       await db.rental_payments.put(payment);
     }
 
-    notifySuccess("Bill generated successfully.");
+    notifySuccess("Bill generated and sent for admin approval.");
     emitRentalsChanged(rental.uuid || rentalUuid);
     return { rental, payment };
   } catch (error: unknown) {
@@ -555,11 +631,71 @@ export async function rentalGenerateBill(
 }
 
 export async function rentalApprovePayment(
+  paymentUuid: string
+): Promise<{ rental: ApartmentRentalRow; payment: RentalPaymentRow }> {
+  if (!isOnline()) {
+    throw new Error("Admin approval requires internet connection.");
+  }
+
+  try {
+    const res = await api.post(`/api/rental-payments/${paymentUuid}/approve`);
+    const data = asObj(res.data).data;
+    const rental = sanitizeRental(asObj(data).rental ?? {});
+    const payment = sanitizeRentalPayment(asObj(data).payment ?? {});
+
+    if (rental.uuid) {
+      await db.rentals.put(rental);
+    }
+    if (payment.uuid) {
+      await db.rental_payments.put(payment);
+    }
+
+    notifySuccess("Bill approved and finance notified.");
+    emitRentalsChanged(rental.uuid);
+    return { rental, payment };
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
+export async function rentalRejectPayment(
+  paymentUuid: string
+): Promise<{ rental: ApartmentRentalRow; payment: RentalPaymentRow }> {
+  if (!isOnline()) {
+    throw new Error("Bill rejection requires internet connection.");
+  }
+
+  try {
+    const res = await api.post(`/api/rental-payments/${paymentUuid}/reject`);
+    const data = asObj(res.data).data;
+    const rental = sanitizeRental(asObj(data).rental ?? {});
+    const payment = sanitizeRentalPayment(asObj(data).payment ?? {});
+
+    if (rental.uuid) {
+      await db.rentals.put(rental);
+    }
+    if (payment.uuid) {
+      await db.rental_payments.put(payment);
+    }
+
+    notifyInfo("Bill rejected.");
+    emitRentalsChanged(rental.uuid);
+    return { rental, payment };
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
+export async function rentalProcessPayment(
   paymentUuid: string,
   input: RentalFinanceApproveInput
 ): Promise<{ rental: ApartmentRentalRow; payment: RentalPaymentRow }> {
   if (!isOnline()) {
-    throw new Error("Finance approval requires internet connection.");
+    throw new Error("Payment processing requires internet connection.");
   }
   if (!Number.isFinite(Number(input.account_id)) || Number(input.account_id) <= 0) {
     throw new Error("Payment account is required.");
@@ -574,7 +710,7 @@ export async function rentalApprovePayment(
       account_id: Math.trunc(Number(input.account_id)),
       notes: (input.notes ?? "").trim() || undefined,
     };
-    const res = await api.post(`/api/rental-payments/${paymentUuid}/approve`, payload);
+    const res = await api.post(`/api/rental-payments/${paymentUuid}/process`, payload);
     const data = asObj(res.data).data;
     const rental = sanitizeRental(asObj(data).rental ?? {});
     const payment = sanitizeRentalPayment(asObj(data).payment ?? {});
@@ -587,7 +723,7 @@ export async function rentalApprovePayment(
     }
 
     await Promise.all([accountsPullToLocal(), accountTransactionsPullToLocal()]);
-    notifySuccess("Payment approved by finance.");
+    notifySuccess("Payment processed successfully.");
     emitRentalsChanged(rental.uuid);
     return { rental, payment };
   } catch (error: unknown) {

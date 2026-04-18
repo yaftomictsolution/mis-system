@@ -5,6 +5,7 @@ import { useSelector } from "react-redux";
 import { db } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { subscribeAppEvent } from "@/lib/appEvents";
+import { hasAnyPermission, hasAnyRole } from "@/lib/permissions";
 import type { RootState } from "@/store/store";
 
 export type DashboardSummary = {
@@ -51,6 +52,25 @@ export type DashboardApproval = {
   requester: string;
   time: string;
   href?: string;
+  actionLabel?: string;
+};
+
+export type DashboardApprovalQueue = {
+  key: "admin" | "storekeeper" | "finance";
+  label: string;
+  count: number;
+  helperText?: string;
+  emptyText?: string;
+  items: DashboardApproval[];
+};
+
+export type DashboardAssetQueueCard = {
+  id: "asset_waiting_approval" | "asset_ready_allocate" | "asset_allocated";
+  label: string;
+  count: number;
+  href: string;
+  helperText: string;
+  color: "orange" | "blue" | "purple";
 };
 
 export type DashboardProgressItem = {
@@ -85,6 +105,8 @@ export type DashboardData = {
   apartmentStatusData: DashboardStatusPoint[];
   recentSales: DashboardRecentSale[];
   approvals: DashboardApproval[];
+  approvalQueues: DashboardApprovalQueue[];
+  assetRequestQueueCards: DashboardAssetQueueCard[];
   progressItems: DashboardProgressItem[];
   activities: DashboardActivity[];
   metrics: DashboardMetric[];
@@ -135,6 +157,8 @@ const EMPTY_SNAPSHOT: DashboardSnapshot = {
   apartmentStatusData: [],
   recentSales: [],
   approvals: [],
+  approvalQueues: [],
+  assetRequestQueueCards: [],
   progressItems: [],
   activities: [],
   metrics: [],
@@ -300,6 +324,250 @@ function dashboardCacheKey(userId: string): string {
   return `${DASHBOARD_CACHE_PREFIX}:${userId}`;
 }
 
+type BuildWorkflowApprovalQueuesInput = {
+  baseApprovalCount: number;
+  baseApprovals: DashboardApproval[];
+  roles: string[];
+  permissions: string[];
+};
+
+type InternalQueueItem = DashboardApproval & { sortTs: number };
+
+const QUEUE_PREVIEW_LIMIT = 8;
+
+function normalizeQueueActionLabel(value: unknown, fallback = "Review"): string {
+  const label = toStringValue(value).trim();
+  return label || fallback;
+}
+
+function queuePreview(items: InternalQueueItem[]): DashboardApproval[] {
+  return [...items]
+    .sort((left, right) => right.sortTs - left.sortTs)
+    .slice(0, QUEUE_PREVIEW_LIMIT)
+    .map(({ sortTs: _sortTs, ...item }) => item);
+}
+
+async function buildWorkflowApprovalQueues({
+  baseApprovalCount,
+  baseApprovals,
+  roles,
+  permissions,
+}: BuildWorkflowApprovalQueuesInput): Promise<DashboardApprovalQueue[]> {
+  const [materialRequests, purchaseRequests, assetRequests] = await Promise.all([
+    db.material_requests.toArray(),
+    db.purchase_requests.toArray(),
+    db.asset_requests.toArray(),
+  ] as const);
+
+  const canSeeAdminQueue =
+    hasAnyRole(roles, "Admin") ||
+    hasAnyPermission(permissions, ["material_requests.approve", "purchase_requests.approve", "inventory.approve"]);
+  const canSeeStorekeeperQueue =
+    hasAnyRole(roles, ["Admin", "Storekeeper"]) ||
+    hasAnyPermission(permissions, ["material_requests.issue", "purchase_requests.receive", "inventory.issue"]);
+  const canSeeFinanceQueue =
+    hasAnyRole(roles, ["Admin", "Accountant"]) ||
+    hasAnyPermission(permissions, "purchase_requests.finance");
+
+  const adminMaterialItems: InternalQueueItem[] = materialRequests
+    .filter((row) => safeStatus(row.status) === "pending_admin_approval")
+    .map((row) => ({
+      id: `material-admin-${row.uuid}`,
+      desc: `Material request ${row.request_no} is waiting for approval`,
+      requester: [row.requested_by_name || row.requested_by_user_name || row.requested_by_employee_name || "Requester", row.project_name || row.warehouse_name || "Inventory"]
+        .filter(Boolean)
+        .join(" - "),
+      time: relativeTime(row.requested_at ?? row.updated_at),
+      href: "/inventory-requests?queue=waiting-approval",
+      actionLabel: "Review",
+      sortTs: timestampOf(row.requested_at ?? row.updated_at),
+    }));
+
+  const adminPurchaseItems: InternalQueueItem[] = purchaseRequests
+    .filter((row) => safeStatus(row.status) === "pending_admin_approval")
+    .map((row) => ({
+      id: `purchase-admin-${row.uuid}`,
+      desc: `Purchase request ${row.request_no} is waiting for approval`,
+      requester: [row.requested_by_name || row.requested_by_user_name || row.requested_by_employee_name || "Requester", row.vendor_name || row.warehouse_name || row.project_name || "Procurement"]
+        .filter(Boolean)
+        .join(" - "),
+      time: relativeTime(row.requested_at ?? row.updated_at),
+      href: "/purchase-requests?queue=waiting-approval",
+      actionLabel: "Review",
+      sortTs: timestampOf(row.requested_at ?? row.updated_at),
+    }));
+
+  const adminAssetItems: InternalQueueItem[] = assetRequests
+    .filter((row) => {
+      const status = safeStatus(row.status);
+      return status === "pending_admin_approval" || status === "pending";
+    })
+    .map((row) => ({
+      id: `asset-admin-${row.uuid}`,
+      desc: `Asset request ${row.request_no} is waiting for approval`,
+      requester: [row.requested_by_name || row.requested_by_user_name || row.requested_by_employee_name || "Requester", row.project_name || "Asset workflow"]
+        .filter(Boolean)
+        .join(" - "),
+      time: relativeTime(row.requested_at ?? row.updated_at),
+      href: "/asset-requests?queue=waiting-approval",
+      actionLabel: "Review",
+      sortTs: timestampOf(row.requested_at ?? row.updated_at),
+    }));
+
+  const storekeeperMaterialItems: InternalQueueItem[] = materialRequests
+    .filter((row) => {
+      const status = safeStatus(row.status);
+      return status === "approved" || status === "partial_issued";
+    })
+    .map((row) => ({
+      id: `material-storekeeper-${row.uuid}`,
+      desc: `Issue materials for ${row.request_no}`,
+      requester: [row.project_name || "Project", row.warehouse_name || "Warehouse"].filter(Boolean).join(" - "),
+      time: relativeTime(row.approved_at ?? row.updated_at),
+      href: "/inventory-requests?queue=issue-ready",
+      actionLabel: "Issue",
+      sortTs: timestampOf(row.approved_at ?? row.updated_at),
+    }));
+
+  const storekeeperPurchaseItems: InternalQueueItem[] = purchaseRequests
+    .filter((row) => {
+      const status = safeStatus(row.status);
+      return status === "paid" || status === "partial_received";
+    })
+    .map((row) => ({
+      id: `purchase-storekeeper-${row.uuid}`,
+      desc: `Receive stock for ${row.request_no}`,
+      requester: [row.vendor_name || "Supplier", row.warehouse_name || "Warehouse"].filter(Boolean).join(" - "),
+      time: relativeTime(row.payment_processed_at ?? row.updated_at),
+      href: "/purchase-requests?queue=receive-ready",
+      actionLabel: "Receive",
+      sortTs: timestampOf(row.payment_processed_at ?? row.updated_at),
+    }));
+
+  const storekeeperAssetItems: InternalQueueItem[] = assetRequests
+    .filter((row) => safeStatus(row.status) === "approved")
+    .map((row) => ({
+      id: `asset-storekeeper-${row.uuid}`,
+      desc: `Allocate assets for ${row.request_no}`,
+      requester: [row.requested_by_name || row.requested_by_user_name || row.requested_by_employee_name || "Requester", row.project_name || "Asset workflow"]
+        .filter(Boolean)
+        .join(" - "),
+      time: relativeTime(row.approved_at ?? row.updated_at),
+      href: "/asset-requests?queue=allocate-ready",
+      actionLabel: "Allocate",
+      sortTs: timestampOf(row.approved_at ?? row.updated_at),
+    }));
+
+  const financePurchaseItems: InternalQueueItem[] = purchaseRequests
+    .filter((row) => safeStatus(row.status) === "approved")
+    .map((row) => ({
+      id: `purchase-finance-${row.uuid}`,
+      desc: `Payment is required for ${row.request_no}`,
+      requester: [row.vendor_name || "Supplier", row.requested_by_name || row.requested_by_user_name || row.requested_by_employee_name || "Requester"]
+        .filter(Boolean)
+        .join(" - "),
+      time: relativeTime(row.approved_at ?? row.updated_at),
+      href: "/purchase-requests?queue=finance-payment",
+      actionLabel: "Pay",
+      sortTs: timestampOf(row.approved_at ?? row.updated_at),
+    }));
+
+  const baseQueueItems: InternalQueueItem[] = baseApprovals.map((item, index) => ({
+    ...item,
+    actionLabel: normalizeQueueActionLabel(item.actionLabel, "Review"),
+    sortTs: Date.now() - index,
+  }));
+
+  const queues: DashboardApprovalQueue[] = [];
+
+  if (canSeeAdminQueue) {
+    queues.push({
+      key: "admin",
+      label: "Admin",
+      count: baseApprovalCount + adminMaterialItems.length + adminPurchaseItems.length + adminAssetItems.length,
+      helperText: "Approvals that need admin review before the workflow can continue.",
+      emptyText: "No admin approvals are waiting.",
+      items: queuePreview([...baseQueueItems, ...adminMaterialItems, ...adminPurchaseItems, ...adminAssetItems]),
+    });
+  }
+
+  if (canSeeStorekeeperQueue) {
+    queues.push({
+      key: "storekeeper",
+      label: "Storekeeper",
+      count: storekeeperMaterialItems.length + storekeeperPurchaseItems.length + storekeeperAssetItems.length,
+      helperText: "Approved issue and receiving work for the warehouse team.",
+      emptyText: "No warehouse actions are waiting.",
+      items: queuePreview([...storekeeperMaterialItems, ...storekeeperPurchaseItems, ...storekeeperAssetItems]),
+    });
+  }
+
+  if (canSeeFinanceQueue) {
+    queues.push({
+      key: "finance",
+      label: "Finance",
+      count: financePurchaseItems.length,
+      helperText: "Approved purchases that still need company-account payment.",
+      emptyText: "No finance payments are waiting.",
+      items: queuePreview(financePurchaseItems),
+    });
+  }
+
+  return queues;
+}
+
+async function buildAssetRequestQueueCards(
+  roles: string[],
+  permissions: string[],
+): Promise<DashboardAssetQueueCard[]> {
+  const assetRequests = await db.asset_requests.toArray();
+  const canSeeAdminAssetQueue =
+    hasAnyRole(roles, "Admin") || hasAnyPermission(permissions, "inventory.approve");
+  const canSeeStorekeeperAssetQueue =
+    hasAnyRole(roles, ["Admin", "Storekeeper"]) || hasAnyPermission(permissions, "inventory.issue");
+
+  const waitingApprovalCount = assetRequests.filter((row) => {
+    const status = safeStatus(row.status);
+    return status === "pending_admin_approval" || status === "pending";
+  }).length;
+  const readyAllocateCount = assetRequests.filter((row) => safeStatus(row.status) === "approved").length;
+  const allocatedCount = assetRequests.filter((row) => safeStatus(row.status) === "allocated").length;
+
+  const cards: DashboardAssetQueueCard[] = [];
+
+  if (canSeeAdminAssetQueue) {
+    cards.push({
+      id: "asset_waiting_approval",
+      label: "Asset Waiting Approval",
+      count: waitingApprovalCount,
+      href: "/asset-requests?queue=waiting-approval",
+      helperText: "New asset requests waiting for admin decision.",
+      color: "orange",
+    });
+  }
+
+  if (canSeeStorekeeperAssetQueue) {
+    cards.push({
+      id: "asset_ready_allocate",
+      label: "Asset Ready To Allocate",
+      count: readyAllocateCount,
+      href: "/asset-requests?queue=allocate-ready",
+      helperText: "Approved asset requests that can now be allocated.",
+      color: "blue",
+    });
+    cards.push({
+      id: "asset_allocated",
+      label: "Asset Currently Allocated",
+      count: allocatedCount,
+      href: "/asset-requests?queue=allocated",
+      helperText: "Allocated asset requests that are still active in the field.",
+      color: "purple",
+    });
+  }
+
+  return cards;
+}
+
 function sanitizeSummary(value: unknown): DashboardSummary {
   const row = asObj(value);
   return {
@@ -361,6 +629,55 @@ function sanitizeSnapshot(value: unknown): DashboardSnapshot {
         requester: toStringValue(item.requester),
         time: toStringValue(item.time, "-"),
         href: item.href == null ? undefined : String(item.href),
+        actionLabel: normalizeQueueActionLabel(item.actionLabel, "Review"),
+      };
+    }),
+    approvalQueues: asArray(row.approvalQueues).map((entry) => {
+      const item = asObj(entry);
+      return {
+        key:
+          toStringValue(item.key) === "storekeeper"
+            ? "storekeeper"
+            : toStringValue(item.key) === "finance"
+              ? "finance"
+              : "admin",
+        label: toStringValue(item.label),
+        count: toNumber(item.count),
+        helperText: toStringValue(item.helperText),
+        emptyText: toStringValue(item.emptyText),
+        items: asArray(item.items).map((queueEntry) => {
+          const queueItem = asObj(queueEntry);
+          return {
+            id: toStringValue(queueItem.id),
+            desc: toStringValue(queueItem.desc),
+            requester: toStringValue(queueItem.requester),
+            time: toStringValue(queueItem.time, "-"),
+            href: queueItem.href == null ? undefined : String(queueItem.href),
+            actionLabel: normalizeQueueActionLabel(queueItem.actionLabel, "Review"),
+          };
+        }),
+      };
+    }),
+    assetRequestQueueCards: asArray(row.assetRequestQueueCards).map((entry) => {
+      const item = asObj(entry);
+      const idValue = toStringValue(item.id);
+      return {
+        id:
+          idValue === "asset_ready_allocate"
+            ? "asset_ready_allocate"
+            : idValue === "asset_allocated"
+              ? "asset_allocated"
+              : "asset_waiting_approval",
+        label: toStringValue(item.label),
+        count: toNumber(item.count),
+        href: toStringValue(item.href, "/asset-requests"),
+        helperText: toStringValue(item.helperText),
+        color:
+          toStringValue(item.color) === "blue"
+            ? "blue"
+            : toStringValue(item.color) === "purple"
+              ? "purple"
+              : "orange",
       };
     }),
     progressItems: asArray(row.progressItems).map((entry) => {
@@ -423,7 +740,7 @@ async function fetchRemoteSnapshot(): Promise<DashboardSnapshot> {
   return sanitizeSnapshot(asObj(response.data).data);
 }
 
-async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
+async function buildLocalSnapshot(roles: string[], permissions: string[]): Promise<DashboardSnapshot> {
   const [apartments, customers, sales, installments, financials, rentals, notifications] = await Promise.all([
     db.apartments.toArray(),
     db.customers.toArray(),
@@ -751,28 +1068,40 @@ async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
     },
   ];
 
+  const summary: DashboardSummary = {
+    totalApartments: apartments.length,
+    availableApartments: apartmentStatuses.available,
+    soldApartments: apartmentStatuses.sold,
+    totalCustomers: customers.length,
+    totalRevenue,
+    currentMonthRevenue,
+    previousMonthRevenue,
+    pendingApprovals: pendingSaleApprovals.length + pendingApprovalSales.length,
+    overdueInstallments: overdueRows.length,
+    overdueAmount,
+    municipalityPending,
+    municipalityPendingCount,
+    activeRentals,
+    rentalsDueSoon,
+  };
+
+  const approvalQueues = await buildWorkflowApprovalQueues({
+    baseApprovalCount: summary.pendingApprovals,
+    baseApprovals: approvals,
+    roles,
+    permissions,
+  });
+  const assetRequestQueueCards = await buildAssetRequestQueueCards(roles, permissions);
+
   return {
     generated_at: nowIso(),
-    summary: {
-      totalApartments: apartments.length,
-      availableApartments: apartmentStatuses.available,
-      soldApartments: apartmentStatuses.sold,
-      totalCustomers: customers.length,
-      totalRevenue,
-      currentMonthRevenue,
-      previousMonthRevenue,
-      pendingApprovals: pendingSaleApprovals.length + pendingApprovalSales.length,
-      overdueInstallments: overdueRows.length,
-      overdueAmount,
-      municipalityPending,
-      municipalityPendingCount,
-      activeRentals,
-      rentalsDueSoon,
-    },
+    summary,
     salesChartData,
     apartmentStatusData,
     recentSales,
     approvals,
+    approvalQueues,
+    assetRequestQueueCards,
     progressItems,
     activities: notificationActivities.length ? notificationActivities : fallbackActivities,
     metrics,
@@ -781,6 +1110,8 @@ async function buildLocalSnapshot(): Promise<DashboardSnapshot> {
 
 export function useDashboardData(): DashboardData {
   const userId = useSelector((state: RootState) => String(state.auth.user?.id ?? "").trim());
+  const roles = useSelector((state: RootState) => state.auth.user?.roles ?? []);
+  const permissions = useSelector((state: RootState) => state.auth.user?.permissions ?? []);
   const [loading, setLoading] = useState(true);
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(EMPTY_SNAPSHOT);
   const [snapshotOwner, setSnapshotOwner] = useState("");
@@ -796,7 +1127,7 @@ export function useDashboardData(): DashboardData {
 
     let localSnapshot: DashboardSnapshot | null = null;
     if (preferLocal) {
-      localSnapshot = await buildLocalSnapshot();
+      localSnapshot = await buildLocalSnapshot(roles, permissions);
       setSnapshot(localSnapshot);
       setSnapshotOwner(userId);
       if (!silent) {
@@ -822,9 +1153,23 @@ export function useDashboardData(): DashboardData {
       try {
         lastRemoteFetchRef.current = Date.now();
         const remoteSnapshot = await fetchRemoteSnapshot();
-        setSnapshot(remoteSnapshot);
+        const [approvalQueues, assetRequestQueueCards] = await Promise.all([
+          buildWorkflowApprovalQueues({
+            baseApprovalCount: remoteSnapshot.summary.pendingApprovals,
+            baseApprovals: remoteSnapshot.approvals,
+            roles,
+            permissions,
+          }),
+          buildAssetRequestQueueCards(roles, permissions),
+        ]);
+        const enrichedRemoteSnapshot: DashboardSnapshot = {
+          ...remoteSnapshot,
+          approvalQueues,
+          assetRequestQueueCards,
+        };
+        setSnapshot(enrichedRemoteSnapshot);
         setSnapshotOwner(userId);
-        await writeCachedSnapshot(userId, remoteSnapshot);
+        await writeCachedSnapshot(userId, enrichedRemoteSnapshot);
         setLoading(false);
         return;
       } catch {
@@ -840,11 +1185,11 @@ export function useDashboardData(): DashboardData {
       return;
     }
 
-    const fallbackSnapshot = await buildLocalSnapshot();
+    const fallbackSnapshot = await buildLocalSnapshot(roles, permissions);
     setSnapshot(fallbackSnapshot);
     setSnapshotOwner(userId);
     setLoading(false);
-  }, [userId]);
+  }, [permissions, roles, userId]);
 
   useEffect(() => {
     let disposed = false;
@@ -866,6 +1211,9 @@ export function useDashboardData(): DashboardData {
       runRefresh({ force: isOnline(), silent: true, preferLocal: true });
     });
     const unsubscribeNotifications = subscribeAppEvent("notifications:changed", () => {
+      runRefresh({ force: isOnline(), silent: true, preferLocal: true });
+    });
+    const unsubscribeAssetRequests = subscribeAppEvent("asset-requests:changed", () => {
       runRefresh({ force: isOnline(), silent: true, preferLocal: true });
     });
 
@@ -897,6 +1245,7 @@ export function useDashboardData(): DashboardData {
       unsubscribeInstallments();
       unsubscribeRentals();
       unsubscribeNotifications();
+      unsubscribeAssetRequests();
       window.removeEventListener("sync:complete", onSyncComplete as EventListener);
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
@@ -912,6 +1261,8 @@ export function useDashboardData(): DashboardData {
     apartmentStatusData: visibleSnapshot.apartmentStatusData,
     recentSales: visibleSnapshot.recentSales,
     approvals: visibleSnapshot.approvals,
+    approvalQueues: visibleSnapshot.approvalQueues,
+    assetRequestQueueCards: visibleSnapshot.assetRequestQueueCards,
     progressItems: visibleSnapshot.progressItems,
     activities: visibleSnapshot.activities,
     metrics: visibleSnapshot.metrics,

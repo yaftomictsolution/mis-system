@@ -36,6 +36,7 @@ export type ProjectInput = {
   status?: "planned" | "active" | "completed";
   start_date?: string | null;
   end_date?: string | null;
+  assigned_employee_ids?: number[];
 };
 
 type PullConfig<Row extends { uuid: string; updated_at: number }> = {
@@ -194,18 +195,43 @@ function sanitizeProject(input: unknown): ProjectRow {
   return {
     id: toRowId(record.id, uuid),
     uuid,
+    project_manager_user_id:
+      record.project_manager_user_id === null || record.project_manager_user_id === undefined ? null : Number(record.project_manager_user_id),
+    project_manager_name: trimOrNull(record.project_manager_name, 255),
     name: trimText(record.name, 255),
     location: trimOrNull(record.location, 255),
     status: normalizeStatus(record.status),
     start_date: toNullableTs(record.start_date),
     end_date: toNullableTs(record.end_date),
+    assigned_employee_ids: Array.isArray(record.assigned_employee_ids)
+      ? record.assigned_employee_ids.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)
+      : [],
+    assigned_employees: Array.isArray(record.assigned_employees)
+      ? record.assigned_employees.map((entry) => {
+          const item = obj(entry);
+          const employeeId = Number(item.id);
+          return {
+            id: Number.isFinite(employeeId) && employeeId > 0 ? employeeId : null,
+            uuid: trimOrNull(item.uuid, 100),
+            name: trimOrNull(item.name, 255),
+            job_title: trimOrNull(item.job_title, 255),
+            status: trimOrNull(item.status, 50),
+          };
+        })
+      : [],
     created_at: toTs(record.created_at ?? record.updated_at),
     updated_at: toTs(record.updated_at ?? record.created_at),
   };
 }
 
 function matchesProjectSearch(row: ProjectRow, query: string): boolean {
-  return [row.name, row.location, row.status].some((value) => String(value ?? "").toLowerCase().includes(query));
+  return [
+    row.name,
+    row.location,
+    row.status,
+    row.project_manager_name,
+    ...(row.assigned_employees ?? []).map((employee) => employee.name ?? ""),
+  ].some((value) => String(value ?? "").toLowerCase().includes(query));
 }
 
 async function listLocal<Row extends { uuid: string; updated_at: number }>(
@@ -314,6 +340,9 @@ function toProjectPayload(input: ProjectInput): Obj {
     status: normalizeStatus(input.status),
     start_date: input.start_date ? new Date(input.start_date).toISOString() : null,
     end_date: input.end_date ? new Date(input.end_date).toISOString() : null,
+    assigned_employee_ids: Array.isArray(input.assigned_employee_ids)
+      ? Array.from(new Set(input.assigned_employee_ids.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)))
+      : [],
   };
 }
 

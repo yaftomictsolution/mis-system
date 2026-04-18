@@ -14,7 +14,7 @@ export function hasAnyPermission(
 }
 
 function normalizeRole(value: string): string {
-  return value.trim().toLowerCase();
+  return value.trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
 
 export function hasAnyRole(

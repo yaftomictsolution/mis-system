@@ -21,7 +21,8 @@ import { SalesChart } from '@/components/dashboard/SalesChart'
 import { RecentSalesTable } from '@/components/dashboard/RecentSalesTable'
 import { ApprovalsList } from '@/components/dashboard/ApprovalsList'
 import { ProjectProgress } from '@/components/dashboard/ProjectProgress'
-import { useDashboardData } from '@/components/dashboard/useDashboardData'
+import { useDashboardData, type DashboardApprovalQueue } from '@/components/dashboard/useDashboardData'
+import { hasAnyRole } from '@/lib/permissions'
 import type { RootState } from '@/store/store'
 
 const activityColors: Record<string, string> = {
@@ -34,6 +35,11 @@ const activityColors: Record<string, string> = {
 
 const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } }
 const fadeUp = { hidden: { opacity: 0, y: 12 }, show: { opacity: 1, y: 0, transition: { duration: 0.35 } } }
+const assetQueueIconMap = {
+  asset_waiting_approval: ClipboardCheck,
+  asset_ready_allocate: FolderKanban,
+  asset_allocated: Zap,
+} as const
 
 function formatCurrencyShort(amount: number): string {
   const absolute = Math.abs(amount)
@@ -66,12 +72,28 @@ function toDisplayName(user: RootState["auth"]["user"]): string {
   return 'User'
 }
 
+function getPreferredQueueKey(
+  user: RootState["auth"]["user"],
+  queues: DashboardApprovalQueue[],
+): DashboardApprovalQueue['key'] | null {
+  const roles = user?.roles ?? []
+  if (hasAnyRole(roles, 'Admin') && queues.some((queue) => queue.key === 'admin')) return 'admin'
+  if (hasAnyRole(roles, 'Storekeeper') && queues.some((queue) => queue.key === 'storekeeper')) return 'storekeeper'
+  if (hasAnyRole(roles, 'Accountant') && queues.some((queue) => queue.key === 'finance')) return 'finance'
+  return queues[0]?.key ?? null
+}
+
 export default function DashboardHome() {
   const dashboard = useDashboardData()
   const user = useSelector((state: RootState) => state.auth.user)
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
   const displayName = toDisplayName(user)
   const revenueTrend = buildTrend(dashboard.summary.currentMonthRevenue, dashboard.summary.previousMonthRevenue)
+  const preferredQueueKey = getPreferredQueueKey(user, dashboard.approvalQueues)
+  const primaryQueue = dashboard.approvalQueues.find((queue) => queue.key === preferredQueueKey) ?? dashboard.approvalQueues[0]
+  const workflowCount = primaryQueue?.count ?? dashboard.summary.pendingApprovals
+  const workflowSubtitle = primaryQueue?.helperText || (workflowCount ? 'Items are waiting for your next action.' : 'No workflow items are waiting.')
+  const workflowHref = primaryQueue?.items[0]?.href || (primaryQueue?.key === 'finance' ? '/purchase-requests' : primaryQueue?.key === 'storekeeper' ? '/inventory-requests' : '/apartment-sales')
 
   return (
     <div className="relative p-4 lg:p-8 max-w-[1600px] mx-auto space-y-8 min-h-full">
@@ -133,13 +155,13 @@ export default function DashboardHome() {
             to="/apartment-sales"
           />
           <StatCard
-            title="Pending Approvals"
-            value={dashboard.summary.pendingApprovals}
-            subtitle={dashboard.summary.pendingApprovals ? 'Deed approvals waiting' : 'No approvals waiting'}
+            title={primaryQueue ? `${primaryQueue.label} Queue` : 'Pending Approvals'}
+            value={workflowCount}
+            subtitle={workflowSubtitle}
             icon={ClipboardCheck}
             color="orange"
             delay={0.4}
-            to="/apartment-sales"
+            to={workflowHref}
           />
         </div>
 
@@ -173,6 +195,34 @@ export default function DashboardHome() {
           />
         </div>
 
+        {dashboard.assetRequestQueueCards.length > 0 && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Asset Request Queue</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">Dedicated approval and allocation shortcuts for asset workflow only.</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6">
+              {dashboard.assetRequestQueueCards.map((card, index) => {
+                const icon = assetQueueIconMap[card.id]
+                return (
+                  <StatCard
+                    key={card.id}
+                    title={card.label}
+                    value={card.count}
+                    subtitle={card.helperText}
+                    icon={icon}
+                    color={card.color}
+                    delay={0.72 + index * 0.04}
+                    to={card.href}
+                  />
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2"><SalesChart data={dashboard.salesChartData} /></div>
           <div><ApartmentStatusChart data={dashboard.apartmentStatusData} /></div>
@@ -180,7 +230,7 @@ export default function DashboardHome() {
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <RecentSalesTable sales={dashboard.recentSales} />
-          <ApprovalsList approvals={dashboard.approvals} />
+          <ApprovalsList approvals={dashboard.approvals} approvalQueues={dashboard.approvalQueues} preferredQueueKey={preferredQueueKey} />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
