@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import RequirePermission from "@/components/auth/RequirePermission";
+import AssetTypeManagerModal from "@/components/inventories/AssetTypeManagerModal";
 import { Badge } from "@/components/ui/Badge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { DataTable, type Column } from "@/components/ui/DataTable";
@@ -10,7 +11,18 @@ import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
 import type { CompanyAssetRow, MaterialRow, VendorRow, WarehouseRow } from "@/db/localDB";
+import { subscribeAppEvent } from "@/lib/appEvents";
 import { notifyError } from "@/lib/notify";
+import {
+  ASSET_TYPE_MODULE,
+  buildAssetTypeLabelMap,
+  buildAssetTypeOptions,
+} from "@/modules/document-types/asset-type-helpers";
+import {
+  documentTypesListLocal,
+  documentTypesPullToLocal,
+  type DocumentTypeRow,
+} from "@/modules/document-types/document-types.repo";
 import {
   companyAssetCreate,
   companyAssetDelete,
@@ -81,7 +93,7 @@ type MaterialFormState = {
 type AssetFormState = {
   asset_code: string;
   asset_name: string;
-  asset_type: "vehicle" | "machine" | "tool" | "IT";
+  asset_type: string;
   quantity: string;
   supplier_id: string;
   serial_no: string;
@@ -151,11 +163,11 @@ function createEmptyMaterialForm(): MaterialFormState {
   };
 }
 
-function createEmptyAssetForm(): AssetFormState {
+function createEmptyAssetForm(defaultType = "tool"): AssetFormState {
   return {
     asset_code: "",
     asset_name: "",
-    asset_type: "tool",
+    asset_type: defaultType,
     quantity: "0",
     supplier_id: "",
     serial_no: "",
@@ -206,9 +218,6 @@ function normalizeMaterialForm(row: MaterialRow): MaterialFormState {
 }
 
 function normalizeAssetForm(row: CompanyAssetRow): AssetFormState {
-  const assetType = ["vehicle", "machine", "tool", "IT"].includes(row.asset_type)
-    ? (row.asset_type as AssetFormState["asset_type"])
-    : "tool";
   const status = ["available", "allocated", "maintenance", "damaged", "retired"].includes(row.status)
     ? (row.status as AssetFormState["status"])
     : "available";
@@ -216,7 +225,7 @@ function normalizeAssetForm(row: CompanyAssetRow): AssetFormState {
   return {
     asset_code: row.asset_code || "",
     asset_name: row.asset_name || "",
-    asset_type: assetType,
+    asset_type: row.asset_type || "tool",
     quantity: String(row.quantity ?? 0),
     supplier_id: row.supplier_id ? String(row.supplier_id) : "",
     serial_no: row.serial_no || "",
@@ -252,11 +261,13 @@ export default function InventoriesPage() {
   const [warehouses, setWarehouses] = useState<WarehouseRow[]>([]);
   const [materials, setMaterials] = useState<MaterialRow[]>([]);
   const [assets, setAssets] = useState<CompanyAssetRow[]>([]);
+  const [assetTypeRows, setAssetTypeRows] = useState<DocumentTypeRow[]>([]);
 
   const [vendorFormOpen, setVendorFormOpen] = useState(false);
   const [warehouseFormOpen, setWarehouseFormOpen] = useState(false);
   const [materialFormOpen, setMaterialFormOpen] = useState(false);
   const [assetFormOpen, setAssetFormOpen] = useState(false);
+  const [assetTypeModalOpen, setAssetTypeModalOpen] = useState(false);
 
   const [editingVendor, setEditingVendor] = useState<VendorRow | null>(null);
   const [editingWarehouse, setEditingWarehouse] = useState<WarehouseRow | null>(null);
@@ -275,16 +286,18 @@ export default function InventoriesPage() {
   const [pendingDelete, setPendingDelete] = useState<DeleteState | null>(null);
 
   const loadLocal = useCallback(async () => {
-    const [vendorPage, warehousePage, materialPage, assetPage] = await Promise.all([
+    const [vendorPage, warehousePage, materialPage, assetPage, typeRows] = await Promise.all([
       vendorsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       warehousesListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       materialsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
       companyAssetsListLocal({ page: 1, pageSize: LOCAL_PAGE_SIZE }),
+      documentTypesListLocal({ module: ASSET_TYPE_MODULE, includeInactive: true }),
     ]);
     setVendors(vendorPage.items);
     setWarehouses(warehousePage.items);
     setMaterials(materialPage.items);
     setAssets(assetPage.items);
+    setAssetTypeRows(typeRows);
   }, []);
 
   const refresh = useCallback(
@@ -309,6 +322,7 @@ export default function InventoriesPage() {
           if (entitiesToPull.includes("warehouses")) await warehousesPullToLocal();
           if (entitiesToPull.includes("materials")) await materialsPullToLocal();
           if (entitiesToPull.includes("company_assets")) await companyAssetsPullToLocal();
+          await documentTypesPullToLocal();
         } catch {
           pullFailed = true;
         }
@@ -354,9 +368,22 @@ export default function InventoriesPage() {
     return () => window.removeEventListener("sync:complete", onSyncComplete as EventListener);
   }, [refresh]);
 
+  useEffect(() => {
+    const unsubscribeDocumentTypes = subscribeAppEvent("document-types:changed", () => {
+      void refresh({ showLoader: false, showFailureToast: false, entitiesToPull: [] });
+    });
+
+    return unsubscribeDocumentTypes;
+  }, [refresh]);
+
   const vendorOptions = useMemo(
     () => vendors.map((item) => ({ value: String(item.id ?? ""), label: item.name })),
     [vendors]
+  );
+  const assetTypeLabelByCode = useMemo(() => buildAssetTypeLabelMap(assetTypeRows), [assetTypeRows]);
+  const assetTypeOptions = useMemo(
+    () => buildAssetTypeOptions(assetTypeRows, editingAsset?.asset_type ?? assetForm.asset_type),
+    [assetForm.asset_type, assetTypeRows, editingAsset?.asset_type],
   );
 
   const summary = useMemo(() => {
@@ -408,7 +435,7 @@ export default function InventoriesPage() {
 
     if (tab === "assets") {
       setEditingAsset(null);
-      setAssetForm(createEmptyAssetForm());
+      setAssetForm(createEmptyAssetForm(assetTypeOptions[0]?.value ?? "tool"));
       setAssetFormError(null);
       setAssetFormOpen(true);
       return;
@@ -418,7 +445,7 @@ export default function InventoriesPage() {
     setMaterialForm(createEmptyMaterialForm());
     setMaterialFormError(null);
     setMaterialFormOpen(true);
-  }, [tab]);
+  }, [assetTypeOptions, tab]);
 
   const closeVendorForm = useCallback(() => {
     setVendorFormOpen(false);
@@ -445,8 +472,8 @@ export default function InventoriesPage() {
     setAssetFormOpen(false);
     setEditingAsset(null);
     setAssetFormError(null);
-    setAssetForm(createEmptyAssetForm());
-  }, []);
+    setAssetForm(createEmptyAssetForm(assetTypeOptions[0]?.value ?? "tool"));
+  }, [assetTypeOptions]);
 
   const openVendorEdit = useCallback((row: VendorRow) => {
     setEditingVendor(row);
@@ -659,7 +686,7 @@ export default function InventoriesPage() {
     () => [
       { key: "asset_code", label: "Code", render: (item) => <span className="font-semibold">{item.asset_code}</span> },
       { key: "asset_name", label: "Asset", render: (item) => item.asset_name || "-" },
-      { key: "asset_type", label: "Type", render: (item) => item.asset_type || "-" },
+      { key: "asset_type", label: "Type", render: (item) => assetTypeLabelByCode.get(item.asset_type) || item.asset_type || "-" },
       { key: "supplier_name", label: "Supplier", render: (item) => item.supplier_name || "-" },
       { key: "current_warehouse_name", label: "Warehouse", render: (item) => item.current_warehouse_name || "-" },
       { key: "quantity", label: "Available Qty", render: (item) => formatQuantity(Number(item.quantity ?? 0)) },
@@ -668,7 +695,7 @@ export default function InventoriesPage() {
       { key: "status", label: "Status", render: (item) => assetBadge(item.status) },
       { key: "updated_at", label: "Updated", render: (item) => formatDate(item.updated_at) },
     ],
-    []
+    [assetTypeLabelByCode]
   );
 
   const activeDataTable = useMemo(() => {
@@ -789,6 +816,15 @@ export default function InventoriesPage() {
             >
               Create {currentTabLabel}
             </button>
+            {tab === "assets" ? (
+              <button
+                type="button"
+                onClick={() => setAssetTypeModalOpen(true)}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-[#1a1a2e]"
+              >
+                Asset Types
+              </button>
+            ) : null}
           </div>
         </PageHeader>
 
@@ -948,7 +984,7 @@ export default function InventoriesPage() {
               required
             />
           </div>
-          <p className="text-xs text-slate-500">
+          {/* <p className="text-xs text-slate-500">
             Use <span className="font-semibold">No Expiry</span> for materials like brick, block, sand, gravel, steel, and similar items.
           </p>
           {editingMaterial?.has_warehouse_stock ? (
@@ -963,10 +999,10 @@ export default function InventoriesPage() {
             <p className="text-xs text-slate-500">
               For new materials with starting stock, choose the warehouse where that opening quantity is physically stored.
             </p>
-          )}
-          <p className="text-xs text-slate-500">
+          )} */}
+          {/* <p className="text-xs text-slate-500">
             Reference unit price is a procurement default for autofill. The actual purchase price can still change on each purchase request and again at receive time.
-          </p>
+          </p> */}
           <FormField label="Notes" type="textarea" value={materialForm.notes} onChange={(value) => setMaterialForm((prev) => ({ ...prev, notes: String(value) }))} rows={4} />
           {materialFormError && <p className="text-sm text-red-600">{materialFormError}</p>}
           <div className="flex justify-end gap-3">
@@ -978,9 +1014,9 @@ export default function InventoriesPage() {
 
       <Modal isOpen={assetFormOpen} onClose={closeAssetForm} title={editingAsset ? "Edit Company Asset" : "Create Company Asset"} size="xl">
         <div className="space-y-4">
-          <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-100">
+          {/* <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-100">
             Company assets now work like reusable stock lines. One row can represent a large available quantity such as <span className="font-semibold">Desktop = 5000</span>, while request and allocation flows move quantities in and out of that stock.
-          </div>
+          </div> */}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             <FormField
               label="Asset Code"
@@ -990,19 +1026,23 @@ export default function InventoriesPage() {
               required
             />
             <FormField label="Asset Name" value={assetForm.asset_name} onChange={(value) => setAssetForm((prev) => ({ ...prev, asset_name: String(value) }))} required />
-            <FormField
-              label="Asset Type"
-              type="select"
-              value={assetForm.asset_type}
-              onChange={(value) => setAssetForm((prev) => ({ ...prev, asset_type: String(value) as AssetFormState["asset_type"] }))}
-              options={[
-                { value: "vehicle", label: "Vehicle" },
-                { value: "machine", label: "Machine" },
-                { value: "tool", label: "Tool" },
-                { value: "IT", label: "IT Equipment" },
-              ]}
-              required
-            />
+            <div className="space-y-2">
+              <FormField
+                label="Asset Type"
+                type="select"
+                value={assetForm.asset_type}
+                onChange={(value) => setAssetForm((prev) => ({ ...prev, asset_type: String(value) }))}
+                options={assetTypeOptions}
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setAssetTypeModalOpen(true)}
+                className="text-xs font-semibold text-blue-600 transition-colors hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+              >
+                Manage asset types
+              </button>
+            </div>
             <FormField
               label="Available Quantity"
               type="number"
@@ -1042,9 +1082,9 @@ export default function InventoriesPage() {
               placeholder="Select warehouse"
             />
           </div>
-          <p className="text-xs text-slate-500">
+          {/* <p className="text-xs text-slate-500">
             Example: create one row with <span className="font-semibold">Asset Code = DESKTOP-STOCK</span> and <span className="font-semibold">Available Quantity = 5000</span>. Allocation and return workflows will move quantities against this stock instead of creating 5000 separate rows.
-          </p>
+          </p> */}
           <FormField label="Notes" type="textarea" value={assetForm.notes} onChange={(value) => setAssetForm((prev) => ({ ...prev, notes: String(value) }))} rows={4} />
           {assetFormError && <p className="text-sm text-red-600">{assetFormError}</p>}
           <div className="flex justify-end gap-3">
@@ -1062,6 +1102,11 @@ export default function InventoriesPage() {
         }}
         title={`Delete ${currentTabLabel}`}
         message={`Are you sure you want to delete this ${currentTabLabel.toLowerCase()}? This will also sync the delete when the device is online.`}
+      />
+
+      <AssetTypeManagerModal
+        isOpen={assetTypeModalOpen}
+        onClose={() => setAssetTypeModalOpen(false)}
       />
     </RequirePermission>
   );

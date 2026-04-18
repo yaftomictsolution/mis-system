@@ -23,6 +23,7 @@ import {
 import { logoutLocal } from "@/store/auth/authSlice";
 import type { RootState } from "@/store/store";
 import { notifyInfo } from "@/lib/notify";
+import { hasAnyRole } from "@/lib/permissions";
 import { toggleSidebar } from "@/store/uiSlice";
 import { useTheme } from "../../../app/context/ThemeContext";
 import CacheStatus from "./CacheStatus";
@@ -53,6 +54,7 @@ type DashboardNotification = {
   icon: LucideIcon;
   category: string;
   saleUuid?: string;
+  actionUrl?: string;
 };
 
 const notificationToneStyles: Record<NotificationTone, { wrapper: string; icon: string }> = {
@@ -92,6 +94,7 @@ function formatRelativeTime(iso: string | null): string {
 function mapApiNotification(item: AdminNotificationRow): DashboardNotification {
   const category = String(item.category ?? "").trim().toLowerCase();
   const unread = !item.read_at;
+  const actionUrl = typeof item.data?.action_url === "string" ? String(item.data.action_url).trim() : "";
 
   let tone: NotificationTone = unread ? "warning" : "info";
   let icon: LucideIcon = FileText;
@@ -114,6 +117,15 @@ function mapApiNotification(item: AdminNotificationRow): DashboardNotification {
   } else if (category === "sale_payment_received") {
     tone = unread ? "success" : "info";
     icon = CheckCircle2;
+  } else if (category === "rental_approval_required" || category === "rental_bill_approval_required") {
+    tone = unread ? "warning" : "info";
+    icon = FileText;
+  } else if (category === "rental_approved" || category === "rental_bill_created_finance") {
+    tone = unread ? "success" : "info";
+    icon = CheckCircle2;
+  } else if (category === "rental_rejected") {
+    tone = unread ? "warning" : "info";
+    icon = AlertTriangle;
   }
 
   return {
@@ -126,7 +138,29 @@ function mapApiNotification(item: AdminNotificationRow): DashboardNotification {
     icon,
     category,
     saleUuid: item.sale_uuid ?? undefined,
+    actionUrl: actionUrl || undefined,
   };
+}
+
+function resolveNotificationTarget(actionUrl?: string): { appPath?: string; externalUrl?: string } {
+  const normalized = String(actionUrl ?? "").trim();
+  if (!normalized) return {};
+
+  if (normalized.startsWith("/")) {
+    return { appPath: normalized };
+  }
+
+  try {
+    const base = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+    const parsed = new URL(normalized, base);
+    if (typeof window !== "undefined" && parsed.origin === window.location.origin) {
+      return { appPath: `${parsed.pathname}${parsed.search}${parsed.hash}` };
+    }
+
+    return { externalUrl: parsed.toString() };
+  } catch {
+    return {};
+  }
 }
 
 export default function TopNav() {
@@ -147,6 +181,14 @@ export default function TopNav() {
   const profileMenuRef = useRef<HTMLDivElement>(null);
 
   const canApproveSales = Boolean(user?.permissions?.includes("sales.approve"));
+  const canProcessFinance = Boolean(
+    user &&
+      (
+        user.permissions?.includes("installments.pay") ||
+        user.permissions?.includes("accounts.view") ||
+        hasAnyRole(user.roles ?? [], ["Admin", "Accountant", "Finance", "FinanceManager", "Finance Manager"])
+      )
+  );
   const displayName = user?.full_name?.trim() || "User";
   const firstRole = Array.isArray(user?.roles) ? String(user?.roles[0] ?? "").trim() : "";
   const displayRole = firstRole || (canApproveSales ? "Admin" : "User");
@@ -198,13 +240,25 @@ export default function TopNav() {
             }
           }
         }
+        if (showAdminToast && canProcessFinance) {
+          const rentalFinanceCount = mapped.filter(
+            (item) => item.unread && item.category === "rental_bill_created_finance"
+          ).length;
+          if (rentalFinanceCount > 0) {
+            const key = `rental-finance-alert-${user.id}-${new Date().toDateString()}`;
+            if (!sessionStorage.getItem(key)) {
+              notifyInfo(`${rentalFinanceCount} rental payment(s) are ready for finance processing.`);
+              sessionStorage.setItem(key, "1");
+            }
+          }
+        }
       } catch {
         // Keep silent in top bar.
       } finally {
         setNotificationsLoading(false);
       }
     },
-    [canApproveSales, notificationsEnabled, user]
+    [canApproveSales, canProcessFinance, notificationsEnabled, user]
   );
 
   useEffect(() => {
@@ -322,6 +376,15 @@ export default function TopNav() {
     }
 
     setIsNotificationsOpen(false);
+    const target = resolveNotificationTarget(item.actionUrl);
+    if (target.appPath) {
+      router.push(target.appPath);
+      return;
+    }
+    if (target.externalUrl && typeof window !== "undefined") {
+      window.location.href = target.externalUrl;
+      return;
+    }
     if (item.category === "sale_approval_required") {
       router.push("/apartment-sales?tab=pending-approval");
       return;

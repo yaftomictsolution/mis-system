@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import RequirePermission from "@/components/auth/RequirePermission";
 import { Badge } from "@/components/ui/Badge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -8,16 +9,17 @@ import { DataTable, type Column } from "@/components/ui/DataTable";
 import { FormField } from "@/components/ui/FormField";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
-import type { AccountRow, ApartmentRentalRow, RentalPaymentRow } from "@/db/localDB";
+import type { ApartmentRentalRow, RentalPaymentRow } from "@/db/localDB";
 import { apartmentsListLocal, apartmentsPullToLocal } from "@/modules/apartments/apartments.repo";
 import { customersListLocal, customersPullToLocal } from "@/modules/customers/customers.repo";
-import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import {
   rentalClose,
   rentalCreate,
   rentalDelete,
   rentalGenerateBill,
   rentalHandoverKey,
+  rentalApprove,
+  rentalReject,
   rentalPaymentsListLocal,
   rentalPaymentsPullToLocal,
   rentalsListLocal,
@@ -30,6 +32,7 @@ import {
 } from "@/modules/rentals/rentals.repo";
 import { subscribeAppEvent } from "@/lib/appEvents";
 import { notifyError } from "@/lib/notify";
+import { hasAnyRole } from "@/lib/permissions";
 import { useSelector } from "react-redux";
 import type { RootState } from "@/store/store";
 
@@ -39,11 +42,6 @@ type Option = {
   status?: string;
 };
 
-type AccountOption = {
-  id: number;
-  label: string;
-};
-
 type RentalFormState = {
   apartment_id: string;
   tenant_id: string;
@@ -51,9 +49,6 @@ type RentalFormState = {
   contract_end: string;
   monthly_rent: string;
   advance_months: string;
-  initial_advance_paid: string;
-  initial_payment_method: string;
-  initial_account_id: string;
   notes: string;
 };
 
@@ -97,14 +92,28 @@ const toDateInput = (value: number | null | undefined): string => {
 };
 
 const statusColor: Record<string, "blue" | "emerald" | "amber" | "red" | "purple"> = {
+  pending: "amber",
+  pending_admin_approval: "amber",
   draft: "blue",
   advance_pending: "amber",
   active: "emerald",
+  rejected: "red",
   completed: "emerald",
   terminated: "purple",
   defaulted: "red",
   cancelled: "red",
 };
+
+function isPendingApprovalRentalStatus(value?: string | null): boolean {
+  const status = String(value ?? "").trim().toLowerCase();
+  return status === "pending" || status === "pending_admin_approval";
+}
+
+function formatRentalStatus(value?: string | null): string {
+  if (isPendingApprovalRentalStatus(value)) return "waiting approval";
+  if (String(value ?? "").trim().toLowerCase() === "rejected") return "rejected by admin";
+  return String(value ?? "-");
+}
 
 const emptyRentalForm = (): RentalFormState => ({
   apartment_id: "",
@@ -113,9 +122,6 @@ const emptyRentalForm = (): RentalFormState => ({
   contract_end: "",
   monthly_rent: "",
   advance_months: "3",
-  initial_advance_paid: "0",
-  initial_payment_method: "cash",
-  initial_account_id: "",
   notes: "",
 });
 
@@ -172,8 +178,21 @@ function buildAdvancePaidDateByRentalUuid(
 }
 
 export default function RentalsPage() {
-  const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
-  const canGenerateBills = permissions.includes("sales.create");
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const authUser = useSelector((s: RootState) => s.auth.user);
+  const permissions = authUser?.permissions ?? [];
+  const roles = authUser?.roles ?? [];
+  const isAdmin = hasAnyRole(roles, "Admin");
+  const canCreateRental = hasAnyRole(roles, ["Admin", "Apartment Manager"]);
+  const canApproveRental = isAdmin;
+  const canDeleteRejectedRental = hasAnyRole(roles, ["Admin", "Apartment Manager", "Project Manager"]);
+  const canGenerateBills =
+    canCreateRental ||
+    permissions.includes("installments.pay") ||
+    permissions.includes("accounts.view") ||
+    hasAnyRole(roles, ["Accountant", "Finance", "FinanceManager", "Finance Manager"]);
   const [rows, setRows] = useState<ApartmentRentalRow[]>([]);
   const [latestBillByRentalUuid, setLatestBillByRentalUuid] = useState<Map<string, RentalPaymentRow>>(
     () => new Map()
@@ -185,20 +204,21 @@ export default function RentalsPage() {
   const [saving, setSaving] = useState(false);
   const [apartments, setApartments] = useState<Option[]>([]);
   const [customers, setCustomers] = useState<Option[]>([]);
-  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [editing, setEditing] = useState<ApartmentRentalRow | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<RentalFormState>(emptyRentalForm());
   const [billForm, setBillForm] = useState<BillFormState>(emptyBillForm());
   const [closeForm, setCloseForm] = useState<CloseFormState>(emptyCloseForm());
   const [pendingDelete, setPendingDelete] = useState<ApartmentRentalRow | null>(null);
+  const [pendingApprove, setPendingApprove] = useState<ApartmentRentalRow | null>(null);
+  const [pendingReject, setPendingReject] = useState<ApartmentRentalRow | null>(null);
+  const [pendingHandover, setPendingHandover] = useState<ApartmentRentalRow | null>(null);
 
   const loadLookups = useCallback(async () => {
-    await Promise.allSettled([apartmentsPullToLocal(), customersPullToLocal(), accountsPullToLocal()]);
-    const [apartmentsLocal, customersLocal, accountsLocal] = await Promise.all([
+    await Promise.allSettled([apartmentsPullToLocal(), customersPullToLocal()]);
+    const [apartmentsLocal, customersLocal] = await Promise.all([
       apartmentsListLocal({ page: 1, pageSize: 500 }),
       customersListLocal({ page: 1, pageSize: 500 }),
-      accountsListLocal({ page: 1, pageSize: 500 }),
     ]);
 
     const apartmentOptions = apartmentsLocal.items
@@ -217,22 +237,8 @@ export default function RentalsPage() {
         label: `${item.name} (${item.phone})`,
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
-
-    const accountOptions = accountsLocal.items
-      .filter((item: AccountRow) => Number(item.id) > 0 && item.status === "active")
-      .map((item: AccountRow) => ({
-        id: Number(item.id),
-        label: `${item.name} (${item.currency}) - ${new Intl.NumberFormat("en-US", {
-          style: "currency",
-          currency: String(item.currency || "USD").toUpperCase(),
-          maximumFractionDigits: 2,
-        }).format(Number(item.current_balance ?? 0))}`,
-      }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-
     setApartments(apartmentOptions);
     setCustomers(customerOptions);
-    setAccounts(accountOptions);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -329,6 +335,36 @@ export default function RentalsPage() {
     return map;
   }, [customers]);
 
+  const pendingApprovalCount = useMemo(
+    () => rows.filter((row) => isPendingApprovalRentalStatus(row.status)).length,
+    [rows]
+  );
+
+  const activeFilterTab = useMemo(() => {
+    if (!canApproveRental) return "all" as const;
+    return searchParams.get("tab") === "pending-approval" ? ("pending-approval" as const) : ("all" as const);
+  }, [canApproveRental, searchParams]);
+
+  const visibleRows = useMemo(() => {
+    if (activeFilterTab !== "pending-approval") return rows;
+    return rows.filter((row) => isPendingApprovalRentalStatus(row.status));
+  }, [activeFilterTab, rows]);
+
+  const handleFilterTabChange = useCallback(
+    (tab: "all" | "pending-approval") => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (tab === "pending-approval") {
+        params.set("tab", "pending-approval");
+      } else {
+        params.delete("tab");
+      }
+
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    },
+    [pathname, router, searchParams]
+  );
+
   const openCreate = useCallback(() => {
     setEditing(null);
     setForm(emptyRentalForm());
@@ -336,6 +372,14 @@ export default function RentalsPage() {
   }, []);
 
   const openEdit = useCallback((row: ApartmentRentalRow) => {
+    if (isPendingApprovalRentalStatus(row.status)) {
+      notifyError("Record is locked awaiting admin approval.");
+      return;
+    }
+    if (String(row.status ?? "").trim().toLowerCase() === "rejected") {
+      notifyError("Rejected rentals cannot be edited. Delete the record if needed.");
+      return;
+    }
     setEditing(row);
     setForm({
       apartment_id: String(row.apartment_id),
@@ -344,9 +388,6 @@ export default function RentalsPage() {
       contract_end: toDateInput(row.contract_end),
       monthly_rent: String(row.monthly_rent ?? 0),
       advance_months: String(row.advance_months ?? 3),
-      initial_advance_paid: "0",
-      initial_payment_method: "cash",
-      initial_account_id: "",
       notes: "",
     });
     setShowForm(true);
@@ -360,6 +401,10 @@ export default function RentalsPage() {
 
   const handleSave = useCallback(async () => {
     if (saving) return;
+    if (!canCreateRental) {
+      notifyError("Only Admin and Apartment Manager can create rental contracts.");
+      return;
+    }
 
     const apartmentId = Number(form.apartment_id);
     const tenantId = Number(form.tenant_id);
@@ -387,13 +432,6 @@ export default function RentalsPage() {
       return;
     }
 
-    const initialAdvancePaid = Number(form.initial_advance_paid || 0);
-    const initialAccountId = Number(form.initial_account_id || 0);
-    if (!editing && initialAdvancePaid > 0 && (!Number.isFinite(initialAccountId) || initialAccountId <= 0)) {
-      notifyError("Payment account is required when initial advance is received.");
-      return;
-    }
-
     setSaving(true);
     try {
       if (editing?.uuid) {
@@ -412,9 +450,6 @@ export default function RentalsPage() {
           contract_end: form.contract_end,
           monthly_rent: monthlyRent,
           advance_months: Math.trunc(advanceMonths),
-          initial_advance_paid: initialAdvancePaid,
-          initial_payment_method: form.initial_payment_method,
-          initial_account_id: initialAccountId > 0 ? initialAccountId : null,
           notes: form.notes.trim() || undefined,
         };
         await rentalCreate(payload);
@@ -425,7 +460,7 @@ export default function RentalsPage() {
     finally {
       setSaving(false);
     }
-  }, [closeFormModal, editing, form, loadLookups, refresh, saving]);
+  }, [canCreateRental, closeFormModal, editing, form, loadLookups, refresh, saving]);
 
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete?.uuid) return;
@@ -434,6 +469,39 @@ export default function RentalsPage() {
       await Promise.all([refresh(), loadLookups()]);
     } catch {}
   }, [loadLookups, pendingDelete?.uuid, refresh]);
+
+  const confirmApprove = useCallback(async () => {
+    if (!pendingApprove?.uuid) return;
+    try {
+      await rentalApprove(pendingApprove.uuid);
+      await Promise.all([refresh(), loadLookups()]);
+    } catch {}
+    finally {
+      setPendingApprove(null);
+    }
+  }, [loadLookups, pendingApprove?.uuid, refresh]);
+
+  const confirmReject = useCallback(async () => {
+    if (!pendingReject?.uuid) return;
+    try {
+      await rentalReject(pendingReject.uuid);
+      await Promise.all([refresh(), loadLookups()]);
+    } catch {}
+    finally {
+      setPendingReject(null);
+    }
+  }, [loadLookups, pendingReject?.uuid, refresh]);
+
+  const confirmHandover = useCallback(async () => {
+    if (!pendingHandover?.uuid) return;
+    try {
+      await rentalHandoverKey(pendingHandover.uuid);
+      await Promise.all([refresh(), loadLookups()]);
+    } catch {}
+    finally {
+      setPendingHandover(null);
+    }
+  }, [loadLookups, pendingHandover?.uuid, refresh]);
 
   const openBill = useCallback((row: ApartmentRentalRow) => {
     const hasAdvanceRemaining = Number(row.advance_remaining_amount ?? 0) > 0;
@@ -453,88 +521,19 @@ export default function RentalsPage() {
     setBillForm(emptyBillForm());
   }, []);
 
-  const printGeneratedBill = useCallback((payment: RentalPaymentRow, rental: ApartmentRentalRow) => {
+  const openBillPrint = useCallback((payment: RentalPaymentRow, rental: ApartmentRentalRow) => {
     if (typeof window === "undefined") return;
-
-    const escapeHtml = (value: string): string =>
-      value
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-
-    const billNo = payment.bill_no || `RBL-${String(payment.uuid || "").slice(0, 8).toUpperCase()}`;
-    const tenant = customerLabelById.get(rental.tenant_id) ?? rental.tenant_name ?? `Customer #${rental.tenant_id}`;
-    const apartment = apartmentLabelById.get(rental.apartment_id) ?? rental.apartment_code ?? `Apartment #${rental.apartment_id}`;
-    const dueDate = toDateLabel(payment.due_date);
-    const generatedAt = toDateLabel(payment.bill_generated_at);
-    const printedAt = new Date().toLocaleString();
-
-    const html = `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Rental Bill - ${escapeHtml(billNo)}</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 24px; color: #0f172a; }
-      .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 16px; }
-      .title { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
-      .sub { margin: 0; color: #475569; font-size: 12px; }
-      .box { border:1px solid #cbd5e1; border-radius:10px; padding:12px; margin-bottom:12px; }
-      .grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; }
-      .label { font-size: 12px; color: #64748b; margin-bottom: 2px; }
-      .value { font-size: 14px; font-weight: 600; }
-      .footer { margin-top: 18px; font-size: 12px; color: #475569; }
-      @media print { body { margin: 10mm; } }
-    </style>
-  </head>
-  <body>
-    <div class="header">
-      <div>
-        <p class="title">Rental Bill</p>
-        <p class="sub">Customer copy for finance approval</p>
-      </div>
-      <div>
-        <div class="label">Printed At</div>
-        <div class="value">${escapeHtml(printedAt)}</div>
-      </div>
-    </div>
-
-    <div class="box">
-      <div class="grid">
-        <div><div class="label">Bill No</div><div class="value">${escapeHtml(billNo)}</div></div>
-        <div><div class="label">Generated</div><div class="value">${escapeHtml(generatedAt)}</div></div>
-        <div><div class="label">Rental</div><div class="value">${escapeHtml(rental.rental_id || "-")}</div></div>
-        <div><div class="label">Customer</div><div class="value">${escapeHtml(tenant)}</div></div>
-        <div><div class="label">Apartment</div><div class="value">${escapeHtml(apartment)}</div></div>
-        <div><div class="label">Payment Type</div><div class="value">${escapeHtml(payment.payment_type || "monthly")}</div></div>
-        <div><div class="label">Period Month</div><div class="value">${escapeHtml(payment.period_month || "-")}</div></div>
-        <div><div class="label">Due Date</div><div class="value">${escapeHtml(dueDate)}</div></div>
-      </div>
-    </div>
-
-    <div class="box">
-      <div class="label">Amount Due</div>
-      <div class="value">${escapeHtml(money(payment.amount_due || 0))}</div>
-    </div>
-
-    <div class="footer">Customer should bring this bill to finance for payment approval.</div>
-  </body>
-</html>`;
-
-    const popup = window.open("", "_blank", "width=900,height=760");
-    if (!popup) {
-      notifyError("Unable to open print window. Please allow popups and try again.");
+    if (!payment.uuid || !rental.uuid) {
+      notifyError("Bill print is not available for this record yet.");
       return;
     }
 
-    popup.document.open();
-    popup.document.write(html);
-    popup.document.close();
-    popup.focus();
-    popup.print();
-  }, [apartmentLabelById, customerLabelById]);
+    const url = `/print/rentals/${encodeURIComponent(rental.uuid)}/bill/${encodeURIComponent(payment.uuid)}`;
+    const popup = window.open(url, "_blank");
+    if (!popup) {
+      notifyError("Unable to open print window. Please allow popups and try again.");
+    }
+  }, []);
 
   const submitBill = useCallback(async (printAfterGenerate = false) => {
     if (!billForm.rental?.uuid || billForm.submitting) return;
@@ -560,7 +559,7 @@ export default function RentalsPage() {
       };
       const result = await rentalGenerateBill(billForm.rental.uuid, payload);
       if (printAfterGenerate) {
-        printGeneratedBill(result.payment, billForm.rental);
+        openBillPrint(result.payment, result.rental);
       }
       closeBillModal();
       await Promise.all([refresh(), loadLookups()]);
@@ -568,15 +567,7 @@ export default function RentalsPage() {
     finally {
       setBillForm((prev) => ({ ...prev, submitting: false }));
     }
-  }, [billForm, closeBillModal, loadLookups, printGeneratedBill, refresh]);
-
-  const handoverKey = useCallback(async (row: ApartmentRentalRow) => {
-    if (!row.uuid) return;
-    try {
-      await rentalHandoverKey(row.uuid);
-      await Promise.all([refresh(), loadLookups()]);
-    } catch {}
-  }, [loadLookups, refresh]);
+  }, [billForm, closeBillModal, loadLookups, openBillPrint, refresh]);
 
   const openCloseModal = useCallback((row: ApartmentRentalRow) => {
     setCloseForm({
@@ -636,7 +627,9 @@ export default function RentalsPage() {
       {
         key: "status",
         label: "Status",
-        render: (item) => <Badge color={statusColor[item.status] ?? "blue"}>{item.status}</Badge>,
+        render: (item) => (
+          <Badge color={statusColor[item.status] ?? "blue"}>{formatRentalStatus(item.status)}</Badge>
+        ),
       },
       {
         key: "print_bill",
@@ -650,7 +643,7 @@ export default function RentalsPage() {
               disabled={!canPrint}
               onClick={() => {
                 if (!bill) return;
-                printGeneratedBill(bill, item);
+                openBillPrint(bill, item);
               }}
               className="rounded-md bg-slate-700 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -663,17 +656,38 @@ export default function RentalsPage() {
         key: "operations",
         label: "Operations",
         render: (item) => {
+          const waitingApproval = isPendingApprovalRentalStatus(item.status);
           const canHandover =
             item.advance_remaining_amount <= 0 &&
             item.key_handover_status !== "handed_over" &&
-            !["completed", "terminated", "defaulted", "cancelled"].includes(item.status);
-          const canBill = canGenerateBills && !["completed", "terminated", "defaulted", "cancelled"].includes(item.status);
-          const canClose = !["completed", "terminated", "defaulted", "cancelled"].includes(item.status);
+            !["completed", "terminated", "defaulted", "cancelled", "rejected"].includes(item.status) &&
+            !waitingApproval;
+          const canBill = canGenerateBills && !["completed", "terminated", "defaulted", "cancelled", "rejected"].includes(item.status);
+          const canBillFinal = canBill && !waitingApproval;
+          const canClose = !["completed", "terminated", "defaulted", "cancelled", "rejected"].includes(item.status) && !waitingApproval;
           return (
             <div className="flex flex-wrap gap-2">
+              {canApproveRental && waitingApproval && (
+                <button
+                  type="button"
+                  onClick={() => setPendingApprove(item)}
+                  className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-indigo-700"
+                >
+                  Approve
+                </button>
+              )}
+              {canApproveRental && waitingApproval && (
+                <button
+                  type="button"
+                  onClick={() => setPendingReject(item)}
+                  className="rounded-md bg-rose-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-rose-700"
+                >
+                  Reject
+                </button>
+              )}
               <button
                 type="button"
-                disabled={!canBill}
+                disabled={!canBillFinal}
                 onClick={() => openBill(item)}
                 className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -683,7 +697,7 @@ export default function RentalsPage() {
                 type="button"
                 disabled={!canHandover}
                 onClick={() => {
-                  void handoverKey(item);
+                  setPendingHandover(item);
                 }}
                 className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -705,13 +719,13 @@ export default function RentalsPage() {
     [
       advancePaidDateByRentalUuid,
       apartmentLabelById,
+      canApproveRental,
       canGenerateBills,
       customerLabelById,
-      handoverKey,
       latestBillByRentalUuid,
       openBill,
+      openBillPrint,
       openCloseModal,
-      printGeneratedBill,
     ]
   );
 
@@ -755,6 +769,20 @@ export default function RentalsPage() {
           </div>
         </div>
         <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Approval</div>
+          <div>
+            {String(item.status ?? "").trim().toLowerCase() === "rejected" ? (
+              <Badge color="red">rejected by admin</Badge>
+            ) : isPendingApprovalRentalStatus(item.status) ? (
+              <Badge color="amber">waiting approval</Badge>
+            ) : item.approved_at ? (
+              `${item.approved_by_name || "Admin"} | ${toDateLabel(item.approved_at)}`
+            ) : (
+              "-"
+            )}
+          </div>
+        </div>
+        <div>
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Next Due</div>
           <div>{toDateLabel(item.next_due_date)}</div>
         </div>
@@ -767,19 +795,48 @@ export default function RentalsPage() {
     <RequirePermission permission="apartments.view">
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Apartment Rentals" subtitle="Manage rental contracts with customizable advance months">
-          <button
-            type="button"
-            onClick={openCreate}
-            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
-          >
-            Create Rental
-          </button>
+          {canCreateRental && (
+            <button
+              type="button"
+              onClick={openCreate}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+            >
+              Create Rental
+            </button>
+          )}
         </PageHeader>
+
+        {canApproveRental && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => handleFilterTabChange("all")}
+              className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+                activeFilterTab === "all"
+                  ? "bg-slate-900 text-white"
+                  : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:bg-[#12121a] dark:text-slate-200 dark:hover:bg-[#1a1a2e]"
+              }`}
+            >
+              All Rentals ({rows.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => handleFilterTabChange("pending-approval")}
+              className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+                activeFilterTab === "pending-approval"
+                  ? "bg-amber-600 text-white"
+                  : "border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300 dark:hover:bg-amber-500/20"
+              }`}
+            >
+              Pending Approval ({pendingApprovalCount})
+            </button>
+          </div>
+        )}
 
         <div className="mt-6">
           <DataTable
             columns={columns}
-            data={rows}
+            data={visibleRows}
             loading={loading}
             compact
             mobileStack
@@ -790,6 +847,7 @@ export default function RentalsPage() {
             pageSize={TABLE_PAGE_SIZE}
             onEdit={openEdit}
             onDelete={setPendingDelete}
+            canDelete={(item) => canDeleteRejectedRental && String(item.status ?? "").trim().toLowerCase() === "rejected"}
           />
         </div>
       </div>
@@ -808,7 +866,11 @@ export default function RentalsPage() {
               value={form.apartment_id}
               onChange={(value) => setForm((prev) => ({ ...prev, apartment_id: String(value) }))}
               options={apartments
-                .filter((item) => editing?.apartment_id === item.id || !item.status || item.status === "available" || item.status === "reserved")
+                .filter((item) => {
+                  if (editing?.apartment_id === item.id) return true;
+                  const status = String(item.status ?? "").trim().toLowerCase();
+                  return status === "available";
+                })
                 .map((item) => ({ value: String(item.id), label: `${item.label}${item.status ? ` (${item.status})` : ""}` }))}
               required
             />
@@ -848,39 +910,12 @@ export default function RentalsPage() {
               onChange={(value) => setForm((prev) => ({ ...prev, advance_months: String(value) }))}
               required
             />
-            {!editing && (
-              <FormField
-                label="Initial Advance Paid"
-                type="number"
-                value={form.initial_advance_paid}
-                onChange={(value) => setForm((prev) => ({ ...prev, initial_advance_paid: String(value) }))}
-              />
-            )}
-            {!editing && (
-              <FormField
-                label="Initial Payment Method"
-                type="select"
-                value={form.initial_payment_method}
-                onChange={(value) => setForm((prev) => ({ ...prev, initial_payment_method: String(value) }))}
-                options={[
-                  { value: "cash", label: "Cash" },
-                  { value: "bank", label: "Bank" },
-                  { value: "transfer", label: "Transfer" },
-                  { value: "cheque", label: "Cheque" },
-                ]}
-              />
-            )}
-            {!editing && Number(form.initial_advance_paid || 0) > 0 && (
-              <FormField
-                label="Payment Account"
-                type="select"
-                value={form.initial_account_id}
-                onChange={(value) => setForm((prev) => ({ ...prev, initial_account_id: String(value) }))}
-                options={accounts.map((item) => ({ value: String(item.id), label: item.label }))}
-                required
-              />
-            )}
           </div>
+          {!editing && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Payment is not collected here. After admin approval, finance will be notified to process the advance payment from the rental payments page.
+            </p>
+          )}
           {!editing && (
             <FormField
               label="Notes"
@@ -1053,6 +1088,35 @@ export default function RentalsPage() {
         }}
         title="Delete Rental"
         message={`Are you sure you want to delete rental ${pendingDelete?.rental_id ?? ""}?`}
+      />
+      <ConfirmDialog
+        isOpen={Boolean(pendingApprove)}
+        onClose={() => setPendingApprove(null)}
+        onConfirm={() => {
+          void confirmApprove();
+        }}
+        title="Approve Rental"
+        message={`Approve rental ${pendingApprove?.rental_id ?? ""}? Finance will be notified and the advance payment will move to the rental payments page.`}
+        confirmLabel="Approve"
+      />
+      <ConfirmDialog
+        isOpen={Boolean(pendingReject)}
+        onClose={() => setPendingReject(null)}
+        onConfirm={() => {
+          void confirmReject();
+        }}
+        title="Reject Rental"
+        message={`Reject rental ${pendingReject?.rental_id ?? ""}? The request will be marked rejected by admin and can be deleted later.`}
+        confirmLabel="Reject"
+      />
+      <ConfirmDialog
+        isOpen={Boolean(pendingHandover)}
+        onClose={() => setPendingHandover(null)}
+        onConfirm={() => {
+          void confirmHandover();
+        }}
+        title="Handover Key"
+        message={`Are you sure you want to hand over the keys for rental ${pendingHandover?.rental_id ?? ""}?`}
       />
     </RequirePermission>
   );

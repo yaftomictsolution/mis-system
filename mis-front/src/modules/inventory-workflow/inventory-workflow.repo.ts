@@ -10,6 +10,7 @@ import {
   type ProjectRow,
   type WarehouseRow,
 } from "@/db/localDB";
+import { emitAppEvent } from "@/lib/appEvents";
 import { api } from "@/lib/api";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
@@ -76,14 +77,14 @@ export type MaterialRequestItemInput = {
 export type MaterialRequestInput = {
   project_id?: number | null;
   warehouse_id: number;
-  requested_by_employee_id: number;
+  requested_by_employee_id?: number | null;
   notes?: string | null;
   items: MaterialRequestItemInput[];
 };
 
 export type AssetRequestInput = {
   project_id?: number | null;
-  requested_by_employee_id: number;
+  requested_by_employee_id?: number | null;
   requested_asset_id?: number | null;
   asset_type?: string | null;
   quantity_requested: number;
@@ -95,6 +96,13 @@ export type MaterialIssueInput = {
   items: Array<{ uuid: string; quantity_issued: number }>;
   notes?: string | null;
   issue_date?: string | null;
+};
+
+export type MaterialReturnInput = {
+  warehouse_id: number;
+  return_date: string;
+  notes?: string | null;
+  items: Array<{ uuid: string; quantity_returned: number }>;
 };
 
 export type AssetAllocationInput = {
@@ -138,6 +146,32 @@ function lsNum(key: string): number | null {
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getStoredAuthUser(): { id?: number; full_name?: string; name?: string; roles?: string[] } | null {
+  const raw = lsGet("user");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { id?: unknown; full_name?: unknown; name?: unknown; roles?: unknown };
+    return {
+      id: Number(parsed.id),
+      full_name: typeof parsed.full_name === "string" ? parsed.full_name : undefined,
+      name: typeof parsed.name === "string" ? parsed.name : undefined,
+      roles: Array.isArray(parsed.roles) ? parsed.roles.filter((role): role is string => typeof role === "string") : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function workflowRequesterLabelFromRoles(roles: string[] | undefined, fallback?: string | null): string | null {
+  const normalizedRoles = (roles ?? []).map((role) => role.trim().toLowerCase());
+
+  if (normalizedRoles.includes("projectmanager")) return "Workflow Project Manager";
+  if (normalizedRoles.includes("storekeeper")) return "Workflow Storekeeper";
+  if (normalizedRoles.includes("admin")) return "Workflow Admin";
+
+  return trimOrNull(fallback, 255);
 }
 
 function trimText(value: unknown, max = 255): string {
@@ -316,7 +350,7 @@ async function decorateMaterialRequestItems(items: MaterialRequestItemRow[]): Pr
 async function decorateMaterialRequest(row: MaterialRequestRow): Promise<MaterialRequestRow> {
   const [warehouse, employee, project, items] = await Promise.all([
     !row.warehouse_name && row.warehouse_id > 0 ? getWarehouseSnapshot(row.warehouse_id) : Promise.resolve(undefined),
-    !row.requested_by_employee_name && row.requested_by_employee_id > 0 ? getEmployeeSnapshot(row.requested_by_employee_id) : Promise.resolve(undefined),
+    !row.requested_by_employee_name && Number(row.requested_by_employee_id ?? 0) > 0 ? getEmployeeSnapshot(Number(row.requested_by_employee_id)) : Promise.resolve(undefined),
     !row.project_name && (row.project_id ?? 0) > 0 ? getProjectSnapshot(Number(row.project_id)) : Promise.resolve(undefined),
     decorateMaterialRequestItems(row.items ?? []),
   ]);
@@ -329,13 +363,16 @@ async function decorateMaterialRequest(row: MaterialRequestRow): Promise<Materia
     warehouse_name: row.warehouse_name ?? warehouse?.name ?? null,
     requested_by_employee_uuid: row.requested_by_employee_uuid ?? employee?.uuid ?? null,
     requested_by_employee_name: row.requested_by_employee_name ?? buildEmployeeName(employee),
+    requested_by_name: row.requested_by_name ?? row.requested_by_user_name ?? row.requested_by_employee_name ?? buildEmployeeName(employee),
     items,
   };
 }
 
 async function decorateAssetRequest(row: AssetRequestRow): Promise<AssetRequestRow> {
   const [employee, project, requestedAsset, assignedAsset] = await Promise.all([
-    !row.requested_by_employee_name && row.requested_by_employee_id > 0 ? getEmployeeSnapshot(row.requested_by_employee_id) : Promise.resolve(undefined),
+    !row.requested_by_employee_name && Number(row.requested_by_employee_id ?? 0) > 0
+      ? getEmployeeSnapshot(Number(row.requested_by_employee_id))
+      : Promise.resolve(undefined),
     !row.project_name && (row.project_id ?? 0) > 0 ? getProjectSnapshot(Number(row.project_id)) : Promise.resolve(undefined),
     !row.requested_asset_name && (row.requested_asset_id ?? 0) > 0 ? getAssetSnapshot(Number(row.requested_asset_id)) : Promise.resolve(undefined),
     !row.assigned_asset_name && (row.assigned_asset_id ?? 0) > 0 ? getAssetSnapshot(Number(row.assigned_asset_id)) : Promise.resolve(undefined),
@@ -347,6 +384,7 @@ async function decorateAssetRequest(row: AssetRequestRow): Promise<AssetRequestR
     project_name: row.project_name ?? project?.name ?? null,
     requested_by_employee_uuid: row.requested_by_employee_uuid ?? employee?.uuid ?? null,
     requested_by_employee_name: row.requested_by_employee_name ?? buildEmployeeName(employee),
+    requested_by_name: row.requested_by_name ?? row.requested_by_user_name ?? row.requested_by_employee_name ?? buildEmployeeName(employee),
     requested_asset_uuid: row.requested_asset_uuid ?? requestedAsset?.uuid ?? null,
     requested_asset_code: row.requested_asset_code ?? requestedAsset?.asset_code ?? null,
     requested_asset_name: row.requested_asset_name ?? requestedAsset?.asset_name ?? null,
@@ -369,6 +407,7 @@ function sanitizeMaterialRequestItem(input: unknown): MaterialRequestItemRow {
     quantity_requested: Math.max(0, toMoney(record.quantity_requested)),
     quantity_approved: Math.max(0, toMoney(record.quantity_approved)),
     quantity_issued: Math.max(0, toMoney(record.quantity_issued)),
+    quantity_returned: Math.max(0, toMoney(record.quantity_returned)),
     notes: trimOrNull(record.notes, 1000),
   };
 }
@@ -389,19 +428,28 @@ function sanitizeMaterialRequest(input: unknown): MaterialRequestRow {
     warehouse_id: toId(record.warehouse_id),
     warehouse_uuid: trimOrNull(record.warehouse_uuid, 100),
     warehouse_name: trimOrNull(record.warehouse_name, 255),
-    requested_by_employee_id: toId(record.requested_by_employee_id),
+    requested_by_user_id: toNullableId(record.requested_by_user_id),
+    requested_by_user_name: trimOrNull(record.requested_by_user_name, 255),
+    requested_by_name: trimOrNull(record.requested_by_name, 255),
+    requested_by_employee_id: toNullableId(record.requested_by_employee_id),
     requested_by_employee_uuid: trimOrNull(record.requested_by_employee_uuid, 100),
     requested_by_employee_name: trimOrNull(record.requested_by_employee_name, 255),
-    status: trimText(record.status, 50) || "pending",
+    status: trimText(record.status, 50) || "pending_admin_approval",
     approved_by_user_id: toNullableId(record.approved_by_user_id),
     approved_by_user_name: trimOrNull(record.approved_by_user_name, 255),
     approved_at: toNullableTs(record.approved_at),
+    rejected_by_user_id: toNullableId(record.rejected_by_user_id),
+    rejected_by_user_name: trimOrNull(record.rejected_by_user_name, 255),
+    rejected_at: toNullableTs(record.rejected_at),
+    rejection_reason: trimOrNull(record.rejection_reason, 5000),
     issued_by_user_id: toNullableId(record.issued_by_user_id),
     issued_by_user_name: trimOrNull(record.issued_by_user_name, 255),
     issued_at: toNullableTs(record.issued_at),
     issue_receipt_no: trimOrNull(record.issue_receipt_no, 100),
     requested_at: toNullableTs(record.requested_at) ?? Date.now(),
     notes: trimOrNull(record.notes, 5000),
+    can_edit: record.can_edit === true,
+    can_delete: record.can_delete !== false,
     items: rawItems.map(sanitizeMaterialRequestItem).filter((item) => item.uuid && item.material_id > 0 && item.unit),
     created_at: toTs(record.created_at ?? record.updated_at),
     updated_at: toTs(record.updated_at ?? record.created_at),
@@ -420,27 +468,36 @@ function sanitizeAssetRequest(input: unknown): AssetRequestRow {
     project_id: toNullableId(record.project_id),
     project_uuid: trimOrNull(record.project_uuid, 100),
     project_name: trimOrNull(record.project_name, 255),
-    requested_by_employee_id: toId(record.requested_by_employee_id),
+    requested_by_user_id: toNullableId(record.requested_by_user_id),
+    requested_by_user_name: trimOrNull(record.requested_by_user_name, 255),
+    requested_by_name: trimOrNull(record.requested_by_name, 255),
+    requested_by_employee_id: toNullableId(record.requested_by_employee_id),
     requested_by_employee_uuid: trimOrNull(record.requested_by_employee_uuid, 100),
     requested_by_employee_name: trimOrNull(record.requested_by_employee_name, 255),
     requested_asset_id: toNullableId(record.requested_asset_id),
     requested_asset_uuid: trimOrNull(record.requested_asset_uuid, 100),
     requested_asset_code: trimOrNull(record.requested_asset_code, 100),
     requested_asset_name: trimOrNull(record.requested_asset_name, 255),
-    asset_type: trimOrNull(record.asset_type, 50),
+    asset_type: trimOrNull(record.asset_type, 80),
     quantity_requested: Math.max(0, toMoney(record.quantity_requested, 1)),
     quantity_allocated: Math.max(0, toMoney(record.quantity_allocated, 0)),
-    status: trimText(record.status, 50) || "pending",
+    status: trimText(record.status, 50) || "pending_admin_approval",
     reason: trimOrNull(record.reason, 5000),
     approved_by_user_id: toNullableId(record.approved_by_user_id),
     approved_by_user_name: trimOrNull(record.approved_by_user_name, 255),
     approved_at: toNullableTs(record.approved_at),
+    rejected_by_user_id: toNullableId(record.rejected_by_user_id),
+    rejected_by_user_name: trimOrNull(record.rejected_by_user_name, 255),
+    rejected_at: toNullableTs(record.rejected_at),
+    rejection_reason: trimOrNull(record.rejection_reason, 5000),
     allocated_by_user_id: toNullableId(record.allocated_by_user_id),
     allocated_by_user_name: trimOrNull(record.allocated_by_user_name, 255),
     allocated_at: toNullableTs(record.allocated_at),
     allocation_receipt_no: trimOrNull(record.allocation_receipt_no, 100),
     requested_at: toNullableTs(record.requested_at) ?? Date.now(),
     notes: trimOrNull(record.notes, 5000),
+    can_edit: record.can_edit === true,
+    can_delete: record.can_delete !== false,
     assignment_uuid: trimOrNull(record.assignment_uuid, 100),
     assignment_status: trimOrNull(record.assignment_status, 50),
     assigned_date: toNullableTs(record.assigned_date),
@@ -458,6 +515,8 @@ function sanitizeAssetRequest(input: unknown): AssetRequestRow {
 function matchesMaterialRequestSearch(row: MaterialRequestRow, query: string): boolean {
   return [
     row.request_no,
+    row.requested_by_name,
+    row.requested_by_user_name,
     row.warehouse_name,
     row.requested_by_employee_name,
     row.status,
@@ -470,6 +529,8 @@ function matchesMaterialRequestSearch(row: MaterialRequestRow, query: string): b
 function matchesAssetRequestSearch(row: AssetRequestRow, query: string): boolean {
   return [
     row.request_no,
+    row.requested_by_name,
+    row.requested_by_user_name,
     row.requested_by_employee_name,
     row.requested_asset_code,
     row.requested_asset_name,
@@ -583,9 +644,6 @@ function validateMaterialRequestInput(input: MaterialRequestInput): void {
   if (!Number.isFinite(input.warehouse_id) || input.warehouse_id <= 0) {
     throw new Error("Warehouse is required.");
   }
-  if (!Number.isFinite(input.requested_by_employee_id) || input.requested_by_employee_id <= 0) {
-    throw new Error("Requested by employee is required.");
-  }
   if (!Array.isArray(input.items) || input.items.length === 0) {
     throw new Error("At least one material item is required.");
   }
@@ -604,10 +662,10 @@ function validateMaterialRequestInput(input: MaterialRequestInput): void {
 }
 
 function validateAssetRequestInput(input: AssetRequestInput): void {
-  if (!Number.isFinite(input.requested_by_employee_id) || input.requested_by_employee_id <= 0) {
-    throw new Error("Requested by employee is required.");
+  if (!Number.isFinite(input.project_id) || Number(input.project_id) <= 0) {
+    throw new Error("Project is required.");
   }
-  if ((!input.requested_asset_id || input.requested_asset_id <= 0) && !trimText(input.asset_type, 50)) {
+  if ((!input.requested_asset_id || input.requested_asset_id <= 0) && !trimText(input.asset_type, 80)) {
     throw new Error("Select a requested asset or provide an asset type.");
   }
   if (!Number.isFinite(input.quantity_requested) || input.quantity_requested <= 0) {
@@ -626,6 +684,27 @@ function validateMaterialIssueInput(input: MaterialIssueInput): void {
     }
     if (!Number.isFinite(item.quantity_issued) || item.quantity_issued <= 0) {
       throw new Error(`Issued quantity must be greater than 0 for row ${index + 1}.`);
+    }
+  });
+}
+
+function validateMaterialReturnInput(input: MaterialReturnInput): void {
+  if (!Number.isFinite(input.warehouse_id) || input.warehouse_id <= 0) {
+    throw new Error("Return warehouse is required.");
+  }
+  if (!trimText(input.return_date, 50)) {
+    throw new Error("Return date is required.");
+  }
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    throw new Error("At least one return item is required.");
+  }
+
+  input.items.forEach((item, index) => {
+    if (!trimText(item.uuid, 100)) {
+      throw new Error(`Return row ${index + 1} is missing a target item.`);
+    }
+    if (!Number.isFinite(item.quantity_returned) || item.quantity_returned <= 0) {
+      throw new Error(`Returned quantity must be greater than 0 for row ${index + 1}.`);
     }
   });
 }
@@ -657,10 +736,9 @@ function validateAssetReturnInput(input: AssetReturnInput): void {
 }
 
 function toMaterialRequestPayload(input: MaterialRequestInput): Obj {
-  return {
+  const payload: Obj = {
     project_id: toNullableId(input.project_id),
     warehouse_id: toId(input.warehouse_id),
-    requested_by_employee_id: toId(input.requested_by_employee_id),
     notes: trimOrNull(input.notes, 5000),
     items: input.items.map((item) => ({
       uuid: trimText(item.uuid, 100) || crypto.randomUUID(),
@@ -670,18 +748,31 @@ function toMaterialRequestPayload(input: MaterialRequestInput): Obj {
       notes: trimOrNull(item.notes, 1000),
     })),
   };
+
+  const requestedByEmployeeId = toNullableId(input.requested_by_employee_id);
+  if (requestedByEmployeeId) {
+    payload.requested_by_employee_id = requestedByEmployeeId;
+  }
+
+  return payload;
 }
 
 function toAssetRequestPayload(input: AssetRequestInput): Obj {
-  return {
+  const payload: Obj = {
     project_id: toNullableId(input.project_id),
-    requested_by_employee_id: toId(input.requested_by_employee_id),
     requested_asset_id: toNullableId(input.requested_asset_id),
-    asset_type: trimOrNull(input.asset_type, 50),
+    asset_type: trimOrNull(input.asset_type, 80),
     quantity_requested: Math.max(0, toMoney(input.quantity_requested)),
     reason: trimOrNull(input.reason, 5000),
     notes: trimOrNull(input.notes, 5000),
   };
+
+  const requestedByEmployeeId = toNullableId(input.requested_by_employee_id);
+  if (requestedByEmployeeId) {
+    payload.requested_by_employee_id = requestedByEmployeeId;
+  }
+
+  return payload;
 }
 
 function toMaterialIssuePayload(input: MaterialIssueInput): Obj {
@@ -692,6 +783,18 @@ function toMaterialIssuePayload(input: MaterialIssueInput): Obj {
     })),
     notes: trimOrNull(input.notes, 5000),
     issue_date: input.issue_date ? new Date(input.issue_date).toISOString() : null,
+  };
+}
+
+function toMaterialReturnPayload(input: MaterialReturnInput): Obj {
+  return {
+    warehouse_id: toId(input.warehouse_id),
+    return_date: trimText(input.return_date, 50),
+    notes: trimOrNull(input.notes, 5000),
+    items: input.items.map((item) => ({
+      uuid: trimText(item.uuid, 100),
+      quantity_returned: Math.max(0, toMoney(item.quantity_returned)),
+    })),
   };
 }
 
@@ -727,7 +830,7 @@ const materialRequestsConfig: PullConfig<MaterialRequestRow> = {
   table: db.material_requests,
   sanitize: sanitizeMaterialRequest,
   decorate: decorateMaterialRequest,
-  isValid: (row) => Boolean(row.uuid && row.request_no && row.warehouse_id > 0 && row.requested_by_employee_id > 0),
+  isValid: (row) => Boolean(row.uuid && row.request_no && row.warehouse_id > 0),
   matchesSearch: matchesMaterialRequestSearch,
 };
 
@@ -739,7 +842,7 @@ const assetRequestsConfig: PullConfig<AssetRequestRow> = {
   table: db.asset_requests,
   sanitize: sanitizeAssetRequest,
   decorate: decorateAssetRequest,
-  isValid: (row) => Boolean(row.uuid && row.request_no && row.requested_by_employee_id > 0),
+  isValid: (row) => Boolean(row.uuid && row.request_no),
   matchesSearch: matchesAssetRequestSearch,
 };
 
@@ -781,13 +884,21 @@ export async function materialRequestCreate(input: MaterialRequestInput): Promis
 
   const uuid = crypto.randomUUID();
   const payload = toMaterialRequestPayload(input);
+  const authUser = getStoredAuthUser();
+  const workflowRequesterLabel = workflowRequesterLabelFromRoles(
+    authUser?.roles,
+    authUser?.full_name || authUser?.name || null
+  );
   const row = await decorateMaterialRequest(
     sanitizeMaterialRequest({
       id: deriveIdFromUuid(uuid),
       uuid,
       request_no: `MR-LOCAL-${uuid.slice(0, 8).toUpperCase()}`,
       ...payload,
-      status: "pending",
+      requested_by_user_id: Number.isFinite(Number(authUser?.id)) ? Number(authUser?.id) : null,
+      requested_by_user_name: authUser?.full_name || authUser?.name || null,
+      requested_by_name: workflowRequesterLabel,
+      status: "pending_admin_approval",
       requested_at: Date.now(),
       created_at: Date.now(),
       updated_at: Date.now(),
@@ -845,7 +956,7 @@ export async function materialRequestUpdate(uuid: string, input: MaterialRequest
       ...existing,
       ...payload,
       updated_at: Date.now(),
-      status: existing.status || "pending",
+      status: existing.status || "rejected",
       request_no: existing.request_no,
     })
   );
@@ -974,18 +1085,53 @@ export async function materialRequestIssue(uuid: string, input: MaterialIssueInp
     throw new Error(message);
   }
 }
+
+export async function materialRequestReturn(uuid: string, input: MaterialReturnInput): Promise<MaterialRequestRow> {
+  validateMaterialReturnInput(input);
+
+  if (!isOnline()) {
+    throw new Error("Material return requires an online connection.");
+  }
+
+  try {
+    const response = await api.post(`${materialRequestsConfig.endpoint}/${uuid}/return`, toMaterialReturnPayload(input));
+    const saved = await decorateMaterialRequest(sanitizeMaterialRequest(obj(response.data).data));
+    await db.material_requests.put(saved);
+    await Promise.all([
+      materialsPullToLocal(),
+      stockMovementsPullToLocal(),
+      warehouseMaterialStocksPullToLocal(),
+      projectMaterialStocksPullToLocal(),
+    ]);
+    notifySuccess("Material return saved successfully.");
+    return saved;
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
 export async function assetRequestCreate(input: AssetRequestInput): Promise<AssetRequestRow> {
   validateAssetRequestInput(input);
 
   const uuid = crypto.randomUUID();
   const payload = toAssetRequestPayload(input);
+  const authUser = getStoredAuthUser();
+  const workflowRequesterLabel = workflowRequesterLabelFromRoles(
+    authUser?.roles,
+    authUser?.full_name || authUser?.name || null
+  );
   const row = await decorateAssetRequest(
     sanitizeAssetRequest({
       id: deriveIdFromUuid(uuid),
       uuid,
       request_no: `AR-LOCAL-${uuid.slice(0, 8).toUpperCase()}`,
       ...payload,
-      status: "pending",
+      requested_by_user_id: Number.isFinite(Number(authUser?.id)) ? Number(authUser?.id) : null,
+      requested_by_user_name: authUser?.full_name || authUser?.name || null,
+      requested_by_name: workflowRequesterLabel,
+      status: "pending_admin_approval",
       requested_at: Date.now(),
       created_at: Date.now(),
       updated_at: Date.now(),
@@ -994,6 +1140,7 @@ export async function assetRequestCreate(input: AssetRequestInput): Promise<Asse
 
   if (!isOnline()) {
     await db.asset_requests.put(row);
+    emitAppEvent("asset-requests:changed", { uuid, action: "create", localOnly: true });
     await enqueueSync({
       entity: "asset_requests",
       uuid,
@@ -1009,6 +1156,7 @@ export async function assetRequestCreate(input: AssetRequestInput): Promise<Asse
     const response = await api.post(assetRequestsConfig.endpoint, { uuid, ...payload });
     const saved = await decorateAssetRequest(sanitizeAssetRequest(obj(response.data).data ?? row));
     await db.asset_requests.put(saved);
+    emitAppEvent("asset-requests:changed", { uuid, action: "create" });
     notifySuccess("Asset request created successfully.");
     return saved;
   } catch (error: unknown) {
@@ -1019,6 +1167,7 @@ export async function assetRequestCreate(input: AssetRequestInput): Promise<Asse
     }
 
     await db.asset_requests.put(row);
+    emitAppEvent("asset-requests:changed", { uuid, action: "create", queued: true });
     await enqueueSync({
       entity: "asset_requests",
       uuid,
@@ -1043,12 +1192,13 @@ export async function assetRequestUpdate(uuid: string, input: AssetRequestInput)
       ...existing,
       ...payload,
       updated_at: Date.now(),
-      status: existing.status || "pending",
+      status: existing.status || "rejected",
       request_no: existing.request_no,
     })
   );
 
   await db.asset_requests.put(updated);
+  emitAppEvent("asset-requests:changed", { uuid, action: "update", localOnly: !isOnline() });
   await enqueueSync({
     entity: "asset_requests",
     uuid,
@@ -1067,11 +1217,13 @@ export async function assetRequestUpdate(uuid: string, input: AssetRequestInput)
     const response = await api.put(`${assetRequestsConfig.endpoint}/${uuid}`, payload);
     const saved = await decorateAssetRequest(sanitizeAssetRequest(obj(response.data).data ?? updated));
     await db.asset_requests.put(saved);
+    emitAppEvent("asset-requests:changed", { uuid, action: "update" });
     notifySuccess("Asset request updated successfully.");
     return saved;
   } catch (error: unknown) {
     if (isValidationError(getApiStatus(error))) {
       await db.asset_requests.put(existing);
+      emitAppEvent("asset-requests:changed", { uuid, action: "update:rollback" });
       await removeLatestQueueItem("asset_requests", uuid, "update");
       const message = getApiErrorMessage(error);
       notifyError(message);
@@ -1088,6 +1240,7 @@ export async function assetRequestDelete(uuid: string): Promise<void> {
   if (!existing) throw new Error("Asset request not found locally.");
 
   await db.asset_requests.delete(uuid);
+  emitAppEvent("asset-requests:changed", { uuid, action: "delete", localOnly: !isOnline() });
   await enqueueSync({
     entity: "asset_requests",
     uuid,
@@ -1119,6 +1272,7 @@ export async function assetRequestApprove(uuid: string): Promise<AssetRequestRow
     const response = await api.post(`${assetRequestsConfig.endpoint}/${uuid}/approve`);
     const saved = await decorateAssetRequest(sanitizeAssetRequest(obj(response.data).data));
     await db.asset_requests.put(saved);
+    emitAppEvent("asset-requests:changed", { uuid, action: "approve" });
     notifySuccess("Asset request approved.");
     return saved;
   } catch (error: unknown) {
@@ -1128,15 +1282,23 @@ export async function assetRequestApprove(uuid: string): Promise<AssetRequestRow
   }
 }
 
-export async function assetRequestReject(uuid: string): Promise<AssetRequestRow> {
+export async function assetRequestReject(uuid: string, rejectionReason: string): Promise<AssetRequestRow> {
   if (!isOnline()) {
     throw new Error("Asset request rejection requires an online connection.");
   }
 
+  const normalizedReason = trimText(rejectionReason, 5000);
+  if (!normalizedReason) {
+    throw new Error("Rejection reason is required.");
+  }
+
   try {
-    const response = await api.post(`${assetRequestsConfig.endpoint}/${uuid}/reject`);
+    const response = await api.post(`${assetRequestsConfig.endpoint}/${uuid}/reject`, {
+      rejection_reason: normalizedReason,
+    });
     const saved = await decorateAssetRequest(sanitizeAssetRequest(obj(response.data).data));
     await db.asset_requests.put(saved);
+    emitAppEvent("asset-requests:changed", { uuid, action: "reject" });
     notifySuccess("Asset request rejected.");
     return saved;
   } catch (error: unknown) {
@@ -1157,6 +1319,7 @@ export async function assetRequestAllocate(uuid: string, input: AssetAllocationI
     const response = await api.post(`${assetRequestsConfig.endpoint}/${uuid}/allocate`, toAssetAllocationPayload(input));
     const saved = await decorateAssetRequest(sanitizeAssetRequest(obj(response.data).data));
     await db.asset_requests.put(saved);
+    emitAppEvent("asset-requests:changed", { uuid, action: "allocate" });
     await companyAssetsPullToLocal();
     notifySuccess("Asset allocated successfully.");
     return saved;
@@ -1178,6 +1341,7 @@ export async function assetRequestReturn(uuid: string, input: AssetReturnInput):
     const response = await api.post(`${assetRequestsConfig.endpoint}/${uuid}/return`, toAssetReturnPayload(input));
     const saved = await decorateAssetRequest(sanitizeAssetRequest(obj(response.data).data));
     await db.asset_requests.put(saved);
+    emitAppEvent("asset-requests:changed", { uuid, action: "return" });
     await companyAssetsPullToLocal();
     notifySuccess("Asset return saved successfully.");
     return saved;

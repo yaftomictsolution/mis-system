@@ -2,7 +2,7 @@
 
 import { Badge } from "@/components/ui/Badge";
 import type { Column } from "@/components/ui/DataTable";
-import type { ApartmentStatus, UsageType } from "@/components/apartments/apartment.types";
+import type { ApartmentStatus } from "@/components/apartments/apartment.types";
 import { ApartmentRow } from "@/db/localDB";
 import { resolveOfflineImageSrc } from "@/lib/imageThumb";
 
@@ -25,10 +25,6 @@ const statusLabel = (status: ApartmentStatus): string => {
   if (status === "company_use") return "company use";
   if (status === "handed_over") return "handed over";
   return status;
-};
-
-const normalizeUsageType = (usageType: string): UsageType => {
-  return usageType.trim().toLowerCase() === "commercial" ? "commercial" : "residential";
 };
 
 export function createApartmentColumns(): Column<ApartmentRow>[] {
@@ -57,14 +53,6 @@ export function createApartmentColumns(): Column<ApartmentRow>[] {
     key: "apartment_code",
     label: "Code",
     render: (item) => <span className="font-semibold">{item.apartment_code}</span>,
-  },
-  {
-    key: "usage_type",
-    label: "Usage",
-    render: (item) => {
-      const usage = normalizeUsageType(item.usage_type);
-      return <Badge color={usage === "residential" ? "blue" : "purple"}>{usage}</Badge>;
-    },
   },
   {
     key: "unit_number",

@@ -43,7 +43,16 @@ export default function SideContent(){
       items: group.items.filter((item) => {
       const permission = "permission" in item ? item.permission : undefined;
       const role = "role" in item ? item.role : undefined;
-      return hasAnyPermission(perms, permission) && hasAnyRole(roles, role);
+      const matchesPermission = hasAnyPermission(perms, permission);
+      const matchesRole = hasAnyRole(roles, role);
+      const hasPermissionRule = typeof permission !== "undefined";
+      const hasRoleRule = typeof role !== "undefined";
+
+      if (hasPermissionRule && hasRoleRule) {
+        return matchesPermission || matchesRole;
+      }
+
+      return matchesPermission && matchesRole;
       }),
   })).filter((group) => group.items.length > 0);
 

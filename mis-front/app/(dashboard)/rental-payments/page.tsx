@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import RequirePermission from "@/components/auth/RequirePermission";
@@ -9,9 +9,16 @@ import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/PageHeader";
 import type { AccountRow, RentalPaymentRow } from "@/db/localDB";
 import { subscribeAppEvent } from "@/lib/appEvents";
-import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import { notifyError } from "@/lib/notify";
-import { rentalApprovePayment, rentalPaymentsListLocal, rentalPaymentsPullToLocal } from "@/modules/rentals/rentals.repo";
+import { hasAnyRole } from "@/lib/permissions";
+import { accountsListLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
+import {
+  rentalApprovePayment,
+  rentalPaymentsListLocal,
+  rentalPaymentsPullToLocal,
+  rentalProcessPayment,
+  rentalRejectPayment,
+} from "@/modules/rentals/rentals.repo";
 import { useSelector } from "react-redux";
 import type { RootState } from "@/store/store";
 
@@ -24,7 +31,7 @@ type AccountOption = {
   label: string;
 };
 
-type ApproveFormState = {
+type ProcessFormState = {
   payment: RentalPaymentRow | null;
   amount: string;
   payment_date: string;
@@ -35,7 +42,7 @@ type ApproveFormState = {
   submitting: boolean;
 };
 
-const emptyApproveForm = (): ApproveFormState => ({
+const emptyProcessForm = (): ProcessFormState => ({
   payment: null,
   amount: "",
   payment_date: today(),
@@ -58,13 +65,54 @@ const toDateLabel = (value: number | null | undefined): string => {
   return new Date(value).toLocaleDateString();
 };
 
+const normalizePaymentStatus = (value: string | null | undefined): string => {
+  const status = String(value ?? "").trim().toLowerCase();
+  if (status === "pending") return "pending_admin_approval";
+  return status || "pending_admin_approval";
+};
+
+const isPendingAdminApprovalStatus = (value: string | null | undefined): boolean =>
+  normalizePaymentStatus(value) === "pending_admin_approval";
+
+const isReadyForProcessingStatus = (value: string | null | undefined): boolean =>
+  ["approved_for_payment", "partial"].includes(normalizePaymentStatus(value));
+
+const statusLabel = (value: string | null | undefined): string => {
+  const status = normalizePaymentStatus(value);
+  if (status === "pending_admin_approval") return "Pending Admin Approval";
+  if (status === "approved_for_payment") return "Approved For Payment";
+  if (status === "partial") return "Partial";
+  if (status === "paid") return "Paid";
+  if (status === "rejected") return "Rejected";
+  if (status === "waived") return "Waived";
+  return status ? status.replace(/_/g, " ") : "-";
+};
+
+const statusColor = (value: string | null | undefined): "amber" | "blue" | "emerald" | "red" | "slate" => {
+  const status = normalizePaymentStatus(value);
+  if (status === "paid") return "emerald";
+  if (status === "approved_for_payment") return "blue";
+  if (status === "partial" || status === "pending_admin_approval") return "amber";
+  if (status === "rejected") return "red";
+  return "slate";
+};
+
 export default function RentalPaymentsPage() {
   const permissions = useSelector((s: RootState) => s.auth.user?.permissions ?? []);
-  const canApprovePayments = permissions.includes("installments.pay");
+  const roles = useSelector((s: RootState) => s.auth.user?.roles ?? []);
+  const isAdmin = hasAnyRole(roles, "Admin");
+  const canReviewPayments = isAdmin || permissions.includes("sales.approve");
+  const canProcessPayments =
+    isAdmin ||
+    permissions.includes("installments.pay") ||
+    permissions.includes("accounts.view") ||
+    hasAnyRole(roles, ["Accountant", "Finance", "FinanceManager", "Finance Manager"]);
+
   const [rows, setRows] = useState<RentalPaymentRow[]>([]);
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [loading, setLoading] = useState(true);
-  const [approveForm, setApproveForm] = useState<ApproveFormState>(emptyApproveForm());
+  const [actioningUuid, setActioningUuid] = useState<string | null>(null);
+  const [processForm, setProcessForm] = useState<ProcessFormState>(emptyProcessForm());
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -135,13 +183,19 @@ export default function RentalPaymentsPage() {
 
   const totalPaid = useMemo(() => rows.reduce((sum, item) => sum + (item.amount_paid || 0), 0), [rows]);
   const totalRemaining = useMemo(() => rows.reduce((sum, item) => sum + (item.remaining_amount || 0), 0), [rows]);
-  const openApprove = useCallback((payment: RentalPaymentRow) => {
+
+  const openProcess = useCallback((payment: RentalPaymentRow) => {
     const remaining = Number(payment.remaining_amount || 0);
+    const status = normalizePaymentStatus(payment.status);
     if (remaining <= 0) {
       notifyError("This bill is already fully settled.");
       return;
     }
-    setApproveForm({
+    if (!isReadyForProcessingStatus(status)) {
+      notifyError("Admin approval is required before payment processing.");
+      return;
+    }
+    setProcessForm({
       payment,
       amount: String(remaining),
       payment_date: today(),
@@ -153,141 +207,95 @@ export default function RentalPaymentsPage() {
     });
   }, []);
 
-  const closeApproveModal = useCallback(() => {
-    setApproveForm(emptyApproveForm());
+  const closeProcessModal = useCallback(() => {
+    setProcessForm(emptyProcessForm());
   }, []);
 
-  const submitApproval = useCallback(async () => {
-    if (!approveForm.payment?.uuid || approveForm.submitting) return;
+  const submitProcessing = useCallback(async () => {
+    if (!processForm.payment?.uuid || processForm.submitting) return;
 
-    const amount = Number(approveForm.amount);
-    const remaining = Number(approveForm.payment.remaining_amount || 0);
+    const amount = Number(processForm.amount);
+    const remaining = Number(processForm.payment.remaining_amount || 0);
     if (!Number.isFinite(amount) || amount <= 0) {
-      notifyError("Approval amount must be greater than 0.");
+      notifyError("Processing amount must be greater than 0.");
       return;
     }
     if (amount > remaining) {
-      notifyError("Approval amount cannot be greater than bill remaining amount.");
+      notifyError("Processed amount cannot be greater than bill remaining amount.");
       return;
     }
-    const accountId = Number(approveForm.account_id);
+    const accountId = Number(processForm.account_id);
     if (!Number.isFinite(accountId) || accountId <= 0) {
       notifyError("Payment account is required.");
       return;
     }
 
-    setApproveForm((prev) => ({ ...prev, submitting: true }));
+    setProcessForm((prev) => ({ ...prev, submitting: true }));
     try {
-      await rentalApprovePayment(approveForm.payment.uuid, {
+      await rentalProcessPayment(processForm.payment.uuid, {
         amount,
-        payment_date: approveForm.payment_date || undefined,
-        payment_method: approveForm.payment_method || "cash",
-        reference_no: approveForm.reference_no || undefined,
+        payment_date: processForm.payment_date || undefined,
+        payment_method: processForm.payment_method || "cash",
+        reference_no: processForm.reference_no || undefined,
         account_id: accountId,
-        notes: approveForm.notes || undefined,
+        notes: processForm.notes || undefined,
       });
-      closeApproveModal();
+      closeProcessModal();
       await refresh();
-    } catch {}
-    finally {
-      setApproveForm((prev) => ({ ...prev, submitting: false }));
+    } catch {
+    } finally {
+      setProcessForm((prev) => ({ ...prev, submitting: false }));
     }
-  }, [approveForm, closeApproveModal, refresh]);
+  }, [closeProcessModal, processForm, refresh]);
+
+  const approveRequest = useCallback(
+    async (payment: RentalPaymentRow) => {
+      if (!payment.uuid || actioningUuid === payment.uuid) return;
+      setActioningUuid(payment.uuid);
+      try {
+        await rentalApprovePayment(payment.uuid);
+        await refresh();
+      } catch {
+      } finally {
+        setActioningUuid((current) => (current === payment.uuid ? null : current));
+      }
+    },
+    [actioningUuid, refresh]
+  );
+
+  const rejectRequest = useCallback(
+    async (payment: RentalPaymentRow) => {
+      if (!payment.uuid || actioningUuid === payment.uuid) return;
+      if (typeof window !== "undefined") {
+        const confirmed = window.confirm(
+          `Reject bill ${payment.bill_no || payment.uuid}? Finance will not be able to process it until a new bill is created.`
+        );
+        if (!confirmed) return;
+      }
+      setActioningUuid(payment.uuid);
+      try {
+        await rentalRejectPayment(payment.uuid);
+        await refresh();
+      } catch {
+      } finally {
+        setActioningUuid((current) => (current === payment.uuid ? null : current));
+      }
+    },
+    [actioningUuid, refresh]
+  );
 
   const printBill = useCallback((item: RentalPaymentRow) => {
     if (typeof window === "undefined") return;
-
-    const escapeHtml = (value: string): string =>
-      value
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-
-    const billNo = item.bill_no || `BILL-${String(item.uuid || "").slice(0, 8).toUpperCase()}`;
-    const tenant = item.tenant_name || "-";
-    const tenantPhone = item.tenant_phone || "-";
-    const rentalCode = item.rental_code || "-";
-    const apartment = item.apartment_code || "-";
-    const month = item.period_month || "-";
-    const dueDate = toDateLabel(item.due_date);
-    const generatedAt = toDateLabel(item.bill_generated_at);
-    const printedAt = new Date().toLocaleString();
-
-    const html = `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Rental Bill - ${escapeHtml(billNo)}</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 24px; color: #0f172a; }
-      .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 16px; }
-      .title { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
-      .sub { margin: 0; color: #475569; font-size: 12px; }
-      .box { border:1px solid #cbd5e1; border-radius:10px; padding:12px; margin-bottom:12px; }
-      .grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; }
-      .label { font-size: 12px; color: #64748b; margin-bottom: 2px; }
-      .value { font-size: 14px; font-weight: 600; }
-      .amounts { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-      .footer { margin-top: 18px; font-size: 12px; color: #475569; }
-      @media print { body { margin: 10mm; } }
-    </style>
-  </head>
-  <body>
-    <div class="header">
-      <div>
-        <p class="title">Rental Bill</p>
-        <p class="sub">Customer copy for finance payment approval</p>
-      </div>
-      <div>
-        <div class="label">Printed At</div>
-        <div class="value">${escapeHtml(printedAt)}</div>
-      </div>
-    </div>
-
-    <div class="box">
-      <div class="grid">
-        <div><div class="label">Bill No</div><div class="value">${escapeHtml(billNo)}</div></div>
-        <div><div class="label">Bill Generated</div><div class="value">${escapeHtml(generatedAt)}</div></div>
-        <div><div class="label">Rental</div><div class="value">${escapeHtml(rentalCode)}</div></div>
-        <div><div class="label">Apartment</div><div class="value">${escapeHtml(apartment)}</div></div>
-        <div><div class="label">Customer</div><div class="value">${escapeHtml(tenant)}</div></div>
-        <div><div class="label">Phone</div><div class="value">${escapeHtml(tenantPhone)}</div></div>
-        <div><div class="label">Period Month</div><div class="value">${escapeHtml(month)}</div></div>
-        <div><div class="label">Due Date</div><div class="value">${escapeHtml(dueDate)}</div></div>
-      </div>
-    </div>
-
-    <div class="box">
-      <div class="amounts">
-        <div><div class="label">Amount Due</div><div class="value">${escapeHtml(money(item.amount_due))}</div></div>
-        <div><div class="label">Paid</div><div class="value">${escapeHtml(money(item.amount_paid))}</div></div>
-        <div><div class="label">Remaining</div><div class="value">${escapeHtml(money(item.remaining_amount))}</div></div>
-      </div>
-      <div style="margin-top: 10px;">
-        <div class="label">Status</div>
-        <div class="value">${escapeHtml(item.status || "pending")}</div>
-      </div>
-    </div>
-
-    <div class="footer">
-      Present this bill to finance for approval and payment processing.
-    </div>
-  </body>
-</html>`;
-
-    const popup = window.open("", "_blank", "width=900,height=760");
-    if (!popup) {
-      notifyError("Unable to open print window. Please allow popups and try again.");
+    if (!item.uuid || !item.rental_uuid) {
+      notifyError("Unable to locate this rental bill for printing.");
       return;
     }
 
-    popup.document.open();
-    popup.document.write(html);
-    popup.document.close();
-    popup.focus();
-    popup.print();
+    const url = `/print/rentals/${encodeURIComponent(item.rental_uuid)}/bill/${encodeURIComponent(item.uuid)}`;
+    const popup = window.open(url, "_blank", "noopener,noreferrer");
+    if (!popup) {
+      notifyError("Unable to open print window. Please allow popups and try again.");
+    }
   }, []);
 
   const columns = useMemo<Column<RentalPaymentRow>[]>(
@@ -302,17 +310,24 @@ export default function RentalPaymentsPage() {
       {
         key: "status",
         label: "Status",
-        render: (item) => (
-          <Badge color={item.status === "paid" ? "emerald" : item.status === "partial" ? "amber" : "red"}>
-            {item.status || "-"}
-          </Badge>
-        ),
+        render: (item) => <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>,
       },
       {
-        key: "finance_action",
-        label: "Finance",
+        key: "workflow_action",
+        label: "Workflow",
         render: (item) => {
-          const canApprove = canApprovePayments && (item.remaining_amount ?? 0) > 0 && !["paid", "waived"].includes(item.status);
+          const normalizedStatus = normalizePaymentStatus(item.status);
+          const isBusy =
+            actioningUuid === item.uuid ||
+            (processForm.submitting && processForm.payment?.uuid === item.uuid);
+          const canApprove = canReviewPayments && isPendingAdminApprovalStatus(normalizedStatus);
+          const canReject = canReviewPayments && isPendingAdminApprovalStatus(normalizedStatus);
+          const canProcess =
+            canProcessPayments &&
+            isReadyForProcessingStatus(normalizedStatus) &&
+            Number(item.remaining_amount ?? 0) > 0 &&
+            !["paid", "waived", "rejected"].includes(normalizedStatus);
+
           return (
             <div className="flex flex-wrap gap-2">
               <button
@@ -322,20 +337,56 @@ export default function RentalPaymentsPage() {
               >
                 Print Bill
               </button>
-              <button
-                type="button"
-                disabled={!canApprove}
-                onClick={() => openApprove(item)}
-                className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Approve
-              </button>
+              {canApprove ? (
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => {
+                    void approveRequest(item);
+                  }}
+                  className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Approve
+                </button>
+              ) : null}
+              {canReject ? (
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => {
+                    void rejectRequest(item);
+                  }}
+                  className="rounded-md bg-rose-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Reject
+                </button>
+              ) : null}
+              {canProcess ? (
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => openProcess(item)}
+                  className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Process Payment
+                </button>
+              ) : null}
             </div>
           );
         },
       },
     ],
-    [canApprovePayments, openApprove, printBill]
+    [
+      actioningUuid,
+      approveRequest,
+      canProcessPayments,
+      canReviewPayments,
+      openProcess,
+      printBill,
+      processForm.payment?.uuid,
+      processForm.submitting,
+      rejectRequest,
+    ]
   );
 
   const renderExpandedRow = useCallback(
@@ -358,26 +409,38 @@ export default function RentalPaymentsPage() {
           <div>{toDateLabel(item.bill_generated_at)}</div>
         </div>
         <div>
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Paid Date</div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Processed Date</div>
           <div>{toDateLabel(item.paid_date)}</div>
         </div>
         <div>
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Amount Due</div>
-          <div>{money(item.amount_due)}</div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Workflow Status</div>
+          <div>{statusLabel(item.status)}</div>
         </div>
         <div>
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Payment Type</div>
           <div>{item.payment_type || "-"}</div>
         </div>
         <div>
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Approved By</div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Processed By</div>
           <div>{item.approved_by_name || "-"}</div>
         </div>
         <div>
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Approved At</div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Processed At</div>
           <div>{toDateLabel(item.approved_at)}</div>
         </div>
         <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Amount Due</div>
+          <div>{money(item.amount_due)}</div>
+        </div>
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Paid</div>
+          <div>{money(item.amount_paid)}</div>
+        </div>
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Remaining</div>
+          <div>{money(item.remaining_amount)}</div>
+        </div>
+        <div className="md:col-span-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notes</div>
           <div>{item.notes || "-"}</div>
         </div>
@@ -387,9 +450,15 @@ export default function RentalPaymentsPage() {
   );
 
   return (
-    <RequirePermission permission="apartments.view">
+    <RequirePermission
+      permission={["installments.pay", "sales.approve", "accounts.view", "apartments.view"]}
+      role={["Admin", "Accountant", "Finance", "FinanceManager", "Finance Manager"]}
+    >
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
-        <PageHeader title="Rental Bills & Finance Approval" subtitle="Approve customer bill payments and track settlement" />
+        <PageHeader
+          title="Rental Bills & Payment Workflow"
+          subtitle="Approved rentals and approved bills arrive here for finance payment processing."
+        />
 
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
           <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-[#2a2a3e] dark:bg-[#161625]">
@@ -412,16 +481,16 @@ export default function RentalPaymentsPage() {
             noHorizontalScroll
             expandableRows
             renderExpandedRow={renderExpandedRow}
-            searchKeys={["tenant_name", "tenant_phone", "rental_code", "apartment_code", "period_month", "status"]}
+            searchKeys={["tenant_name", "tenant_phone", "rental_code", "apartment_code", "period_month", "status", "bill_no"]}
             pageSize={TABLE_PAGE_SIZE}
           />
         </div>
       </div>
 
       <Modal
-        isOpen={Boolean(approveForm.payment)}
-        onClose={closeApproveModal}
-        title={approveForm.payment?.bill_no ? `Approve Bill ${approveForm.payment.bill_no}` : "Approve Bill Payment"}
+        isOpen={Boolean(processForm.payment)}
+        onClose={closeProcessModal}
+        title={processForm.payment?.bill_no ? `Process Bill ${processForm.payment.bill_no}` : "Process Bill Payment"}
         size="md"
       >
         <div className="space-y-4">
@@ -429,22 +498,22 @@ export default function RentalPaymentsPage() {
             <FormField
               label="Amount"
               type="number"
-              value={approveForm.amount}
-              onChange={(value) => setApproveForm((prev) => ({ ...prev, amount: String(value) }))}
+              value={processForm.amount}
+              onChange={(value) => setProcessForm((prev) => ({ ...prev, amount: String(value) }))}
               required
             />
             <FormField
               label="Payment Date"
               type="date"
-              value={approveForm.payment_date}
-              onChange={(value) => setApproveForm((prev) => ({ ...prev, payment_date: String(value) }))}
+              value={processForm.payment_date}
+              onChange={(value) => setProcessForm((prev) => ({ ...prev, payment_date: String(value) }))}
               required
             />
             <FormField
               label="Payment Method"
               type="select"
-              value={approveForm.payment_method}
-              onChange={(value) => setApproveForm((prev) => ({ ...prev, payment_method: String(value) }))}
+              value={processForm.payment_method}
+              onChange={(value) => setProcessForm((prev) => ({ ...prev, payment_method: String(value) }))}
               options={[
                 { value: "cash", label: "Cash" },
                 { value: "bank", label: "Bank" },
@@ -454,40 +523,40 @@ export default function RentalPaymentsPage() {
             />
             <FormField
               label="Reference No"
-              value={approveForm.reference_no}
-              onChange={(value) => setApproveForm((prev) => ({ ...prev, reference_no: String(value) }))}
+              value={processForm.reference_no}
+              onChange={(value) => setProcessForm((prev) => ({ ...prev, reference_no: String(value) }))}
             />
             <FormField
               label="Payment Account"
               type="select"
-              value={approveForm.account_id}
-              onChange={(value) => setApproveForm((prev) => ({ ...prev, account_id: String(value) }))}
+              value={processForm.account_id}
+              onChange={(value) => setProcessForm((prev) => ({ ...prev, account_id: String(value) }))}
               options={accounts.map((item) => ({ value: String(item.id), label: item.label }))}
               required
             />
           </div>
           <FormField
             label="Notes"
-            value={approveForm.notes}
-            onChange={(value) => setApproveForm((prev) => ({ ...prev, notes: String(value) }))}
+            value={processForm.notes}
+            onChange={(value) => setProcessForm((prev) => ({ ...prev, notes: String(value) }))}
           />
           <div className="flex justify-end gap-3">
             <button
               type="button"
-              onClick={closeApproveModal}
+              onClick={closeProcessModal}
               className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-[#1a1a2e]"
             >
               Cancel
             </button>
             <button
               type="button"
-              disabled={approveForm.submitting}
+              disabled={processForm.submitting}
               onClick={() => {
-                void submitApproval();
+                void submitProcessing();
               }}
-              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {approveForm.submitting ? "Approving..." : "Approve Payment"}
+              {processForm.submitting ? "Processing..." : "Process Payment"}
             </button>
           </div>
         </div>
@@ -495,6 +564,3 @@ export default function RentalPaymentsPage() {
     </RequirePermission>
   );
 }
-
-
-

@@ -12,6 +12,7 @@ import {
 } from "@/db/localDB";
 import { api } from "@/lib/api";
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
+import { accountTransactionsPullToLocal, accountsPullToLocal } from "@/modules/accounts/accounts.repo";
 import { employeePullToLocal } from "@/modules/employees/employees.repo";
 import {
   projectMaterialStocksPullToLocal,
@@ -68,7 +69,7 @@ export type PurchaseRequestInput = {
   project_id?: number | null;
   warehouse_id: number;
   vendor_id?: number | null;
-  requested_by_employee_id: number;
+  requested_by_employee_id?: number | null;
   notes?: string | null;
   items: PurchaseRequestItemInput[];
 };
@@ -77,6 +78,13 @@ export type PurchaseReceiveInput = {
   items: Array<{ uuid: string; quantity_received: number; actual_unit_price?: number | null }>;
   notes?: string | null;
   receive_date?: string | null;
+};
+
+export type PurchasePaymentInput = {
+  account_id: number;
+  payment_amount: number;
+  payment_date?: string | null;
+  notes?: string | null;
 };
 
 type PullConfig<Row extends { uuid: string; updated_at: number }> = {
@@ -115,6 +123,21 @@ function lsNum(key: string): number | null {
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getStoredAuthUser(): { id?: number; full_name?: string; name?: string } | null {
+  const raw = lsGet("user");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { id?: unknown; full_name?: unknown; name?: unknown };
+    return {
+      id: Number(parsed.id),
+      full_name: typeof parsed.full_name === "string" ? parsed.full_name : undefined,
+      name: typeof parsed.name === "string" ? parsed.name : undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function trimText(value: unknown, max = 255): string {
@@ -316,7 +339,7 @@ async function decoratePurchaseRequest(row: PurchaseRequestRow): Promise<Purchas
   const [vendor, warehouse, employee, project, items] = await Promise.all([
     !row.vendor_name && (row.vendor_id ?? 0) > 0 ? getVendorSnapshot(Number(row.vendor_id)) : Promise.resolve(undefined),
     !row.warehouse_name && row.warehouse_id > 0 ? getWarehouseSnapshot(row.warehouse_id) : Promise.resolve(undefined),
-    !row.requested_by_employee_name && row.requested_by_employee_id > 0 ? getEmployeeSnapshot(row.requested_by_employee_id) : Promise.resolve(undefined),
+    !row.requested_by_employee_name && Number(row.requested_by_employee_id ?? 0) > 0 ? getEmployeeSnapshot(Number(row.requested_by_employee_id)) : Promise.resolve(undefined),
     !row.project_name && (row.project_id ?? 0) > 0 ? getProjectSnapshot(Number(row.project_id)) : Promise.resolve(undefined),
     decoratePurchaseRequestItems(row.items ?? []),
   ]);
@@ -329,6 +352,7 @@ async function decoratePurchaseRequest(row: PurchaseRequestRow): Promise<Purchas
     warehouse_name: row.warehouse_name ?? warehouse?.name ?? null,
     requested_by_employee_uuid: row.requested_by_employee_uuid ?? employee?.uuid ?? null,
     requested_by_employee_name: row.requested_by_employee_name ?? buildEmployeeName(employee),
+    requested_by_name: row.requested_by_name ?? row.requested_by_user_name ?? row.requested_by_employee_name ?? buildEmployeeName(employee),
     project_uuid: row.project_uuid ?? project?.uuid ?? null,
     project_name: row.project_name ?? project?.name ?? null,
     items,
@@ -350,7 +374,7 @@ function sanitizePurchaseRequestItem(input: unknown): PurchaseRequestItemRow {
     company_asset_uuid: trimOrNull(record.company_asset_uuid, 100),
     company_asset_code: trimOrNull(record.company_asset_code, 100),
     asset_name: trimOrNull(record.asset_name, 255),
-    asset_type: trimOrNull(record.asset_type, 50),
+    asset_type: trimOrNull(record.asset_type, 80),
     asset_code_prefix: trimOrNull(record.asset_code_prefix, 50),
     unit: trimText(record.unit, 100),
     quantity_requested: Math.max(0, toMoney(record.quantity_requested)),
@@ -399,19 +423,63 @@ function sanitizePurchaseRequest(input: unknown): PurchaseRequestRow {
     vendor_id: toNullableId(record.vendor_id),
     vendor_uuid: trimOrNull(record.vendor_uuid, 100),
     vendor_name: trimOrNull(record.vendor_name, 255),
-    requested_by_employee_id: toId(record.requested_by_employee_id),
+    requested_by_user_id: toNullableId(record.requested_by_user_id),
+    requested_by_user_name: trimOrNull(record.requested_by_user_name, 255),
+    requested_by_name: trimOrNull(record.requested_by_name, 255),
+    requested_by_employee_id: toNullableId(record.requested_by_employee_id),
     requested_by_employee_uuid: trimOrNull(record.requested_by_employee_uuid, 100),
     requested_by_employee_name: trimOrNull(record.requested_by_employee_name, 255),
-    status: trimText(record.status, 50) || "pending",
+    status: trimText(record.status, 50) || "pending_admin_approval",
     approved_by_user_id: toNullableId(record.approved_by_user_id),
     approved_by_user_name: trimOrNull(record.approved_by_user_name, 255),
     approved_at: toNullableTs(record.approved_at),
+    rejected_by_user_id: toNullableId(record.rejected_by_user_id),
+    rejected_by_user_name: trimOrNull(record.rejected_by_user_name, 255),
+    rejected_at: toNullableTs(record.rejected_at),
+    rejection_reason: trimOrNull(record.rejection_reason, 5000),
+    payment_processed_by_user_id: toNullableId(record.payment_processed_by_user_id),
+    payment_processed_by_user_name: trimOrNull(record.payment_processed_by_user_name, 255),
+    payment_processed_at: toNullableTs(record.payment_processed_at),
+    payment_account_id: toNullableId(record.payment_account_id),
+    payment_account_uuid: trimOrNull(record.payment_account_uuid, 100),
+    payment_account_name: trimOrNull(record.payment_account_name, 255),
+    payment_account_currency: trimOrNull(record.payment_account_currency, 10),
+    payment_account_transaction_id: toNullableId(record.payment_account_transaction_id),
+    payment_amount:
+      record.payment_amount === null || record.payment_amount === undefined || String(record.payment_amount).trim() === ""
+        ? null
+        : Math.max(0, toMoney(record.payment_amount)),
+    payment_currency_code: trimOrNull(record.payment_currency_code, 10),
+    payment_exchange_rate_snapshot:
+      record.payment_exchange_rate_snapshot === null || record.payment_exchange_rate_snapshot === undefined || String(record.payment_exchange_rate_snapshot).trim() === ""
+        ? null
+        : Number(Number(record.payment_exchange_rate_snapshot).toFixed(6)),
+    payment_account_amount:
+      record.payment_account_amount === null || record.payment_account_amount === undefined || String(record.payment_account_amount).trim() === ""
+        ? null
+        : Math.max(0, toMoney(record.payment_account_amount)),
+    payment_slip_no: trimOrNull(record.payment_slip_no, 100),
+    payment_notes: trimOrNull(record.payment_notes, 5000),
     received_by_user_id: toNullableId(record.received_by_user_id),
     received_by_user_name: trimOrNull(record.received_by_user_name, 255),
     received_at: toNullableTs(record.received_at),
     purchase_receipt_no: trimOrNull(record.purchase_receipt_no, 100),
     requested_at: toNullableTs(record.requested_at) ?? Date.now(),
     notes: trimOrNull(record.notes, 5000),
+    estimated_grand_total:
+      record.estimated_grand_total === null || record.estimated_grand_total === undefined || String(record.estimated_grand_total).trim() === ""
+        ? null
+        : Math.max(0, toMoney(record.estimated_grand_total)),
+    approved_grand_total:
+      record.approved_grand_total === null || record.approved_grand_total === undefined || String(record.approved_grand_total).trim() === ""
+        ? null
+        : Math.max(0, toMoney(record.approved_grand_total)),
+    received_grand_total:
+      record.received_grand_total === null || record.received_grand_total === undefined || String(record.received_grand_total).trim() === ""
+        ? null
+        : Math.max(0, toMoney(record.received_grand_total)),
+    can_edit: record.can_edit === true,
+    can_delete: record.can_delete !== false,
     items: rawItems
       .map(sanitizePurchaseRequestItem)
       .filter(
@@ -435,9 +503,12 @@ function matchesPurchaseRequestSearch(row: PurchaseRequestRow, query: string): b
     row.vendor_name,
     row.warehouse_name,
     row.project_name,
+    row.requested_by_name,
+    row.requested_by_user_name,
     row.requested_by_employee_name,
     row.status,
     row.purchase_receipt_no,
+    row.payment_slip_no,
     row.notes,
     ...(row.items ?? []).flatMap((item) => [
       item.material_name,
@@ -551,9 +622,6 @@ function validatePurchaseRequestInput(input: PurchaseRequestInput): void {
   if (!Number.isFinite(input.warehouse_id) || input.warehouse_id <= 0) {
     throw new Error("Warehouse is required.");
   }
-  if (!Number.isFinite(input.requested_by_employee_id) || input.requested_by_employee_id <= 0) {
-    throw new Error("Requested by employee is required.");
-  }
   if (!Array.isArray(input.items) || input.items.length === 0) {
     throw new Error("At least one purchase item is required.");
   }
@@ -569,7 +637,7 @@ function validatePurchaseRequestInput(input: PurchaseRequestInput): void {
     if (
       itemKind === "asset" &&
       (!Number.isFinite(item.company_asset_id) || Number(item.company_asset_id) <= 0) &&
-      !["vehicle", "machine", "tool", "IT"].includes(trimText(item.asset_type, 50) || "")
+      !trimText(item.asset_type, 80)
     ) {
       throw new Error(`Asset type is required for item ${index + 1}.`);
     }
@@ -611,14 +679,22 @@ function validatePurchaseReceiveInput(input: PurchaseReceiveInput): void {
   });
 }
 
+function validatePurchasePaymentInput(input: PurchasePaymentInput): void {
+  if (!Number.isFinite(input.account_id) || input.account_id <= 0) {
+    throw new Error("Payment account is required.");
+  }
+  if (!Number.isFinite(input.payment_amount) || input.payment_amount <= 0) {
+    throw new Error("Payment amount must be greater than 0.");
+  }
+}
+
 function toPurchaseRequestPayload(input: PurchaseRequestInput): Obj {
-  return {
+  const payload: Obj = {
     request_type: input.request_type,
     source_material_request_id: toNullableId(input.source_material_request_id),
     project_id: toNullableId(input.project_id),
     warehouse_id: toId(input.warehouse_id),
     vendor_id: toNullableId(input.vendor_id),
-    requested_by_employee_id: toId(input.requested_by_employee_id),
     notes: trimOrNull(input.notes, 5000),
     items: input.items.map((item) => ({
       uuid: trimText(item.uuid, 100) || crypto.randomUUID(),
@@ -626,7 +702,7 @@ function toPurchaseRequestPayload(input: PurchaseRequestInput): Obj {
       material_id: input.request_type === "material" || item.item_kind === "material" ? toNullableId(item.material_id) : null,
       company_asset_id: input.request_type === "asset" || item.item_kind === "asset" ? toNullableId(item.company_asset_id) : null,
       asset_name: trimOrNull(item.asset_name, 255),
-      asset_type: trimOrNull(item.asset_type, 50),
+      asset_type: trimOrNull(item.asset_type, 80),
       asset_code_prefix: trimOrNull(item.asset_code_prefix, 50),
       quantity_requested: Math.max(0, toMoney(item.quantity_requested)),
       estimated_unit_price:
@@ -637,6 +713,13 @@ function toPurchaseRequestPayload(input: PurchaseRequestInput): Obj {
       notes: trimOrNull(item.notes, 1000),
     })),
   };
+
+  const requestedByEmployeeId = toNullableId(input.requested_by_employee_id);
+  if (requestedByEmployeeId) {
+    payload.requested_by_employee_id = requestedByEmployeeId;
+  }
+
+  return payload;
 }
 
 function toPurchaseReceivePayload(input: PurchaseReceiveInput): Obj {
@@ -654,6 +737,15 @@ function toPurchaseReceivePayload(input: PurchaseReceiveInput): Obj {
   };
 }
 
+function toPurchasePaymentPayload(input: PurchasePaymentInput): Obj {
+  return {
+    account_id: toId(input.account_id),
+    payment_amount: Math.max(0, toMoney(input.payment_amount)),
+    payment_date: input.payment_date ? new Date(input.payment_date).toISOString() : null,
+    notes: trimOrNull(input.notes, 5000),
+  };
+}
+
 const purchaseRequestsConfig: PullConfig<PurchaseRequestRow> = {
   entity: "purchase_requests",
   endpoint: "/api/purchase-requests",
@@ -662,7 +754,7 @@ const purchaseRequestsConfig: PullConfig<PurchaseRequestRow> = {
   table: db.purchase_requests,
   sanitize: sanitizePurchaseRequest,
   decorate: decoratePurchaseRequest,
-  isValid: (row) => Boolean(row.uuid && row.request_no && row.warehouse_id > 0 && row.requested_by_employee_id > 0),
+  isValid: (row) => Boolean(row.uuid && row.request_no && row.warehouse_id > 0),
   matchesSearch: matchesPurchaseRequestSearch,
 };
 
@@ -688,13 +780,17 @@ export async function purchaseRequestCreate(input: PurchaseRequestInput): Promis
 
   const uuid = crypto.randomUUID();
   const payload = toPurchaseRequestPayload(input);
+  const authUser = getStoredAuthUser();
   const row = await decoratePurchaseRequest(
     sanitizePurchaseRequest({
       id: deriveIdFromUuid(uuid),
       uuid,
       request_no: `PR-LOCAL-${uuid.slice(0, 8).toUpperCase()}`,
       ...payload,
-      status: "pending",
+      requested_by_user_id: Number.isFinite(Number(authUser?.id)) ? Number(authUser?.id) : null,
+      requested_by_user_name: authUser?.full_name || authUser?.name || null,
+      requested_by_name: authUser?.full_name || authUser?.name || null,
+      status: "pending_admin_approval",
       requested_at: Date.now(),
       created_at: Date.now(),
       updated_at: Date.now(),
@@ -752,7 +848,7 @@ export async function purchaseRequestUpdate(uuid: string, input: PurchaseRequest
       ...existing,
       ...payload,
       updated_at: Date.now(),
-      status: existing.status || "pending",
+      status: existing.status || "rejected",
       request_no: existing.request_no,
     })
   );
@@ -882,9 +978,32 @@ export async function purchaseRequestReceive(uuid: string, input: PurchaseReceiv
   }
 }
 
+export async function purchaseRequestProcessPayment(uuid: string, input: PurchasePaymentInput): Promise<PurchaseRequestRow> {
+  validatePurchasePaymentInput(input);
+
+  if (!isOnline()) {
+    throw new Error("Purchase payment processing requires an online connection.");
+  }
+
+  try {
+    const response = await api.post(`${purchaseRequestsConfig.endpoint}/${uuid}/process-payment`, toPurchasePaymentPayload(input));
+    const saved = await decoratePurchaseRequest(sanitizePurchaseRequest(obj(response.data).data));
+    await db.purchase_requests.put(saved);
+    await Promise.all([accountsPullToLocal(), accountTransactionsPullToLocal()]);
+    notifySuccess("Purchase payment processed successfully.");
+    return saved;
+  } catch (error: unknown) {
+    const message = getApiErrorMessage(error);
+    notifyError(message);
+    throw new Error(message);
+  }
+}
+
 export async function purchaseRequestsRefreshDependencies(): Promise<void> {
   await Promise.all([
     purchaseRequestsPullToLocal(),
+    accountsPullToLocal(),
+    accountTransactionsPullToLocal(),
     materialsPullToLocal(),
     vendorsPullToLocal(),
     warehousesPullToLocal(),

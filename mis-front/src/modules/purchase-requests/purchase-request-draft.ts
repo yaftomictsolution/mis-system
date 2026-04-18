@@ -12,7 +12,6 @@ export type PurchaseRequestDraft = {
   source_material_request_no?: string | null;
   project_id?: number | null;
   warehouse_id: number;
-  requested_by_employee_id: number;
   notes?: string | null;
   items: PurchaseRequestDraftItem[];
 };

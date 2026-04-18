@@ -6,7 +6,7 @@ import { emitAppEvent } from "@/lib/appEvents";
 import type { DocumentModuleKey, DocumentTypeOption } from "@/modules/documents/documents.repo";
 
 type Obj = Record<string, unknown>;
-export type DocumentTypeModuleKey = DocumentModuleKey | "accounts";
+export type DocumentTypeModuleKey = DocumentModuleKey | "accounts" | "company_assets";
 
 export type DocumentTypeRow = {
   id?: number;

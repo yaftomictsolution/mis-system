@@ -837,8 +837,8 @@ function validateCompanyAssetInput(input: CompanyAssetInput): void {
   if (!trimText(input.asset_name, 255)) {
     throw new Error("Asset name is required.");
   }
-  if (!["vehicle", "machine", "tool", "IT"].includes(input.asset_type)) {
-    throw new Error("Asset type is invalid.");
+  if (!trimText(input.asset_type, 80)) {
+    throw new Error("Asset type is required.");
   }
   if (!Number.isFinite(input.quantity) || input.quantity < 0) {
     throw new Error("Asset quantity must be 0 or greater.");

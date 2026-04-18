@@ -343,6 +343,72 @@ export async function notificationDelete(id: string): Promise<void> {
   emitAppEvent("notifications:changed");
 }
 
+export async function notificationCreate(input: {
+  type?: string;
+  category?: string | null;
+  title?: string;
+  message?: string;
+  sale_uuid?: string | null;
+  sale_id?: string | null;
+  data?: Obj;
+}): Promise<void> {
+  const id = `local-${nowMs()}-${Math.random().toString(36).slice(2, 8)}`;
+  const localRow: AdminNotificationLocalRow = {
+    id,
+    type: String(input.type ?? "admin"),
+    category: input.category == null ? null : String(input.category),
+    title: String(input.title ?? "Notification"),
+    message: String(input.message ?? ""),
+    sale_uuid: input.sale_uuid == null ? null : String(input.sale_uuid),
+    sale_id: input.sale_id == null ? null : String(input.sale_id),
+    read_at: null,
+    created_at: nowIso(),
+    data: asObj(input.data ?? {}),
+    updated_at: nowMs(),
+  };
+
+  await db.admin_notifications.put(localRow);
+  emitAppEvent("notifications:changed");
+
+  const payload = {
+    type: localRow.type,
+    category: localRow.category,
+    title: localRow.title,
+    message: localRow.message,
+    sale_uuid: localRow.sale_uuid,
+    sale_id: localRow.sale_id,
+    data: localRow.data,
+    created_at: localRow.created_at,
+  } as Obj;
+
+  if (isOnline()) {
+    try {
+      const res = await api.post("/api/notifications", payload);
+      const created = toRow(asObj(res.data).data ?? {});
+      if (created && created.id) {
+        // replace local placeholder with server copy
+        await db.admin_notifications.delete(id);
+        await db.admin_notifications.put(toLocalRow(created));
+        emitAppEvent("notifications:changed");
+      }
+      return;
+    } catch (error: unknown) {
+      if (!isOfflineError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  // offline: enqueue pending op so it will be created later
+  await enqueuePendingModuleOp({
+    module: "notifications",
+    action: "create",
+    target_id: id,
+    payload: payload,
+  });
+  emitAppEvent("notifications:changed");
+}
+
 export async function notificationDeleteAllRead(): Promise<number> {
   const removed = await removeReadNotificationsLocal();
   if (removed <= 0) return 0;
