@@ -6,6 +6,7 @@ import {
   UserCheck,
   BadgeDollarSign,
   CalendarCheck,
+  Fingerprint,
   MessageSquareText,
   KeyRound,
   FolderOpen,
@@ -34,6 +35,7 @@ export const NAV_ITEMS = [
     title: 'HR & Employee',
     items: [
       { icon: Building2, label: 'Employees',permission: "employees.view", path: '/employees' },
+      { icon: Fingerprint, label: 'Attendance', permission: "employees.view", path: '/attendance' },
       { icon: BadgeDollarSign, label: 'Payroll', permission: "payroll.view", path: '/payroll' },
     ],
   },

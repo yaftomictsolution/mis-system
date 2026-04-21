@@ -6,6 +6,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 export type EmployeeFormData = {
   first_name: string;
   last_name: string;
+  biometric_user_id: string;
   job_title: string;
   salary_type: SalaryType;
   base_salary: number;
@@ -23,6 +24,7 @@ export const createEmptyEmployeeForm = (): EmployeeFormData => ({
 
   first_name: "",
   last_name: "",
+  biometric_user_id: "",
   job_title: "",
   salary_type: "fixed",
   base_salary: 0,

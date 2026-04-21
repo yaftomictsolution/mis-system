@@ -130,6 +130,7 @@ function sanitizeEmployee(input: unknown): EmployeeRow {
     uuid,
     first_name: trimText(record.first_name ?? record.firstname, 100),
     last_name: trimOrNull(record.last_name, 100),
+    biometric_user_id: trimOrNull(record.biometric_user_id, 255),
     job_title: trimOrNull(record.job_title, 100),
     salary_type: normalizeSalaryType(record.salary_type),
     base_salary: toNullableMoney(record.base_salary),
@@ -147,6 +148,7 @@ function matchesSearch(row: EmployeeRow, query: string): boolean {
   return [
     row.first_name,
     row.last_name,
+    row.biometric_user_id,
     row.job_title,
     row.salary_type,
     row.base_salary,
@@ -326,12 +328,21 @@ function validateEmployee(row: EmployeeRow): void {
 
 async function assertNoDuplicate(row: EmployeeRow, ignoreUuid?: string): Promise<void> {
   const email = row.email.toLowerCase();
+  const biometricId = String(row.biometric_user_id ?? "").trim().toLowerCase();
   const duplicate = await db.employees
-    .filter((item) => (item.email ?? "").toLowerCase() === email && item.uuid !== ignoreUuid)
+    .filter((item) => {
+      const emailMatch = email !== "" && (item.email ?? "").toLowerCase() === email;
+      const biometricMatch =
+        biometricId !== "" && String(item.biometric_user_id ?? "").trim().toLowerCase() === biometricId;
+      return item.uuid !== ignoreUuid && (emailMatch || biometricMatch);
+    })
     .first();
 
   if (duplicate) {
-    throw new Error("Email already exists.");
+    if (email !== "" && (duplicate.email ?? "").toLowerCase() === email) {
+      throw new Error("Email already exists.");
+    }
+    throw new Error("Biometric ID already exists.");
   }
 }
 
@@ -352,6 +363,7 @@ function toEmployeeApiPayload(row: EmployeeRow, extras?: EmployeePayloadInput): 
     address: row.address,
     email: row.email,
     phone: row.phone !== null ? String(row.phone) : null,
+    biometric_user_id: trimOrNull(row.biometric_user_id, 255),
     hire_date: toDateOnly(row.hire_date),
     status: row.status,
     updated_at: row.updated_at,
