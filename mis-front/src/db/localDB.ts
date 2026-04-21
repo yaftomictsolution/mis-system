@@ -216,6 +216,7 @@ export type EmployeeRow = {
   uuid: string;
   first_name: string;
   last_name?: string | null;
+  biometric_user_id?: string | null;
   job_title?: string | null;
   salary_type?: string;
   base_salary?: number | null;
@@ -1588,6 +1589,46 @@ export class LocalDB extends Dexie {
       users: "&uuid, updated_at, name,phone",
       apartments: "&uuid, updated_at, apartment_code, usage_type",
       employees: "&uuid, updated_at, last_name, first_name, status, salary_type, salary_currency_code, email, phone",
+      apartment_sales: "&uuid, updated_at, sale_date, status, apartment_id, customer_id",
+      installments: "&uuid, updated_at, due_date, status, apartment_sale_id, sale_uuid",
+      apartment_sale_financials: "&sale_uuid, updated_at, apartment_sale_id",
+      rentals: "&uuid, updated_at, status, apartment_id, tenant_id, rental_id, next_due_date",
+      rental_payments: "&uuid, updated_at, rental_id, due_date, status, payment_type, tenant_id, rental_uuid, bill_no, approved_at",
+      salary_advances: "&uuid, updated_at, employee_id, status, currency_code, amount, remaining_amount, created_at",
+      salary_advance_deductions: "&uuid, salary_payment_uuid, salary_advance_uuid, updated_at, created_at",
+      salary_payments: "&uuid, updated_at, employee_id, status, period, salary_currency_code, paid_at, account_id, payment_currency_code, created_at",
+      accounts: "&uuid, updated_at, name, account_type, currency, status",
+      account_transactions: "&uuid, updated_at, account_id, transaction_date, module, reference_type, status, currency_code",
+      exchange_rates: "&uuid, updated_at, effective_date, is_active, base_currency, quote_currency",
+      employee_salary_histories: "&uuid, updated_at, employee_id, effective_from, source, created_at",
+      vendors: "&uuid, updated_at, name, email, status",
+      warehouses: "&uuid, updated_at, name, location, status",
+      materials: "&uuid, updated_at, name, material_type, status, supplier_id, quantity, reference_unit_price, min_stock_level, expiry_date",
+      company_assets: "&uuid, updated_at, asset_code, asset_name, asset_type, status, supplier_id, current_employee_id, current_project_id, current_warehouse_id",
+      projects: "&uuid, updated_at, name, status, start_date, end_date, project_manager_user_id",
+      material_requests: "&uuid, updated_at, request_no, status, warehouse_id, requested_by_user_id, project_id, requested_at",
+      purchase_requests: "&uuid, updated_at, request_no, request_type, status, warehouse_id, vendor_id, requested_by_user_id, project_id, requested_at, payment_processed_at, received_at",
+      asset_requests: "&uuid, updated_at, request_no, status, requested_by_employee_id, requested_asset_id, project_id, requested_at, assigned_date",
+      stock_movements: "&uuid, updated_at, movement_date, material_id, warehouse_id, project_id, movement_type, reference_type",
+      warehouse_material_stocks: "&uuid, updated_at, warehouse_id, material_id, warehouse_name, material_name",
+      project_material_stocks: "&uuid, updated_at, project_id, material_id, project_name, material_name",
+      system_documents: "id, updated_at, module, reference_id, reference_uuid, document_type, created_at",
+      document_types: "&uuid, updated_at, module, code, label, is_active",
+      crm_messages: "id, updated_at, customer_id, status, channel, created_at",
+      admin_notifications: "&id, updated_at, read_at, category, created_at",
+    });
+
+    this.version(28).stores({
+      sync_queue: "++id, created_at, entity, uuid, local_key",
+      pending_module_ops: "++id, created_at, module, action, target_id",
+      pending_attachments: "++id, created_at, entity, entity_uuid",
+      session: "++id, expires_at",
+      api_cache: "&key, updated_at",
+      customers: "&uuid, updated_at, phone, name",
+      roles: "&uuid, updated_at, name",
+      users: "&uuid, updated_at, name,phone",
+      apartments: "&uuid, updated_at, apartment_code, usage_type",
+      employees: "&uuid, updated_at, last_name, first_name, biometric_user_id, status, salary_type, salary_currency_code, email, phone",
       apartment_sales: "&uuid, updated_at, sale_date, status, apartment_id, customer_id",
       installments: "&uuid, updated_at, due_date, status, apartment_sale_id, sale_uuid",
       apartment_sale_financials: "&sale_uuid, updated_at, apartment_sale_id",

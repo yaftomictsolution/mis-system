@@ -46,6 +46,7 @@ const toForm = (row: EmployeeRow): EmployeeFormData => ({
 
     first_name: row.first_name ?? "",
     last_name: row.last_name ?? "",
+    biometric_user_id: row.biometric_user_id ?? "",
     job_title: row.job_title ?? "",
     salary_type: normalizeSalaryType(row.salary_type),
     base_salary: row.base_salary ?? 0,
@@ -145,6 +146,7 @@ export default function EmployeePage() {
         const payload = {
           first_name: form.first_name,
           last_name:  form.last_name,
+          biometric_user_id: form.biometric_user_id,
           job_title:  form.job_title,
           salary_type:  form.salary_type,
           base_salary:  form.base_salary,
@@ -217,7 +219,7 @@ export default function EmployeePage() {
             loading={loading}
             onEdit={openEditForm}
             onDelete={setPendingDelete}
-            searchKeys={["first_name", "last_name", "status", "salary_type"]}
+            searchKeys={["first_name", "last_name", "biometric_user_id", "status", "salary_type"]}
             pageSize={TABLE_PAGE_SIZE}
           />
           <ConfirmDialog

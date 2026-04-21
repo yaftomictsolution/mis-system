@@ -70,6 +70,12 @@ export default function EmployeeForm({
                 required
               />
               <FormField
+                label="Biometric ID"
+                value={value.biometric_user_id}
+                onChange={(v) => onChange((p) => ({ ...p, biometric_user_id: String(v) }))}
+                placeholder="Device user ID"
+              />
+              <FormField
                 label="Salary Type"
                 type="select"
                 value={value.salary_type}

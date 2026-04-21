@@ -53,6 +53,11 @@ export const employeeColumns: Column<EmployeeRow>[] = [
       </span>
     ),
   },
+  {
+    key: "biometric_user_id",
+    label: "Biometric ID",
+    render: (item) => <span>{item.biometric_user_id || "-"}</span>,
+  },
    {
     key: "salary_type",
     label: "Salary Type",
