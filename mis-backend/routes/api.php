@@ -8,6 +8,8 @@ use App\Http\Controllers\Api\ApartmentController;
 use App\Http\Controllers\Api\ApartmentRentalController;
 use App\Http\Controllers\Api\ApartmentSaleController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AttendanceController;
+use App\Http\Controllers\Api\BiometricAttendanceController;
 use App\Http\Controllers\Api\CompanyAssetController;
 use App\Http\Controllers\Api\CrmMessageController;
 use App\Http\Controllers\Api\CustomerController;
@@ -40,6 +42,7 @@ use App\Http\Controllers\Api\WarehouseMaterialStockController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/auth/login', [AuthController::class, 'login']);
+Route::post('/attendance/bridge/punches', [BiometricAttendanceController::class, 'ingestBridgePunches']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/auth/me', [AuthController::class, 'me']);
@@ -53,11 +56,17 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::middleware('internal.user.only')->group(function () {
         Route::get('/settings/offline-policy', [OfflinePolicyController::class, 'show']);
         Route::put('/settings/offline-policy', [OfflinePolicyController::class, 'update']);
+        Route::get('/settings/biometric-attendance', [BiometricAttendanceController::class, 'show']);
+        Route::put('/settings/biometric-attendance', [BiometricAttendanceController::class, 'update']);
+        Route::post('/settings/biometric-attendance/validate', [BiometricAttendanceController::class, 'validateConnection']);
+        Route::post('/settings/biometric-attendance/sync', [BiometricAttendanceController::class, 'syncNow']);
+        Route::delete('/settings/biometric-attendance/demo-punches', [BiometricAttendanceController::class, 'clearDemoPunches']);
 
         Route::get('/approvals', [ApprovalController::class, 'index']);
         Route::post('/approvals/{approval}/approve', [ApprovalController::class, 'approve']);
         Route::post('/approvals/{approval}/reject', [ApprovalController::class, 'reject']);
         Route::get('/dashboard/summary', [DashboardSummaryController::class, 'show']);
+        Route::get('/attendance', [AttendanceController::class, 'index']);
 
         Route::get('/customers', [CustomerController::class, 'index']);
         Route::post('/customers', [CustomerController::class, 'store']);
