@@ -8,6 +8,7 @@ use App\Models\SystemSetting;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
@@ -41,12 +42,12 @@ class BiometricAttendanceService
 
     public function adminConfig(): array
     {
-        return $this->config();
+        return $this->enrichConfig($this->config());
     }
 
     public function dashboardConfig(): array
     {
-        $config = $this->config();
+        $config = $this->adminConfig();
 
         return [
             'provider' => $config['provider'],
@@ -57,6 +58,8 @@ class BiometricAttendanceService
             'is_active' => $config['is_active'],
             'last_validated_at' => $config['last_validated_at'],
             'last_sync_at' => $config['last_sync_at'],
+            'supports_biometric_user_id' => $config['supports_biometric_user_id'],
+            'bridge_status' => $config['bridge_status'],
         ];
     }
 
@@ -70,7 +73,7 @@ class BiometricAttendanceService
             ['value' => $next, 'updated_by' => $updatedBy]
         );
 
-        return $next;
+        return $this->enrichConfig($next);
     }
 
     public function validateConfig(array $override = []): array
@@ -124,7 +127,7 @@ class BiometricAttendanceService
 
         return [
             'message' => $message,
-            'data' => $config,
+            'data' => $this->enrichConfig($config),
             'details' => $details,
         ];
     }
@@ -285,7 +288,7 @@ class BiometricAttendanceService
         [$startUtc, $endUtc] = $this->dayBounds($dashboardDate, $timezone);
 
         $employees = Employee::query()
-            ->select(['id', 'uuid', 'first_name', 'last_name', 'job_title', 'email', 'phone', 'status'])
+            ->select($this->employeeSelectColumns())
             ->where(function ($builder) {
                 $builder
                     ->whereNull('status')
@@ -406,7 +409,7 @@ class BiometricAttendanceService
             ->delete();
 
         $employees = Employee::query()
-            ->select(['id', 'uuid', 'first_name', 'last_name', 'job_title', 'email', 'phone', 'status'])
+            ->select($this->employeeSelectColumns())
             ->where(function ($builder) {
                 $builder
                     ->whereNull('status')
@@ -521,16 +524,21 @@ class BiometricAttendanceService
 
     private function employeeLookupIndex(string $matchField): Collection
     {
+        $normalizedMatchField = $this->normalizeMatchField($matchField);
+
         return Employee::query()
-            ->select(['id', 'uuid', 'first_name', 'last_name', 'job_title', 'email', 'phone', 'status'])
+            ->select($this->employeeSelectColumns())
             ->where(function ($builder) {
                 $builder
                     ->whereNull('status')
                     ->orWhere('status', '!=', 'resign');
             })
             ->get()
-            ->mapWithKeys(function (Employee $employee) use ($matchField): array {
-                $key = $this->normalizeLookupValue($matchField, $this->employeeMatchValue($employee, ['employee_match_field' => $matchField]));
+            ->mapWithKeys(function (Employee $employee) use ($normalizedMatchField): array {
+                $key = $this->normalizeLookupValue(
+                    $normalizedMatchField,
+                    $this->employeeMatchValue($employee, ['employee_match_field' => $normalizedMatchField])
+                );
                 if ($key === '') {
                     return [];
                 }
@@ -541,9 +549,12 @@ class BiometricAttendanceService
 
     private function employeeMatchValue(Employee $employee, array $config): string
     {
-        $matchField = (string) ($config['employee_match_field'] ?? 'employee_uuid');
+        $matchField = $this->normalizeMatchField($config['employee_match_field'] ?? 'employee_uuid');
 
         return match ($matchField) {
+            'biometric_user_id' => $this->supportsBiometricUserId()
+                ? trim((string) ($employee->biometric_user_id ?? ''))
+                : '',
             'email' => trim((string) ($employee->email ?? '')),
             'phone' => trim((string) ($employee->phone ?? '')),
             default => (string) $employee->uuid,
@@ -610,6 +621,10 @@ class BiometricAttendanceService
     private function normalizeMatchField(mixed $value): string
     {
         $field = strtolower(trim((string) $value));
+
+        if ($field === 'biometric_user_id' && $this->supportsBiometricUserId()) {
+            return $field;
+        }
 
         return in_array($field, ['employee_uuid', 'email', 'phone'], true)
             ? $field
@@ -755,5 +770,62 @@ class BiometricAttendanceService
             $clockSeq,
             substr($hash, 20, 12)
         );
+    }
+
+    private function enrichConfig(array $config): array
+    {
+        return [
+            ...$config,
+            'employee_match_field' => $this->normalizeMatchField($config['employee_match_field'] ?? 'employee_uuid'),
+            'supports_biometric_user_id' => $this->supportsBiometricUserId(),
+            'bridge_status' => $this->deriveBridgeStatus($config),
+        ];
+    }
+
+    private function deriveBridgeStatus(array $config): string
+    {
+        $provider = (string) ($config['provider'] ?? 'not-configured');
+
+        if ($provider === 'not-configured') {
+            return 'not-configured';
+        }
+
+        if (! (bool) ($config['is_active'] ?? false)) {
+            return 'inactive';
+        }
+
+        $lastSyncAt = $config['last_sync_at'] ?? null;
+        if (! is_string($lastSyncAt) || trim($lastSyncAt) === '') {
+            return 'waiting';
+        }
+
+        try {
+            $lastSync = CarbonImmutable::parse($lastSyncAt);
+        } catch (\Throwable) {
+            return 'waiting';
+        }
+
+        $syncIntervalMinutes = max(5, (int) ($config['sync_interval_minutes'] ?? 15));
+        $healthyWindowMinutes = $syncIntervalMinutes * 2;
+
+        return $lastSync->greaterThanOrEqualTo(now()->subMinutes($healthyWindowMinutes))
+            ? 'online'
+            : 'offline';
+    }
+
+    private function employeeSelectColumns(): array
+    {
+        $columns = ['id', 'uuid', 'first_name', 'last_name', 'job_title', 'email', 'phone', 'status'];
+
+        if ($this->supportsBiometricUserId()) {
+            $columns[] = 'biometric_user_id';
+        }
+
+        return $columns;
+    }
+
+    private function supportsBiometricUserId(): bool
+    {
+        return Schema::hasColumn('employees', 'biometric_user_id');
     }
 }

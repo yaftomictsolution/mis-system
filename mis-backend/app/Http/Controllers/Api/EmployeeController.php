@@ -9,9 +9,10 @@ use App\Services\EmployeeSalaryHistoryService;
 use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class EmployeeController extends Controller
 {
@@ -22,6 +23,8 @@ class EmployeeController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        $supportsBiometricUserId = $this->supportsBiometricUserId();
+
         $validated = $request->validate([
             'q' => ['nullable', 'string', 'max:255'],
             'since' => ['nullable', 'date'],
@@ -34,24 +37,30 @@ class EmployeeController extends Controller
         $since = $validated['since'] ?? null;
         $includeDeleted = $offline || !is_null($since);
 
+        $columns = [
+            'id',
+            'uuid',
+            'first_name',
+            'last_name',
+            'job_title',
+            'salary_type',
+            'base_salary',
+            'salary_currency_code',
+            'address',
+            'email',
+            'phone',
+            'status',
+            'hire_date',
+            'updated_at',
+            'deleted_at',
+        ];
+
+        if ($supportsBiometricUserId) {
+            $columns[] = 'biometric_user_id';
+        }
+
         $query = Employee::query()
-            ->select([
-                'id',
-                'uuid',
-                'first_name',
-                'last_name',
-                'job_title',
-                'salary_type',
-                'base_salary',
-                'salary_currency_code',
-                'address',
-                'email',
-                'phone',
-                'status',
-                'hire_date',
-                'updated_at',
-                'deleted_at',
-            ])
+            ->select($columns)
             ->orderByDesc('updated_at');
 
         if ($includeDeleted) {
@@ -60,7 +69,7 @@ class EmployeeController extends Controller
 
         $search = trim((string) ($validated['q'] ?? ''));
         if ($search !== '') {
-            $query->where(function ($builder) use ($search) {
+            $query->where(function ($builder) use ($search, $supportsBiometricUserId) {
                 $builder
                     ->where('first_name', 'like', "%{$search}%")
                     ->orWhere('last_name', 'like', "%{$search}%")
@@ -68,6 +77,10 @@ class EmployeeController extends Controller
                     ->orWhere('phone', 'like', "%{$search}%")
                     ->orWhere('email', 'like', "%{$search}%")
                     ->orWhere('base_salary', 'like', "%{$search}%");
+
+                if ($supportsBiometricUserId) {
+                    $builder->orWhere('biometric_user_id', 'like', "%{$search}%");
+                }
             });
         }
 
@@ -97,7 +110,7 @@ class EmployeeController extends Controller
         $paginator = $query->paginate($perPage, ['*'], 'page', $page);
 
         $items = collect($paginator->items())
-            ->map(fn (Employee $employee) => $this->employeePayload($employee))
+            ->map(fn (Employee $employee) => $this->employeePayload($employee, $supportsBiometricUserId))
             ->values()
             ->all();
 
@@ -115,14 +128,16 @@ class EmployeeController extends Controller
 
     public function store(StoreEmployeeRequest $request): JsonResponse
     {
+        $supportsBiometricUserId = $this->supportsBiometricUserId();
         $data = $request->validated();
         $created = false;
         $restored = false;
         $employee = null;
 
-        DB::transaction(function () use ($data, &$employee, &$created, &$restored, $request): void {
+        DB::transaction(function () use ($data, $supportsBiometricUserId, &$employee, &$created, &$restored, $request): void {
             $incomingUuid = (string) ($data['uuid'] ?? '');
             $email = trim((string) ($data['email'] ?? ''));
+            $biometricUserId = trim((string) ($data['biometric_user_id'] ?? ''));
             $matches = collect();
 
             if ($incomingUuid !== '') {
@@ -135,6 +150,14 @@ class EmployeeController extends Controller
                 $matchByEmail = Employee::withTrashed()->where('email', $email)->first();
                 if ($matchByEmail) {
                     $matches->push($matchByEmail);
+                }
+            }
+            if ($supportsBiometricUserId && $biometricUserId !== '') {
+                $matchByBiometricId = Employee::withTrashed()
+                    ->where('biometric_user_id', $biometricUserId)
+                    ->first();
+                if ($matchByBiometricId) {
+                    $matches->push($matchByBiometricId);
                 }
             }
 
@@ -158,7 +181,7 @@ class EmployeeController extends Controller
             } else {
                 throw new HttpResponseException(response()->json([
                     'message' => 'Employee already exists.',
-                    'data' => $this->employeePayload($employee),
+                    'data' => $this->employeePayload($employee, $supportsBiometricUserId),
                 ], 409));
             }
 
@@ -170,6 +193,10 @@ class EmployeeController extends Controller
                 $updateData['salary_history_uuid']
             );
 
+            if (! $supportsBiometricUserId) {
+                unset($updateData['biometric_user_id']);
+            }
+
             $employee->fill($updateData);
             $employee->save();
 
@@ -180,17 +207,18 @@ class EmployeeController extends Controller
         });
 
         return response()->json([
-            'data' => $this->employeePayload($employee->fresh()),
+            'data' => $this->employeePayload($employee->fresh(), $supportsBiometricUserId),
             'restored' => $restored,
         ], $created ? 201 : 200);
     }
 
     public function update(StoreEmployeeRequest $request, string $uuid): JsonResponse
     {
+        $supportsBiometricUserId = $this->supportsBiometricUserId();
         $employee = Employee::withTrashed()->where('uuid', $uuid)->firstOrFail();
         $data = $request->validated();
 
-        DB::transaction(function () use ($employee, $data, $request): void {
+        DB::transaction(function () use ($employee, $data, $request, $supportsBiometricUserId): void {
             if ($employee->trashed()) {
                 $employee->restore();
             }
@@ -204,6 +232,10 @@ class EmployeeController extends Controller
                 $updateData['salary_effective_from'],
                 $updateData['salary_history_uuid']
             );
+
+            if (! $supportsBiometricUserId) {
+                unset($updateData['biometric_user_id']);
+            }
 
             $employee->fill($updateData);
             $employee->save();
@@ -222,7 +254,7 @@ class EmployeeController extends Controller
         });
 
         return response()->json([
-            'data' => $this->employeePayload($employee->fresh()),
+            'data' => $this->employeePayload($employee->fresh(), $supportsBiometricUserId),
         ]);
     }
 
@@ -263,9 +295,10 @@ class EmployeeController extends Controller
         ]);
     }
 
-    private function employeePayload(Employee $employee): array
+    private function employeePayload(Employee $employee, ?bool $supportsBiometricUserId = null): array
     {
-        return $employee->only([
+        $supportsBiometricUserId ??= $this->supportsBiometricUserId();
+        $payload = $employee->only([
             'id',
             'uuid',
             'first_name',
@@ -283,6 +316,16 @@ class EmployeeController extends Controller
             'created_at',
             'deleted_at',
         ]);
+
+        $payload['biometric_user_id'] = $this->supportsBiometricUserId()
+            ? $employee->biometric_user_id
+            : null;
+
+        return $payload;
     }
 
+    private function supportsBiometricUserId(): bool
+    {
+        return Schema::hasColumn('employees', 'biometric_user_id');
+    }
 }

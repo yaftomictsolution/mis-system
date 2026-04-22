@@ -123,7 +123,7 @@ class BiometricAttendanceController extends Controller
             'serial_number' => ['nullable', 'string', 'max:120'],
             'timezone' => ['nullable', 'string', 'max:120'],
             'sync_interval_minutes' => ['nullable', 'integer', 'min:1', 'max:1440'],
-            'employee_match_field' => ['nullable', Rule::in(['employee_uuid', 'email', 'phone'])],
+            'employee_match_field' => ['nullable', Rule::in(['employee_uuid', 'email', 'phone', 'biometric_user_id'])],
             'auto_sync_enabled' => ['nullable', 'boolean'],
             'is_active' => ['nullable', 'boolean'],
             'notes' => ['nullable', 'string', 'max:2000'],
