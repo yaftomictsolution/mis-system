@@ -1,6 +1,76 @@
 import type { NextConfig } from "next";
 import withPWAInit from "next-pwa";
 
+const APP_CACHE_VERSION =
+  process.env.APP_BUILD_ID?.trim() ||
+  process.env.VERCEL_GIT_COMMIT_SHA?.trim() ||
+  process.env.SOURCE_VERSION?.trim() ||
+  String(Date.now());
+
+function normalizePathPrefix(pathname: string): string {
+  const trimmed = pathname.trim();
+  if (!trimmed || trimmed === "/") return "";
+  return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
+}
+
+function buildPrefixedPath(prefix: string, suffix: string): string {
+  const normalizedPrefix = normalizePathPrefix(prefix);
+  const normalizedSuffix = suffix.startsWith("/") ? suffix : `/${suffix}`;
+  return `${normalizedPrefix}${normalizedSuffix}`.replace(/\/{2,}/g, "/");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildUrlPattern(originPattern: string, prefix: string): RegExp {
+  return new RegExp(`^${originPattern}${escapeRegExp(prefix)}.*$`, "i");
+}
+
+function getApiRuntimeConfig(rawBaseUrl: string | undefined): {
+  apiOrigin: string | null;
+  apiPrefix: string;
+  storagePrefix: string;
+} {
+  const trimmed = rawBaseUrl?.trim() ?? "";
+
+  if (!trimmed) {
+    return {
+      apiOrigin: null,
+      apiPrefix: "/api/",
+      storagePrefix: "/storage/",
+    };
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      const prefix = normalizePathPrefix(parsed.pathname);
+      return {
+        apiOrigin: parsed.origin,
+        apiPrefix: buildPrefixedPath(prefix, "/api/"),
+        storagePrefix: buildPrefixedPath(prefix, "/storage/"),
+      };
+    } catch {
+      return {
+        apiOrigin: null,
+        apiPrefix: "/api/",
+        storagePrefix: "/storage/",
+      };
+    }
+  }
+
+  return {
+    apiOrigin: null,
+    apiPrefix: buildPrefixedPath(trimmed, "/api/"),
+    storagePrefix: buildPrefixedPath(trimmed, "/storage/"),
+  };
+}
+
+const { apiOrigin, apiPrefix, storagePrefix } = getApiRuntimeConfig(process.env.NEXT_PUBLIC_API_BASE_URL);
+const apiUrlPattern = buildUrlPattern(apiOrigin ? escapeRegExp(apiOrigin) : "https?:\\/\\/[^/]+", apiPrefix);
+const storageUrlPattern = buildUrlPattern(apiOrigin ? escapeRegExp(apiOrigin) : "https?:\\/\\/[^/]+", storagePrefix);
+
 const STATIC_APP_ROUTES = [
   "/",
   "/login",
@@ -29,6 +99,16 @@ const STATIC_APP_ROUTES = [
   "/users",
 ];
 
+const STATIC_PWA_ASSETS = [
+  "/manifest.json",
+  "/favicon-32x32.png",
+  "/apple-touch-icon.png",
+  "/icon-192.png",
+  "/icon-512.png",
+  "/icon-maskable-192.png",
+  "/icon-maskable-512.png",
+];
+
 const withPWA = withPWAInit({
   dest: "public",
   register: false,
@@ -41,11 +121,11 @@ const withPWA = withPWAInit({
     process.env.NODE_ENV === "development" &&
     process.env.NEXT_PUBLIC_ENABLE_SW !== "true",
   fallbacks: {
-    document: "/offline",
+    document: "/",
   },
-  additionalManifestEntries: STATIC_APP_ROUTES.map((url) => ({
+  additionalManifestEntries: [...STATIC_APP_ROUTES, ...STATIC_PWA_ASSETS].map((url) => ({
     url,
-    revision: "v1",
+    revision: APP_CACHE_VERSION,
   })),
   runtimeCaching: [
     {
@@ -86,8 +166,9 @@ const withPWA = withPWAInit({
       },
     },
     {
-      // Backend API GET requests.
-      urlPattern: /^http:\/\/(?:127\.0\.0\.1|localhost):8000\/api\/.*$/i,
+      // Backend API GET requests. This works for localhost, same-origin reverse proxies,
+      // and production API hosts set through NEXT_PUBLIC_API_BASE_URL.
+      urlPattern: apiUrlPattern,
       handler: "NetworkFirst",
       method: "GET",
       options: {
@@ -95,11 +176,28 @@ const withPWA = withPWAInit({
         expiration: { maxEntries: 200, maxAgeSeconds: 24 * 60 * 60 },
       },
     },
+    {
+      // Cache backend storage assets after first load so document/image previews survive brief outages.
+      urlPattern: storageUrlPattern,
+      handler: "StaleWhileRevalidate",
+      method: "GET",
+      options: {
+        cacheName: "backend-storage",
+        cacheableResponse: {
+          statuses: [0, 200],
+        },
+        expiration: {
+          maxEntries: 150,
+          maxAgeSeconds: 7 * 24 * 60 * 60,
+        },
+      },
+    },
   ],
 });
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  output: "standalone",
   // Silence Next 16 warning if needed.
   turbopack: {},
 };

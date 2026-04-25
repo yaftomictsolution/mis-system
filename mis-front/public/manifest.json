@@ -1,8 +1,14 @@
 {
+  "id": "/",
   "name": "MIS System",
   "short_name": "MIS",
+  "description": "Management information system with offline-first workflows and Sanctum-backed authentication.",
+  "lang": "en",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui", "browser"],
+  "orientation": "portrait-primary",
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
   "icons": [

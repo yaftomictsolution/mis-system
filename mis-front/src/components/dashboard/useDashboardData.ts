@@ -1120,13 +1120,14 @@ export function useDashboardData(): DashboardData {
 
   const refresh = useCallback(async (options: DashboardRefreshOptions = {}): Promise<void> => {
     const { force = false, silent = false, preferLocal = false } = options;
+    const shouldPreferLocal = preferLocal || !isOnline();
 
     if (!silent) {
       setLoading(true);
     }
 
     let localSnapshot: DashboardSnapshot | null = null;
-    if (preferLocal) {
+    if (shouldPreferLocal) {
       localSnapshot = await buildLocalSnapshot(roles, permissions);
       setSnapshot(localSnapshot);
       setSnapshotOwner(userId);
@@ -1135,7 +1136,7 @@ export function useDashboardData(): DashboardData {
       }
     }
 
-    const cached = !preferLocal && userId ? await readCachedSnapshot(userId) : null;
+    const cached = !shouldPreferLocal && userId ? await readCachedSnapshot(userId) : null;
     if (cached) {
       setSnapshot(cached.snapshot);
       setSnapshotOwner(userId);
