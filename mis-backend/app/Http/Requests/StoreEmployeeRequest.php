@@ -4,6 +4,7 @@ namespace App\Http\Requests;
 
 use App\Models\Employee;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 class StoreEmployeeRequest extends FormRequest
@@ -30,6 +31,9 @@ class StoreEmployeeRequest extends FormRequest
                 ->where('uuid', $routeUuid)
                 ->value('id');
         }
+
+        $supportsBiometricUserId = Schema::hasColumn('employees', 'biometric_user_id');
+
         return [
             'uuid' => [
                 'nullable',
@@ -38,6 +42,14 @@ class StoreEmployeeRequest extends FormRequest
             ],
             'first_name' => ['required', 'string', 'max:255'],
             'last_name' => ['nullable', 'string', 'max:255'],
+            'biometric_user_id' => array_values(array_filter([
+                'nullable',
+                'string',
+                'max:255',
+                $supportsBiometricUserId
+                    ? Rule::unique('employees', 'biometric_user_id')->ignore($employeeId)
+                    : null,
+            ])),
             'job_title' => ['nullable', 'string', 'max:255'],
             'salary_type' => ['required', 'string', 'max:255'],
             'base_salary' => ['nullable', 'numeric', 'min:0'],
@@ -68,6 +80,7 @@ class StoreEmployeeRequest extends FormRequest
             'salary_effective_from.date' => 'Salary effective date must be a valid date.',
             'email.email' => 'Please enter a valid email address.',
             'email.unique' => 'This email already exists.',
+            'biometric_user_id.unique' => 'This biometric ID already exists.',
             'hire_date.date' => 'Hire date must be a valid date.',
         ];
     }

@@ -16,6 +16,7 @@ class Employee extends Model
         'uuid',
         'first_name',
         'last_name',
+        'biometric_user_id',
         'job_title',
         'salary_type',
         'base_salary',
