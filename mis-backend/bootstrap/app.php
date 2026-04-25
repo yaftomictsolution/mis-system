@@ -17,6 +17,9 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'internal.user.only' => RestrictCustomerInternalApiAccess::class,
         ]);
+
+        // This app uses bearer-token API auth rather than web login redirects.
+        $middleware->redirectGuestsTo(static fn () => null);
     })
     ->withSchedule(function (Schedule $schedule): void {
         $days = max(1, (int) env('CRM_REMINDER_DAYS_BEFORE_DUE', 10));
@@ -28,5 +31,7 @@ return Application::configure(basePath: dirname(__DIR__))
             ->withoutOverlapping();
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        $exceptions->shouldRenderJsonWhen(
+            static fn ($request, Throwable $exception): bool => $request->is('api/*') || $request->expectsJson()
+        );
     })->create();

@@ -19,6 +19,7 @@ class OfflinePolicyController extends Controller
         'module_retention_days' => [
             'customers' => 365,
             'apartments' => 365,
+            'employees' => 365,
             'apartment_sales' => 365,
             'apartment_sale_financials' => 365,
             'installments' => 365,
@@ -31,6 +32,8 @@ class OfflinePolicyController extends Controller
             'asset_requests' => 365,
             'projects' => 365,
             'stock_movements' => 365,
+            'warehouse_material_stocks' => 365,
+            'project_material_stocks' => 365,
             'roles' => 365,
             'users' => 365,
             'rentals' => 365,
@@ -39,6 +42,7 @@ class OfflinePolicyController extends Controller
             'salary_payments' => 365,
             'accounts' => 365,
             'account_transactions' => 365,
+            'exchange_rates' => 365,
             'employee_salary_histories' => 365,
         ],
     ];
@@ -61,6 +65,7 @@ class OfflinePolicyController extends Controller
             'module_retention_days' => ['required', 'array'],
             'module_retention_days.customers' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.apartments' => ['required', 'integer', 'min:0', 'max:3650'],
+            'module_retention_days.employees' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.apartment_sales' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.apartment_sale_financials' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.installments' => ['required', 'integer', 'min:0', 'max:3650'],
@@ -73,6 +78,8 @@ class OfflinePolicyController extends Controller
             'module_retention_days.asset_requests' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.projects' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.stock_movements' => ['required', 'integer', 'min:0', 'max:3650'],
+            'module_retention_days.warehouse_material_stocks' => ['required', 'integer', 'min:0', 'max:3650'],
+            'module_retention_days.project_material_stocks' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.roles' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.users' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.rentals' => ['required', 'integer', 'min:0', 'max:3650'],
@@ -81,6 +88,7 @@ class OfflinePolicyController extends Controller
             'module_retention_days.salary_payments' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.accounts' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.account_transactions' => ['required', 'integer', 'min:0', 'max:3650'],
+            'module_retention_days.exchange_rates' => ['required', 'integer', 'min:0', 'max:3650'],
             'module_retention_days.employee_salary_histories' => ['required', 'integer', 'min:0', 'max:3650'],
         ]);
 
@@ -137,6 +145,7 @@ class OfflinePolicyController extends Controller
             'module_retention_days' => [
                 'customers' => $this->normalizeDays($moduleRetention['customers'] ?? 365),
                 'apartments' => $this->normalizeDays($moduleRetention['apartments'] ?? 365),
+                'employees' => $this->normalizeDays($moduleRetention['employees'] ?? 365),
                 'apartment_sales' => $this->normalizeDays($moduleRetention['apartment_sales'] ?? 365),
                 'apartment_sale_financials' => $this->normalizeDays($moduleRetention['apartment_sale_financials'] ?? 365),
                 'installments' => $this->normalizeDays($moduleRetention['installments'] ?? 365),
@@ -149,6 +158,8 @@ class OfflinePolicyController extends Controller
                 'asset_requests' => $this->normalizeDays($moduleRetention['asset_requests'] ?? 365),
                 'projects' => $this->normalizeDays($moduleRetention['projects'] ?? 365),
                 'stock_movements' => $this->normalizeDays($moduleRetention['stock_movements'] ?? 365),
+                'warehouse_material_stocks' => $this->normalizeDays($moduleRetention['warehouse_material_stocks'] ?? 365),
+                'project_material_stocks' => $this->normalizeDays($moduleRetention['project_material_stocks'] ?? 365),
                 'roles' => $this->normalizeDays($moduleRetention['roles'] ?? 365),
                 'users' => $this->normalizeDays($moduleRetention['users'] ?? 365),
                 'rentals' => $this->normalizeDays($moduleRetention['rentals'] ?? 365),
@@ -157,6 +168,7 @@ class OfflinePolicyController extends Controller
                 'salary_payments' => $this->normalizeDays($moduleRetention['salary_payments'] ?? 365),
                 'accounts' => $this->normalizeDays($moduleRetention['accounts'] ?? 365),
                 'account_transactions' => $this->normalizeDays($moduleRetention['account_transactions'] ?? 365),
+                'exchange_rates' => $this->normalizeDays($moduleRetention['exchange_rates'] ?? 365),
                 'employee_salary_histories' => $this->normalizeDays($moduleRetention['employee_salary_histories'] ?? 365),
             ],
         ];
