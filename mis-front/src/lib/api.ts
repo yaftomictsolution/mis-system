@@ -32,6 +32,7 @@ export function clearPersistedAuthSession(options?: { clearOfflineCredentials?: 
 function redirectToLogin(): void {
   if (typeof window === "undefined") return;
   if (window.location.pathname.startsWith("/login")) return;
+  if (window.location.pathname === "/offline") return;
 
   const redirectTarget = `${window.location.pathname}${window.location.search}`;
   const redirectQuery = redirectTarget.startsWith("/")

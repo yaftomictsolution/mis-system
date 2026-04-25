@@ -20,8 +20,8 @@ import {
   UserCircle,
   type LucideIcon,
 } from "lucide-react";
-import { logoutLocal } from "@/store/auth/authSlice";
-import type { RootState } from "@/store/store";
+import { logout } from "@/store/auth/authSlice";
+import type { AppDispatch, RootState } from "@/store/store";
 import { notifyInfo } from "@/lib/notify";
 import { hasAnyRole } from "@/lib/permissions";
 import { toggleSidebar } from "@/store/uiSlice";
@@ -165,7 +165,7 @@ function resolveNotificationTarget(actionUrl?: string): { appPath?: string; exte
 
 export default function TopNav() {
   const router = useRouter();
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
   const user = useSelector((state: RootState) => state.auth.user);
   const { theme, toggleTheme } = useTheme();
   const { online } = useSyncWidget();
@@ -677,8 +677,9 @@ export default function TopNav() {
                   <button
                     type="button"
                     onClick={() => {
-                      dispatch(logoutLocal());
-                      router.replace("/login");
+                      void dispatch(logout()).finally(() => {
+                        router.replace("/login");
+                      });
                     }}
                     className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-500/10"
                   >

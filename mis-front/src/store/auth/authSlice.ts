@@ -1,6 +1,7 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import { api } from "@/lib/api";
+import { api, clearPersistedAuthSession, isOfflineSessionToken } from "@/lib/api";
 import { computeCredHash } from "@/lib/crypto";
+import { buildDeviceName } from "@/lib/device";
 import {
   clearLastEnforcedOfflineDeadline,
   isOfflineAccessExpired,
@@ -51,13 +52,25 @@ function extractApiMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function resetAuthState(state: AuthState): void {
+  state.token = null;
+  state.user = null;
+  state.hydrated = true;
+  state.status = "idle";
+  state.error = null;
+}
+
 export const login = createAsyncThunk<
   { token: string; user: User },
   { email: string; password: string },
   { rejectValue: string }
 >("auth/login", async ({ email, password }, thunkAPI) => {
   try {
-    const res = await api.post("/api/auth/login", { email, password });
+    const res = await api.post("/api/auth/login", {
+      email,
+      password,
+      device_name: buildDeviceName(),
+    });
     const { token, user } = res.data as { token: string; user: User };
 
     localStorage.setItem("token", token);
@@ -110,6 +123,23 @@ export const fetchMe = createAsyncThunk<User, void, { rejectValue: string }>("au
   }
 });
 
+export const logout = createAsyncThunk<void, void, { state: { auth: AuthState } }>(
+  "auth/logout",
+  async (_, thunkAPI) => {
+    const token = thunkAPI.getState().auth.token;
+
+    try {
+      if (typeof navigator !== "undefined" && navigator.onLine && token && !isOfflineSessionToken(token)) {
+        await api.post("/api/auth/logout");
+      }
+    } catch (error) {
+      console.warn("logout: failed to revoke current Sanctum token", error);
+    } finally {
+      clearPersistedAuthSession();
+    }
+  }
+);
+
 const authSlice = createSlice({
   name: "auth",
   initialState,
@@ -120,14 +150,8 @@ const authSlice = createSlice({
       state.hydrated = true;
     },
     logoutLocal(state) {
-      state.token = null;
-      state.user = null;
-      state.hydrated = true;
-      state.status = "idle";
-      state.error = null;
-
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
+      resetAuthState(state);
+      clearPersistedAuthSession();
     },
     clearOfflineCredentials() {
       localStorage.removeItem("cred_hash");
@@ -158,6 +182,9 @@ const authSlice = createSlice({
       })
       .addCase(fetchMe.rejected, (state) => {
         state.hydrated = true;
+      })
+      .addCase(logout.fulfilled, (state) => {
+        resetAuthState(state);
       });
   },
 });

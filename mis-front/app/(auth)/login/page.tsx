@@ -13,7 +13,46 @@ function normalizeRedirectPath(raw: string | null): string | null {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("/")) return null;
   if (trimmed.startsWith("//")) return null;
+  const pathOnly = trimmed.split(/[?#]/, 1)[0] || "/";
+  if (pathOnly === "/offline" || pathOnly === "/login") return null;
   return trimmed;
+}
+
+async function hasCachedRoute(path: string): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+
+  const normalized = path.trim();
+  if (!normalized) return false;
+
+  const basePath = normalized.split(/[?#]/, 1)[0] || "/";
+  const candidates = new Set<string>([normalized, basePath]);
+
+  try {
+    candidates.add(new URL(basePath, window.location.origin).href);
+  } catch {
+    // Ignore malformed paths and fall back to the raw candidates.
+  }
+
+  if (basePath !== "/" && !basePath.endsWith("/")) {
+    const trailingSlash = `${basePath}/`;
+    candidates.add(trailingSlash);
+    try {
+      candidates.add(new URL(trailingSlash, window.location.origin).href);
+    } catch {
+      // Ignore malformed paths and fall back to the raw candidates.
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const match = await caches.match(candidate, { ignoreSearch: true });
+      if (match) return true;
+    } catch {
+      // Ignore cache lookup errors and keep trying the other candidates.
+    }
+  }
+
+  return false;
 }
 
 function LoginPageContent() {
@@ -53,15 +92,24 @@ function LoginPageContent() {
     }
 
     try {
-      const hasTarget = await caches.match(target);
-      if (hasTarget) {
-        router.replace(target);
+      const offlineLanding = Number(user?.customer_id ?? 0) > 0 ? "/customer-portal" : "/";
+      const navigateOffline = (path: string) => {
+        window.location.replace(path);
+      };
+
+      if (await hasCachedRoute(target)) {
+        navigateOffline(target);
         return;
       }
-      const hasRoot = await caches.match("/");
-      router.replace(hasRoot ? "/" : "/offline");
+
+      if (await hasCachedRoute(offlineLanding)) {
+        navigateOffline(offlineLanding);
+        return;
+      }
+
+      navigateOffline(offlineLanding);
     } catch {
-      router.replace("/offline");
+      window.location.replace(Number(user?.customer_id ?? 0) > 0 ? "/customer-portal" : "/");
     }
   };
 
