@@ -17,6 +17,7 @@ class AuthController extends Controller
         $request->validate([
             'email' => ['required', 'email'],
             'password' => ['required', 'string'],
+            'device_name' => ['nullable', 'string', 'max:120'],
         ]);
 
         $user = User::query()
@@ -34,8 +35,9 @@ class AuthController extends Controller
             return response()->json(['message' => 'User is inactive'], 403);
         }
 
-        $user->tokens()->delete();
-        $token = $user->createToken('web')->plainTextToken;
+        $deviceName = trim((string) ($request->input('device_name') ?: 'web'));
+        $user->tokens()->where('name', $deviceName)->delete();
+        $token = $user->createToken($deviceName)->plainTextToken;
 
         $user->last_login_at = now();
         $user->save();
@@ -125,7 +127,7 @@ class AuthController extends Controller
 
     public function logout(Request $request): JsonResponse
     {
-        $request->user()?->tokens()->delete();
+        $request->user()?->currentAccessToken()?->delete();
 
         return response()->json([
             'message' => 'Logged out',

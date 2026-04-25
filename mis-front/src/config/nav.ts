@@ -29,7 +29,6 @@ export const NAV_ITEMS = [
       // { icon: Building2, label: 'Apartm ents',permission: "apartments.view", path: '/apartments' },
       { icon: User, label: 'Users', path: '/users', role: 'Admin' },
       { icon: ShieldCheck, label: 'User Roles', path: '/user-roles', role: 'Admin' },
-      { icon: ShieldCheck, label: 'Permission', path: '/user-roles', role: 'Admin' },
     ],
   },
   {
