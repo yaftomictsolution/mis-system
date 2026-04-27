@@ -1,6 +1,11 @@
 "use client";
 import { NAV_ITEMS } from "@/config/nav";
-import { hasAnyPermission, hasAnyRole } from "@/lib/permissions";
+import {
+  hasAccess,
+  shouldHideForRole,
+  type PermissionRequirement,
+  type RoleRequirement,
+} from "@/lib/permissions";
 import { RootState } from "@/store/store";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
@@ -41,18 +46,16 @@ export default function SideContent(){
   const groups = NAV_ITEMS.map((group) => ({
       ...group,
       items: group.items.filter((item) => {
-      const permission = "permission" in item ? item.permission : undefined;
-      const role = "role" in item ? item.role : undefined;
-      const matchesPermission = hasAnyPermission(perms, permission);
-      const matchesRole = hasAnyRole(roles, role);
-      const hasPermissionRule = typeof permission !== "undefined";
-      const hasRoleRule = typeof role !== "undefined";
-
-      if (hasPermissionRule && hasRoleRule) {
-        return matchesPermission || matchesRole;
+      const permission: PermissionRequirement | undefined =
+        "permission" in item ? (item.permission as PermissionRequirement | undefined) : undefined;
+      const role: RoleRequirement | undefined =
+        "role" in item ? (item.role as RoleRequirement | undefined) : undefined;
+      const hideForRole: RoleRequirement | undefined =
+        "hideForRole" in item ? (item.hideForRole as RoleRequirement | undefined) : undefined;
+      if (shouldHideForRole(roles, hideForRole)) {
+        return false;
       }
-
-      return matchesPermission && matchesRole;
+      return hasAccess(perms, roles, permission, role);
       }),
   })).filter((group) => group.items.length > 0);
 

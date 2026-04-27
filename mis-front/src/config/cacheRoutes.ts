@@ -1,5 +1,5 @@
 import { NAV_ITEMS } from "@/config/nav";
-import { hasAnyPermission, hasAnyRole, type PermissionRequirement, type RoleRequirement } from "@/lib/permissions";
+import { hasAccess, shouldHideForRole, type PermissionRequirement, type RoleRequirement } from "@/lib/permissions";
 
 export type CacheRoute = {
   path: string;
@@ -9,6 +9,7 @@ export type CacheRoute = {
 type CacheRouteDefinition = CacheRoute & {
   permission?: PermissionRequirement;
   role?: RoleRequirement;
+  hideForRole?: RoleRequirement;
 };
 
 function normalizePath(path: string): string {
@@ -29,6 +30,7 @@ for (const group of NAV_ITEMS) {
         label: item.label,
         permission: "permission" in item ? item.permission : undefined,
         role: "role" in item ? item.role : undefined,
+        hideForRole: "hideForRole" in item ? item.hideForRole : undefined,
       });
     }
   }
@@ -56,7 +58,8 @@ const ALL_CACHE_ROUTE_DEFINITIONS = Array.from(routeMap.values());
 
 export function getCacheRoutesForPermissions(permissions: string[] = [], roles: string[] = []): CacheRoute[] {
   return ALL_CACHE_ROUTE_DEFINITIONS
-    .filter((route) => hasAnyPermission(permissions, route.permission) && hasAnyRole(roles, route.role))
+    .filter((route) => !shouldHideForRole(roles, route.hideForRole))
+    .filter((route) => hasAccess(permissions, roles, route.permission, route.role))
     .map(({ path, label }) => ({ path, label }));
 }
 

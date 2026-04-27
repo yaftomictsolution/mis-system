@@ -33,6 +33,38 @@ export function hasAnyRole(
   return required.some((role) => normalizedRoles.includes(role));
 }
 
+export function hasAccess(
+  permissions: string[] = [],
+  roles: string[] = [],
+  permission?: PermissionRequirement | null,
+  role?: RoleRequirement | null,
+): boolean {
+  if (isAdminRole(roles)) {
+    return true;
+  }
+
+  if (permission != null) {
+    return hasAnyPermission(permissions, permission);
+  }
+
+  if (role != null) {
+    return hasAnyRole(roles, role);
+  }
+
+  return true;
+}
+
 export function isAdminRole(roles: string[] = []): boolean {
   return hasAnyRole(roles, "Admin");
+}
+
+export function shouldHideForRole(
+  roles: string[] = [],
+  requirement?: RoleRequirement | null,
+): boolean {
+  if (isAdminRole(roles)) {
+    return false;
+  }
+
+  return hasAnyRole(roles, requirement);
 }

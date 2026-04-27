@@ -5,7 +5,7 @@ import { useMemo } from "react";
 import { useSelector } from "react-redux";
 
 import { REPORT_DEFINITIONS } from "@/config/report-nav";
-import { hasAnyPermission, hasAnyRole } from "@/lib/permissions";
+import { hasAccess, shouldHideForRole } from "@/lib/permissions";
 import { PageHeader } from "@/components/ui/PageHeader";
 import type { RootState } from "@/store/store";
 
@@ -16,13 +16,8 @@ export default function ReportsOverviewPage() {
   const reports = useMemo(
     () =>
       REPORT_DEFINITIONS.filter((definition) => {
-        const allowByPermission = hasAnyPermission(permissions, definition.permission);
-        const allowByRole = hasAnyRole(roles, definition.role);
-        const hasPermissionRule = typeof definition.permission !== "undefined";
-        const hasRoleRule = typeof definition.role !== "undefined";
-
-        if (hasPermissionRule && hasRoleRule) return allowByPermission || allowByRole;
-        return allowByPermission && allowByRole;
+        if (shouldHideForRole(roles, definition.hideForRole)) return false;
+        return hasAccess(permissions, roles, definition.permission, definition.role);
       }),
     [permissions, roles]
   );
