@@ -81,7 +81,7 @@ function LoginPageContent() {
   const resolveDefaultRoute = (user: RootState["auth"]["user"] | null): string => {
     if (redirectTarget) return redirectTarget;
     if (Number(user?.customer_id ?? 0) > 0) return "/customer-portal";
-    return "/";
+    return "/?appVersion=admin-sidebar-hardening-v6";
   };
 
   const redirectAfterLogin = async (user: RootState["auth"]["user"] | null) => {
@@ -92,7 +92,7 @@ function LoginPageContent() {
     }
 
     try {
-      const offlineLanding = Number(user?.customer_id ?? 0) > 0 ? "/customer-portal" : "/";
+      const offlineLanding = Number(user?.customer_id ?? 0) > 0 ? "/customer-portal" : "/?appVersion=admin-sidebar-hardening-v6";
       const navigateOffline = (path: string) => {
         window.location.replace(path);
       };
@@ -109,7 +109,7 @@ function LoginPageContent() {
 
       navigateOffline(offlineLanding);
     } catch {
-      window.location.replace(Number(user?.customer_id ?? 0) > 0 ? "/customer-portal" : "/");
+      window.location.replace(Number(user?.customer_id ?? 0) > 0 ? "/customer-portal" : "/?appVersion=admin-sidebar-hardening-v6");
     }
   };
 
