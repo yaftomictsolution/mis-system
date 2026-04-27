@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useDispatch, useSelector } from "react-redux";
 import { clearPersistedAuthSession, isOfflineSessionToken } from "@/lib/api";
@@ -12,6 +12,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const dispatch = useDispatch<AppDispatch>();
   const { token, user, hydrated, status } = useSelector((s: RootState) => s.auth);
+  const refreshedUserRef = useRef(false);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -34,6 +35,19 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
     if (Number(user?.customer_id ?? 0) > 0) {
       router.replace("/customer-portal");
+      return;
+    }
+
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.onLine &&
+      token &&
+      !isOfflineSessionToken(token) &&
+      status !== "loading" &&
+      !refreshedUserRef.current
+    ) {
+      refreshedUserRef.current = true;
+      void dispatch(fetchMe());
       return;
     }
 

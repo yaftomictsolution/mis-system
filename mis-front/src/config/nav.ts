@@ -27,11 +27,8 @@ export const NAV_ITEMS = [
     title: 'User & Roles',
     items: [
       // { icon: Building2, label: 'Apartm ents',permission: "apartments.view", path: '/apartments' },
-      { icon: User, label: 'Users', path: '/users', role: 'Admin' },
-      { icon: ShieldCheck, label: 'User Roles', path: '/user-roles', role: 'Admin' },
-      { icon: ShieldCheck, label: 'Permission123123', path: '/user-roles', role: 'Admin' },
-      { icon: ShieldCheck, label: 'Permission123123', path: '/user-roles', role: 'Admin' },
-
+      { icon: User, label: 'Users', path: '/users', permission: ["users.view", "users.create", "users.update"] },
+      { icon: ShieldCheck, label: 'User Roles', path: '/user-roles', permission: ["roles.view", "roles.create", "roles.update"] },
     ],
   },
   {
@@ -56,8 +53,8 @@ export const NAV_ITEMS = [
       { icon: UserCheck, label: 'Customers',permission: "customers.view", path: '/customers' },
       { icon: BadgeDollarSign, label: 'Sales', permission: ["sales.create", "sales.approve"], path: '/apartment-sales' },
       { icon: CalendarCheck, label: 'Installments',permission: ["installments.pay", "sales.create", "sales.approve"], path: '/installments' },
-      { icon: MessageSquareText, label: 'CRM', permission: "customers.view", path: '/crm' },
-      { icon: FolderOpen, label: 'Documents', path: '/documents' },
+      { icon: MessageSquareText, label: 'CRM', permission: "customers.view", hideForRole: "Apartment Manager", path: '/crm' },
+      { icon: FolderOpen, label: 'Documents', hideForRole: "Apartment Manager", path: '/documents' },
     ],
   },
   {
@@ -76,12 +73,13 @@ export const NAV_ITEMS = [
   {
     title: 'Rental Apartment',
     items: [
-      { icon: KeyRound, label: 'Rentals', permission: "apartments.view", path: '/rentals' },
+      { icon: KeyRound, label: 'Rentals', permission: "apartments.view", hideForRole: "Apartment Manager", path: '/rentals' },
       {
         icon: BadgeDollarSign,
         label: 'Rental Payments',
         permission: ["installments.pay", "sales.approve", "accounts.view", "apartments.view"],
         role: ["Admin", "Accountant", "Finance", "FinanceManager", "Finance Manager"],
+        hideForRole: "Apartment Manager",
         path: '/rental-payments'
       },
     ],
@@ -96,6 +94,7 @@ export const NAV_ITEMS = [
         path: definition.path,
         permission: definition.permission,
         role: definition.role,
+        hideForRole: definition.hideForRole,
       })),
     ],
   },
