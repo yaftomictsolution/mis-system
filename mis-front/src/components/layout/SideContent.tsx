@@ -9,11 +9,13 @@ import {
 import { RootState } from "@/store/store";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { setSidebarOpen } from "@/store/uiSlice";
+import { fetchMe } from "@/store/auth/authSlice";
+import type { AppDispatch } from "@/store/store";
 
 const DROPDOWN_GROUP_TITLE = "User & Rolses";
 
@@ -41,7 +43,12 @@ export default function SideContent(){
   const roles: string[] = useSelector((s: RootState) => s.auth.user?.roles || []);
   const { sidebarOpen, isMobile } = useSelector((state: RootState) => state.ui);
   const [isUserRolesOpen, setIsUserRolesOpen] = useState(false);
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.onLine) return;
+    void dispatch(fetchMe());
+  }, [dispatch]);
 
   const groups = NAV_ITEMS.map((group) => ({
       ...group,
@@ -52,7 +59,7 @@ export default function SideContent(){
         "role" in item ? (item.role as RoleRequirement | undefined) : undefined;
       const hideForRole: RoleRequirement | undefined =
         "hideForRole" in item ? (item.hideForRole as RoleRequirement | undefined) : undefined;
-      if (shouldHideForRole(roles, hideForRole)) {
+      if (shouldHideForRole(roles, hideForRole, perms)) {
         return false;
       }
       return hasAccess(perms, roles, permission, role);

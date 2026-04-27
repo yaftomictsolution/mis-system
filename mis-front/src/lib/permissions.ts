@@ -39,7 +39,7 @@ export function hasAccess(
   permission?: PermissionRequirement | null,
   role?: RoleRequirement | null,
 ): boolean {
-  if (isAdminRole(roles)) {
+  if (hasAdminAccess(permissions, roles)) {
     return true;
   }
 
@@ -58,11 +58,28 @@ export function isAdminRole(roles: string[] = []): boolean {
   return hasAnyRole(roles, "Admin");
 }
 
+export function hasAdminAccess(permissions: string[] = [], roles: string[] = []): boolean {
+  if (isAdminRole(roles)) return true;
+
+  const adminSignals = [
+    "users.view",
+    "roles.view",
+    "reports.view",
+    "apartments.view",
+    "customers.view",
+    "employees.view",
+    "accounts.view",
+  ];
+
+  return adminSignals.every((permission) => permissions.includes(permission));
+}
+
 export function shouldHideForRole(
   roles: string[] = [],
   requirement?: RoleRequirement | null,
+  permissions: string[] = [],
 ): boolean {
-  if (isAdminRole(roles)) {
+  if (hasAdminAccess(permissions, roles)) {
     return false;
   }
 

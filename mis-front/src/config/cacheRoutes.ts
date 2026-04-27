@@ -58,7 +58,7 @@ const ALL_CACHE_ROUTE_DEFINITIONS = Array.from(routeMap.values());
 
 export function getCacheRoutesForPermissions(permissions: string[] = [], roles: string[] = []): CacheRoute[] {
   return ALL_CACHE_ROUTE_DEFINITIONS
-    .filter((route) => !shouldHideForRole(roles, route.hideForRole))
+    .filter((route) => !shouldHideForRole(roles, route.hideForRole, permissions))
     .filter((route) => hasAccess(permissions, roles, route.permission, route.role))
     .map(({ path, label }) => ({ path, label }));
 }

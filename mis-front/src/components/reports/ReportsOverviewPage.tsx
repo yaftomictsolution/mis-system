@@ -16,7 +16,7 @@ export default function ReportsOverviewPage() {
   const reports = useMemo(
     () =>
       REPORT_DEFINITIONS.filter((definition) => {
-        if (shouldHideForRole(roles, definition.hideForRole)) return false;
+        if (shouldHideForRole(roles, definition.hideForRole, permissions)) return false;
         return hasAccess(permissions, roles, definition.permission, definition.role);
       }),
     [permissions, roles]
