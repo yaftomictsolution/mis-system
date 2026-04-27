@@ -4,7 +4,7 @@ import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify";
 import { getOfflineModuleRetentionDays } from "@/modules/offline-policy/offline-policy.repo";
 import { enqueueSync } from "@/sync/queue";
 
-const RETENTION_DAYS = 180;
+const RETENTION_DAYS = 3650;
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 100;
@@ -234,14 +234,14 @@ export async function userRetentionCleanupIfDue(): Promise<number> {
 }
 
 
-export async function userPullToLocal(): Promise<{ pulled: number }> {
+export async function userPullToLocal(options: { full?: boolean } = {}): Promise<{ pulled: number }> {
   if (!isOnline()) return { pulled: 0 };
 
   await cleanupBrokenDuplicateUsers();
 
   const cachedSince = lsGet(CURSOR_KEY);
   const localCount = await db.users.count();
-  const since = localCount > 0 ? cachedSince : null;
+  const since = options.full ? null : localCount > 0 ? cachedSince : null;
   if (localCount === 0 && cachedSince) {
     lsRemove(CURSOR_KEY);
   }

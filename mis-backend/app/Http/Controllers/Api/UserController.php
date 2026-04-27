@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Requests\UserRequest;
+use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Support\PermanentDeleteDependencyInspector;
 use Illuminate\Http\JsonResponse;

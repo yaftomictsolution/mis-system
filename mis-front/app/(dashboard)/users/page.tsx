@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
-import RequireAdmin from "@/components/auth/RequireAdmin";
+import RequirePermission from "@/components/auth/RequirePermission";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { FormField } from "@/components/ui/FormField";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -20,7 +20,7 @@ import {
   userUpdate,
 } from "@/modules/users/users.repo";
 
-const LOCAL_LIST_PAGE_SIZE = 200;
+const LOCAL_LIST_PAGE_SIZE = 1000;
 const TABLE_PAGE_SIZE = 10;
 
 type UserViewRow = UserRow & { role?: string };
@@ -77,7 +77,7 @@ export default function UsersPage() {
     setLoading(true);
     try {
       await loadLocal();
-      await userPullToLocal().catch(() => undefined);
+      await userPullToLocal({ full: true }).catch(() => undefined);
       await loadLocal();
     } finally {
       setLoading(false);
@@ -255,7 +255,7 @@ export default function UsersPage() {
   );
 
   return (
-    <RequireAdmin>
+    <RequirePermission permission={["users.view", "users.create", "users.update"]}>
       <div className="mx-auto max-w-[1600px] p-6 lg:p-8">
         <PageHeader title="Users" subtitle="Manage users and profiles">
           <button
@@ -354,6 +354,6 @@ export default function UsersPage() {
           message={`Are you sure you want to delete user ${current.name ?? ""}? This action cannot be undone.`}
         />
       </div>
-    </RequireAdmin>
+    </RequirePermission>
   );
 }
