@@ -1,5 +1,5 @@
 const CACHE_SCHEMA_KEY = "mis_cache_schema_version";
-const CACHE_SCHEMA_VERSION = "2026-03-30-v4";
+const CACHE_SCHEMA_VERSION = "2026-04-27-v5";
 
 const CURSOR_KEYS = [
   "customers_sync_cursor",
@@ -8,6 +8,7 @@ const CURSOR_KEYS = [
   "installments_sync_cursor",
   "roles_sync_cursor",
   "user_sync_cursor",
+  "user_sync_cursor_v2",
 ];
 
 const CLEANUP_KEYS = [
